@@ -220,4 +220,3 @@ class VicOutreachActionReceiver : BroadcastReceiver() {
         }
     }
 }
-

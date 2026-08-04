@@ -32,4 +32,3 @@ class SseOutreachTransport(private val context: Context) : OutreachEventTranspor
         subscription = null
     }
 }
-
