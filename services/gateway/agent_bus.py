@@ -1,7 +1,9 @@
-"""Optional agent-to-agent event transport for VoiceOS.
+"""Experimental, deferred agent-to-agent event transport for VoiceOS.
 
 Buzz is deliberately not used for ordinary private voice transcripts. It is an
 explicit, asynchronous collaboration surface for agent messages and evidence.
+Nothing in the production gateway instantiates this adapter yet; keep it behind
+the multi-agent rollout gate described in ``docs/hermes-buzz-integration.md``.
 """
 
 from __future__ import annotations

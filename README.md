@@ -43,9 +43,10 @@ lint/build/render tests; and Android unit/lint/build checks. Public API changes
 must update the OpenAPI document and ownership ledger in the same commit.
 
 Hermes can now be selected as the core agent runtime through the authenticated
-loopback adapter, while Buzz is available as an optional JSON-based agent event
-transport. See `docs/hermes-buzz-integration.md` for the security boundary,
-performance rationale, pinned upstream revisions, and rollout gates.
+loopback adapter. The Buzz JSON adapter is experimental and deliberately not
+wired into the production gateway until multiple bounded agents are introduced.
+See `docs/hermes-buzz-integration.md` for the security boundary, performance
+rationale, pinned upstream revisions, and rollout gates.
 
 ## Run the mock gateway
 
