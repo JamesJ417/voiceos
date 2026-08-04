@@ -868,6 +868,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun startFromWidgetIfRequested(intent: Intent?) {
+        if (intent?.action == ACTION_WIDGET_OPEN_TASK) {
+            intent.action = null
+            currentTaskFilter = TaskFilter.ALL
+            showPage(AppPage.TASKS)
+            loadTasks()
+            return
+        }
         if (BuildConfig.DEBUG && intent?.action == ACTION_VIC_TEST_CHECKIN) {
             intent.action = null
             sendTestVicCheckIn()
@@ -1560,7 +1567,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 actions.addView(secondaryButton("START") { updateTaskStatus(task, "active") }, weightedButton())
             }
             actions.addView(
-                actionButton("DONE").apply { setOnClickListener { updateTaskStatus(task, "completed") } },
+                actionButton("DONE").apply { setOnClickListener { confirmTaskCompletion(task) } },
                 weightedButton().apply { if (task.status != "active") marginStart = dp(7) },
             )
             taskPanel.addView(actions, fullWidthWrap().apply { topMargin = dp(11) })
@@ -1596,6 +1603,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 )
             }
         }
+    }
+
+    private fun confirmTaskCompletion(task: VoiceTask) {
+        AlertDialog.Builder(this)
+            .setTitle("Complete this task?")
+            .setMessage("${task.title}\n\nThis removes it from the open task list. You can cancel and keep working on it.")
+            .setNegativeButton("Keep open", null)
+            .setPositiveButton("Mark complete") { _, _ -> updateTaskStatus(task, "completed") }
+            .show()
     }
 
     private fun showTaskCreationDialog() {
@@ -2026,11 +2042,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     companion object {
         const val ACTION_WIDGET_TALK = "dev.voiceos.client.action.WIDGET_TALK"
         const val ACTION_WIDGET_ADD_TASK = "dev.voiceos.client.action.WIDGET_ADD_TASK"
+        const val ACTION_WIDGET_OPEN_TASK = "dev.voiceos.client.action.WIDGET_OPEN_TASK"
         const val ACTION_DAILY_CHECKIN = "dev.voiceos.client.action.DAILY_CHECKIN"
         const val ACTION_VIC_TALK = "dev.voiceos.client.action.VIC_TALK"
         const val ACTION_VIC_SHOW_PROGRESS = "dev.voiceos.client.action.VIC_SHOW_PROGRESS"
         const val ACTION_VIC_TEST_CHECKIN = "dev.voiceos.client.action.VIC_TEST_CHECKIN"
         const val EXTRA_AUTO_LISTEN = "dev.voiceos.client.extra.AUTO_LISTEN"
+        const val EXTRA_TASK_ID = "dev.voiceos.client.extra.TASK_ID"
         private const val REQUEST_MICROPHONE = 42
         private const val REQUEST_DOCUMENT = 43
         private const val REQUEST_NOTIFICATIONS = 44

@@ -6,7 +6,6 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.view.View
 import android.widget.RemoteViews
 
@@ -31,7 +30,6 @@ class VoiceWidgetProvider : AppWidgetProvider() {
         super.onReceive(context, intent)
         when (intent.action) {
             ACTION_REFRESH_TASKS -> refreshTasks(context)
-            ACTION_COMPLETE_TASK -> completeTask(context, intent.data?.lastPathSegment)
         }
     }
 
@@ -52,26 +50,6 @@ class VoiceWidgetProvider : AppWidgetProvider() {
                 result.onSuccess { TaskWidgetStore.save(context, it) }
                 updateAll(context)
                 onComplete?.invoke(result)
-            }
-        }
-
-        private fun completeTask(context: Context, taskId: String?) {
-            if (taskId.isNullOrBlank()) return
-            val original = TaskWidgetStore.load(context)
-            TaskWidgetStore.save(context, original.filterNot { it.id == taskId })
-            updateAll(context)
-            GatewayClient.updateTaskStatus(
-                GatewaySettings.baseUrl(context),
-                taskId,
-                "completed",
-                DeviceCredentials.token(context),
-            ) { result ->
-                if (result.isFailure) {
-                    TaskWidgetStore.save(context, original)
-                    updateAll(context)
-                } else {
-                    refreshTasks(context)
-                }
             }
         }
 
@@ -141,7 +119,7 @@ class VoiceWidgetProvider : AppWidgetProvider() {
                             else -> "${task.completedSteps}/${task.totalSteps} steps • ${task.openBlockers} blockers"
                         },
                     )
-                    views.setOnClickPendingIntent(rows[index], completeIntent(context, task.id))
+                    views.setOnClickPendingIntent(rows[index], openTaskIntent(context, task.id))
                 }
             }
             views.setViewVisibility(R.id.widget_empty_tasks, if (tasks.isEmpty()) View.VISIBLE else View.GONE)
@@ -172,12 +150,13 @@ class VoiceWidgetProvider : AppWidgetProvider() {
             )
         }
 
-        private fun completeIntent(context: Context, taskId: String): PendingIntent {
-            val intent = Intent(context, VoiceWidgetProvider::class.java).apply {
-                action = ACTION_COMPLETE_TASK
-                data = Uri.parse("voiceos://task/$taskId")
+        private fun openTaskIntent(context: Context, taskId: String): PendingIntent {
+            val intent = Intent(context, MainActivity::class.java).apply {
+                action = MainActivity.ACTION_WIDGET_OPEN_TASK
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra(MainActivity.EXTRA_TASK_ID, taskId)
             }
-            return PendingIntent.getBroadcast(
+            return PendingIntent.getActivity(
                 context,
                 taskId.hashCode(),
                 intent,
@@ -188,6 +167,5 @@ class VoiceWidgetProvider : AppWidgetProvider() {
         private const val PREFERENCES = "voiceos_widget"
         private const val STATUS = "status"
         private const val ACTION_REFRESH_TASKS = "dev.voiceos.client.action.REFRESH_TASKS"
-        private const val ACTION_COMPLETE_TASK = "dev.voiceos.client.action.COMPLETE_TASK"
     }
 }
