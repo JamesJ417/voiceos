@@ -868,6 +868,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun startFromWidgetIfRequested(intent: Intent?) {
+        if (BuildConfig.DEBUG && intent?.action == ACTION_VIC_TEST_CHECKIN) {
+            intent.action = null
+            sendTestVicCheckIn()
+            return
+        }
         if (intent?.action == ACTION_VIC_TALK) {
             intent.action = null
             showPage(AppPage.COMMAND)
@@ -2024,6 +2029,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         const val ACTION_DAILY_CHECKIN = "dev.voiceos.client.action.DAILY_CHECKIN"
         const val ACTION_VIC_TALK = "dev.voiceos.client.action.VIC_TALK"
         const val ACTION_VIC_SHOW_PROGRESS = "dev.voiceos.client.action.VIC_SHOW_PROGRESS"
+        const val ACTION_VIC_TEST_CHECKIN = "dev.voiceos.client.action.VIC_TEST_CHECKIN"
         const val EXTRA_AUTO_LISTEN = "dev.voiceos.client.extra.AUTO_LISTEN"
         private const val REQUEST_MICROPHONE = 42
         private const val REQUEST_DOCUMENT = 43
