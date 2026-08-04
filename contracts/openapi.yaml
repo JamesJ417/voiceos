@@ -343,6 +343,77 @@ paths:
                     type: array
                     items: { type: object }
         "401": { description: Device authentication required }
+  /v1/outreach:
+    get:
+      operationId: listVicOutreach
+      summary: List durable VIC check-ins and their delivery state
+      parameters:
+        - in: query
+          name: include_closed
+          schema: { type: boolean, default: false }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Owner-scoped outreach outbox
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [outreach]
+                properties:
+                  outreach: { type: array, items: { $ref: "#/components/schemas/VicOutreach" } }
+        "401": { description: Device authentication required }
+    post:
+      operationId: createVicOutreach
+      summary: Queue an audited proactive VIC check-in
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateVicOutreach" }
+      responses:
+        "201":
+          description: Outreach queued and published to the shared client stream
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [outreach]
+                properties:
+                  outreach: { $ref: "#/components/schemas/VicOutreach" }
+        "401": { description: Device authentication required }
+  /v1/outreach/policy:
+    get:
+      operationId: getVicOutreachPolicy
+      summary: Get quiet hours, interruption limits, and announcement preferences
+      responses:
+        "200": { description: Current outreach policy }
+        "401": { description: Device authentication required }
+  /v1/outreach/{outreach_id}/actions:
+    post:
+      operationId: actOnVicOutreach
+      summary: Record delivery, response, snooze, or dismissal
+      parameters:
+        - in: path
+          name: outreach_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [delivered, talk_now, show_progress, hear_update, later, dismiss] }
+                snooze_minutes: { type: integer, minimum: 5, maximum: 1440 }
+      responses:
+        "200": { description: Updated outreach state }
+        "401": { description: Device authentication required }
+        "404": { description: Outreach was not found }
   /v1/plans/daily:
     get:
       operationId: getDailyActionPlan
@@ -794,7 +865,7 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, task.changed, task.initiative.updated, task.progress.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed]
+          enum: [conversation.turn, task.changed, task.initiative.updated, task.progress.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
         payload: { type: object }
         created_at: { type: string, format: date-time }
     Task:
@@ -870,6 +941,41 @@ components:
         description: { type: string }
         uri: { type: string }
         evidence: { type: object }
+    VicOutreach:
+      type: object
+      required: [id, owner_id, kind, priority, title, body, reason, status, actions, scheduled_for, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        kind: { type: string, enum: [status_update, check_in, question, blocker, review, digest] }
+        priority: { type: string, enum: [quiet, check_in, needs_you] }
+        title: { type: string }
+        body: { type: string }
+        reason: { type: string }
+        status: { type: string, enum: [queued, delivered, responded, snoozed, dismissed, expired] }
+        task_id: { type: [string, "null"], format: uuid }
+        conversation_id: { type: [string, "null"] }
+        dedupe_key: { type: [string, "null"] }
+        actions: { type: array, items: { type: string, enum: [talk_now, show_progress, hear_update, later, dismiss] } }
+        scheduled_for: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        delivered_at: { type: [string, "null"], format: date-time }
+        responded_at: { type: [string, "null"], format: date-time }
+        snoozed_until: { type: [string, "null"], format: date-time }
+    CreateVicOutreach:
+      type: object
+      required: [kind, priority, title, body, reason]
+      properties:
+        kind: { type: string, enum: [status_update, check_in, question, blocker, review, digest] }
+        priority: { type: string, enum: [quiet, check_in, needs_you] }
+        title: { type: string, minLength: 1, maxLength: 200 }
+        body: { type: string, minLength: 1, maxLength: 2000 }
+        reason: { type: string, minLength: 1, maxLength: 2000 }
+        task_id: { type: [string, "null"], format: uuid }
+        conversation_id: { type: [string, "null"] }
+        dedupe_key: { type: [string, "null"] }
+        actions: { type: array, items: { type: string } }
+        scheduled_for: { type: [string, "null"], format: date-time }
     CanonicalRequest:
       type: object
       required: [intent, confidence, source]

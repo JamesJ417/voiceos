@@ -212,6 +212,42 @@ pub struct TaskDetail {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OutreachRecord {
+    pub id: String,
+    pub owner_id: String,
+    pub kind: String,
+    pub priority: String,
+    pub title: String,
+    pub body: String,
+    pub reason: String,
+    pub status: String,
+    pub task_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub dedupe_key: Option<String>,
+    pub actions: Vec<String>,
+    pub scheduled_for: String,
+    pub created_at: String,
+    pub delivered_at: Option<String>,
+    pub responded_at: Option<String>,
+    pub snoozed_until: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutreachPolicy {
+    pub owner_id: String,
+    pub enabled: bool,
+    pub quiet_hours_start: String,
+    pub quiet_hours_end: String,
+    pub timezone: String,
+    pub max_checkins_per_day: u32,
+    pub cooldown_minutes: u32,
+    pub driving_mode: bool,
+    pub spoken_headphones_only: bool,
+    pub daily_digest_enabled: bool,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JobRecord {
     pub id: String,
     pub owner_id: String,

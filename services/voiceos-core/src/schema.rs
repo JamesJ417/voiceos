@@ -186,6 +186,46 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS task_artifacts_task_idx ON task_artifacts(owner_id, task_id, created_at);
+        CREATE TABLE IF NOT EXISTS outreach_events (
+            outreach_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('status_update', 'check_in', 'question', 'blocker', 'review', 'digest')),
+            priority TEXT NOT NULL CHECK(priority IN ('quiet', 'check_in', 'needs_you')),
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('queued', 'delivered', 'responded', 'snoozed', 'dismissed', 'expired')),
+            task_id TEXT,
+            conversation_id TEXT,
+            dedupe_key TEXT,
+            actions_json TEXT NOT NULL,
+            scheduled_for TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            delivered_at TEXT,
+            responded_at TEXT,
+            snoozed_until TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+        );
+        CREATE INDEX IF NOT EXISTS outreach_owner_status_idx
+            ON outreach_events(owner_id, status, scheduled_for, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS outreach_active_dedupe_idx
+            ON outreach_events(owner_id, dedupe_key)
+            WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'delivered', 'snoozed');
+        CREATE TABLE IF NOT EXISTS outreach_policies (
+            owner_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            quiet_hours_start TEXT NOT NULL DEFAULT '22:00',
+            quiet_hours_end TEXT NOT NULL DEFAULT '08:00',
+            timezone TEXT NOT NULL DEFAULT 'America/New_York',
+            max_checkins_per_day INTEGER NOT NULL DEFAULT 6,
+            cooldown_minutes INTEGER NOT NULL DEFAULT 30,
+            driving_mode INTEGER NOT NULL DEFAULT 0,
+            spoken_headphones_only INTEGER NOT NULL DEFAULT 1,
+            daily_digest_enabled INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
+        );
         CREATE TABLE IF NOT EXISTS jobs (
             job_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,

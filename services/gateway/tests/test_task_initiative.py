@@ -58,7 +58,11 @@ class TaskInitiativeWorkerTest(unittest.TestCase):
 
         def post(url: str, payload: dict[str, object]) -> dict[str, object]:
             calls.append((url, payload))
-            return {"claimed": True} if url.endswith("/claim") else {"recorded": True}
+            if url.endswith("/claim"):
+                return {"claimed": True}
+            if url.endswith("/v1/outreach"):
+                return {"outreach": {"id": "outreach-1", **payload}}
+            return {"recorded": True}
 
         task = {
             "id": "task-1",
@@ -71,11 +75,13 @@ class TaskInitiativeWorkerTest(unittest.TestCase):
                 gateway, task, initiative, "pixel"  # type: ignore[arg-type]
             )
 
-        self.assertEqual(2, len(calls))
+        self.assertEqual(3, len(calls))
         self.assertIn("untrusted user data", gateway.coordinator.prompt)
         self.assertEqual("completed", calls[1][1]["status"])
         self.assertEqual(1, len(gateway.audit_store.turns))
         self.assertEqual("task.initiative.updated", gateway.audit_store.events[0][0])
+        self.assertEqual("vic.outreach.created", gateway.audit_store.events[1][0])
+        self.assertEqual("check_in", calls[2][1]["priority"])
 
     def test_does_nothing_when_another_worker_already_claimed_job(self) -> None:
         gateway = _Gateway()

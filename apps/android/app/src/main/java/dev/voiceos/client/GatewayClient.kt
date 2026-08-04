@@ -89,6 +89,17 @@ data class VoiceTaskArtifact(val kind: String, val uri: String, val description:
 
 data class ClientEvent(val id: Long, val type: String, val payload: JSONObject)
 
+data class VicOutreach(
+    val id: String,
+    val kind: String,
+    val priority: String,
+    val title: String,
+    val body: String,
+    val reason: String,
+    val status: String,
+    val taskId: String?,
+)
+
 class EventSubscription internal constructor(
     private val active: AtomicBoolean,
     private val connection: HttpURLConnection,
@@ -100,6 +111,25 @@ class EventSubscription internal constructor(
 }
 
 object GatewayClient {
+    fun createTestOutreach(
+        baseUrl: String,
+        deviceToken: String?,
+        callback: (Result<VicOutreach>) -> Unit,
+    ) {
+        Thread({ callback(runCatching { createTestOutreachBlocking(baseUrl, deviceToken) }) }, "vic-test-outreach").start()
+    }
+
+    fun actOnOutreach(
+        baseUrl: String,
+        deviceToken: String?,
+        outreachId: String,
+        action: String,
+        snoozeMinutes: Int? = null,
+        callback: (Result<VicOutreach>) -> Unit = {},
+    ) {
+        Thread({ callback(runCatching { actOnOutreachBlocking(baseUrl, deviceToken, outreachId, action, snoozeMinutes) }) }, "vic-outreach-action").start()
+    }
+
     fun streamEvents(
         baseUrl: String,
         deviceToken: String,
@@ -657,6 +687,56 @@ object GatewayClient {
             evidenceCount = evidence?.length() ?: 0,
         )
     }
+
+    private fun createTestOutreachBlocking(baseUrl: String, deviceToken: String?): VicOutreach {
+        val request = JSONObject()
+            .put("kind", "status_update")
+            .put("priority", "check_in")
+            .put("title", "VIC wants to talk")
+            .put("body", "The proactive check-in system is connected. Tap Talk now to begin a conversation with me.")
+            .put("reason", "Working-model delivery test requested from the VoiceOS app")
+            .put("dedupe_key", "android-working-model-${System.currentTimeMillis()}")
+            .put("actions", org.json.JSONArray(listOf("talk_now", "show_progress", "later", "dismiss")))
+            .toString().toByteArray(Charsets.UTF_8)
+        val connection = URL("$baseUrl/v1/outreach").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, request)
+            return parseOutreach(responseJson(connection).getJSONObject("outreach"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun actOnOutreachBlocking(
+        baseUrl: String,
+        deviceToken: String?,
+        outreachId: String,
+        action: String,
+        snoozeMinutes: Int?,
+    ): VicOutreach {
+        val encodedId = URLEncoder.encode(outreachId, Charsets.UTF_8.name())
+        val payload = JSONObject().put("action", action).apply {
+            if (snoozeMinutes != null) put("snooze_minutes", snoozeMinutes)
+        }.toString().toByteArray(Charsets.UTF_8)
+        val connection = URL("$baseUrl/v1/outreach/$encodedId/actions").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, payload)
+            return parseOutreach(responseJson(connection).getJSONObject("outreach"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    fun parseOutreach(payload: JSONObject): VicOutreach = VicOutreach(
+        id = payload.getString("id"),
+        kind = payload.optString("kind", "check_in"),
+        priority = payload.optString("priority", "check_in"),
+        title = payload.optString("title", "VIC wants to talk"),
+        body = payload.optString("body"),
+        reason = payload.optString("reason"),
+        status = payload.optString("status", "queued"),
+        taskId = payload.optString("task_id").takeIf { it.isNotBlank() },
+    )
 
     private fun configure(
         connection: HttpURLConnection,

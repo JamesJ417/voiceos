@@ -231,6 +231,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+        } else {
+            startVicOutreachConnection()
         }
 
         startFromWidgetIfRequested(intent)
@@ -371,6 +373,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_NOTIFICATIONS) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startVicOutreachConnection()
+            }
+            return
+        }
         if (requestCode != REQUEST_MICROPHONE) return
         if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             if (pendingPermissionCorrection) startRecognition(correction = true)
@@ -748,6 +756,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 }
                 addView(systemDetailView, fullWidthWrap().apply { topMargin = dp(14) })
                 addView(secondaryButton("REFRESH SYSTEM STATUS") { checkGatewayHealth(justEnrolled = false) }, fullWidthWrap().apply { topMargin = dp(14) })
+                addView(secondaryButton("SEND TEST VIC CHECK-IN") { sendTestVicCheckIn() }, fullWidthWrap().apply { topMargin = dp(12) })
             }, fullWidthWrap().apply { topMargin = dp(14) })
             addView(panel(17).apply {
                 addView(kicker("Reviewed self-improvement"), fullWidthWrap())
@@ -859,6 +868,21 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun startFromWidgetIfRequested(intent: Intent?) {
+        if (intent?.action == ACTION_VIC_TALK) {
+            intent.action = null
+            showPage(AppPage.COMMAND)
+            intent.getStringExtra(VicOutreachNotifications.EXTRA_BODY)?.takeIf { it.isNotBlank() }?.let {
+                transcriptView.text = "VIC reached out:\n\n$it"
+            }
+            ensurePermissionAndStart(correction = false)
+            return
+        }
+        if (intent?.action == ACTION_VIC_SHOW_PROGRESS) {
+            intent.action = null
+            showPage(AppPage.TASKS)
+            loadTasks()
+            return
+        }
         if (intent?.action == ACTION_DAILY_CHECKIN) {
             intent.action = null
             submitText("Start my daily check-in")
@@ -1176,6 +1200,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             credential.deviceToken,
                         )
                         startSharedEventStream()
+                        startVicOutreachConnection()
                         checkGatewayHealth(justEnrolled = true)
                     },
                     onFailure = { error ->
@@ -1186,6 +1211,36 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             speakError = true,
                         )
                     },
+                )
+            }
+        }
+    }
+
+    private fun startVicOutreachConnection() {
+        if (DeviceCredentials.token(this).isNullOrBlank()) return
+        try {
+            startForegroundService(
+                Intent(this, VicOutreachService::class.java)
+                    .setAction(VicOutreachService.ACTION_START)
+            )
+        } catch (error: RuntimeException) {
+            Toast.makeText(this, "VIC check-ins could not connect: ${error.message.orEmpty()}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun sendTestVicCheckIn() {
+        val token = DeviceCredentials.token(this)
+        if (token.isNullOrBlank()) {
+            Toast.makeText(this, "Enroll this phone before testing VIC check-ins.", Toast.LENGTH_LONG).show()
+            return
+        }
+        startVicOutreachConnection()
+        Toast.makeText(this, "Asking the rig to send a VIC check-in…", Toast.LENGTH_SHORT).show()
+        GatewayClient.createTestOutreach(GatewaySettings.baseUrl(this), token) { result ->
+            runOnUiThread {
+                result.fold(
+                    onSuccess = { renderState(VoiceState.READY, "VIC check-in sent") },
+                    onFailure = { error -> showRecoverableError("VIC check-in failed: ${error.message.orEmpty()}", speakError = false) },
                 )
             }
         }
@@ -1967,6 +2022,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         const val ACTION_WIDGET_TALK = "dev.voiceos.client.action.WIDGET_TALK"
         const val ACTION_WIDGET_ADD_TASK = "dev.voiceos.client.action.WIDGET_ADD_TASK"
         const val ACTION_DAILY_CHECKIN = "dev.voiceos.client.action.DAILY_CHECKIN"
+        const val ACTION_VIC_TALK = "dev.voiceos.client.action.VIC_TALK"
+        const val ACTION_VIC_SHOW_PROGRESS = "dev.voiceos.client.action.VIC_SHOW_PROGRESS"
         const val EXTRA_AUTO_LISTEN = "dev.voiceos.client.extra.AUTO_LISTEN"
         private const val REQUEST_MICROPHONE = 42
         private const val REQUEST_DOCUMENT = 43

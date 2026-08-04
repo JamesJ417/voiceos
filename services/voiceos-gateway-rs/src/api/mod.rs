@@ -4,6 +4,7 @@ mod documents;
 mod error;
 mod health;
 mod ontology;
+mod outreach;
 mod skills;
 mod tasks;
 mod turns;
@@ -34,6 +35,9 @@ pub(crate) fn router(state: AppState) -> Router {
             post(tasks::update_task_status),
         )
         .route("/v1/tasks/{task_id}/actions", post(tasks::task_action))
+        .route("/v1/outreach", get(outreach::list).post(outreach::create))
+        .route("/v1/outreach/policy", get(outreach::policy))
+        .route("/v1/outreach/{outreach_id}/actions", post(outreach::act))
         .route(
             "/v1/skills/proposals/{skill_id}/decision",
             post(skills::decide_proposal),

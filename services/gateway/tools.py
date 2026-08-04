@@ -178,6 +178,29 @@ class ToolBroker:
             self._functions[name] = lambda arguments, selected=name: executor({"tool": selected, **arguments})
             self._model_aliases[name.replace(".", "_")] = name
 
+    def register_outreach_tools(self, executor: ToolFunction) -> None:
+        """Allow VIC to queue a policy-governed check-in without controlling delivery transport."""
+        name = "outreach.create"
+        self._specs[name] = ToolSpec(
+            name,
+            "Proactively notify the user about meaningful progress, a blocker, a question, or requested review.",
+            "none",
+            False,
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["status_update", "check_in", "question", "blocker", "review", "digest"]},
+                    "priority": {"type": "string", "enum": ["quiet", "check_in", "needs_you"]},
+                    "title": {"type": "string"}, "body": {"type": "string"}, "reason": {"type": "string"},
+                    "task_id": {"type": "string"}, "dedupe_key": {"type": "string"},
+                },
+                "required": ["kind", "priority", "title", "body", "reason"],
+                "additionalProperties": False,
+            },
+        )
+        self._functions[name] = executor
+        self._model_aliases[name.replace(".", "_")] = name
+
     def describe(self) -> list[dict[str, object]]:
         return [asdict(spec) for spec in self._specs.values()]
 
@@ -273,6 +296,18 @@ class ToolBroker:
             return None
         if name.startswith("task."):
             return _validate_task_tool(name, arguments)
+        if name == "outreach.create":
+            allowed = {"kind", "priority", "title", "body", "reason", "task_id", "dedupe_key"}
+            required = {"kind", "priority", "title", "body", "reason"}
+            if set(arguments) - allowed or not required.issubset(arguments):
+                return "invalid_outreach_arguments"
+            if arguments.get("kind") not in {"status_update", "check_in", "question", "blocker", "review", "digest"}:
+                return "invalid_outreach_kind"
+            if arguments.get("priority") not in {"quiet", "check_in", "needs_you"}:
+                return "invalid_outreach_priority"
+            if any(not isinstance(arguments.get(key), str) or not str(arguments[key]).strip() for key in required):
+                return "outreach_text_required"
+            return None
         return "tool_not_allowlisted"
 
     def _root_command(

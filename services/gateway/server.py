@@ -197,6 +197,22 @@ class VoiceOSServer(ThreadingHTTPServer):
                 "source_device_id": device_id,
             },
         )
+        outreach_result = _post_json(
+            f"{self.memory_url}/v1/outreach",
+            {
+                "kind": "review" if status == "completed" else "blocker",
+                "priority": "check_in" if status == "completed" else "needs_you",
+                "title": "VIC has a task update" if status == "completed" else "VIC needs your help",
+                "body": coordinated.text[:2_000],
+                "reason": f"Proactive work on {task.get('title', 'a VoiceOS task')} is {status}",
+                "task_id": task_id,
+                "dedupe_key": f"task-initiative:{job_id}:{status}",
+                "actions": ["talk_now", "show_progress", "later", "dismiss"],
+            },
+        )
+        outreach = outreach_result.get("outreach") if outreach_result else None
+        if isinstance(outreach, dict):
+            self.audit_store.publish_client_event("vic.outreach.created", outreach)
 
 
 class VoiceOSHandler(BaseHTTPRequestHandler):
@@ -276,6 +292,12 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             if not self._require_device():
                 return
             self._proxy_memory_request("GET", parsed.path)
+            return
+        if parsed.path in {"/v1/outreach", "/v1/outreach/policy"}:
+            if not self._require_device():
+                return
+            suffix = f"?{parsed.query}" if parsed.query else ""
+            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
             return
         if parsed.path == "/v1/checkins/daily":
             if not self._require_device():
@@ -421,6 +443,13 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         if path == "/v1/tasks" or (
             path.startswith("/v1/tasks/")
             and (path.endswith("/status") or path.endswith("/actions"))
+        ):
+            if not self._require_device():
+                return
+            self._proxy_json_memory_request(path)
+            return
+        if path == "/v1/outreach" or (
+            path.startswith("/v1/outreach/") and path.endswith("/actions")
         ):
             if not self._require_device():
                 return
@@ -1166,6 +1195,17 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             )
         if path == "/v1/tasks" and method == "POST" and status < HTTPStatus.BAD_REQUEST:
             self.gateway.start_task_initiative(payload, self.authenticated_device_id)
+        if path == "/v1/outreach" and method == "POST" and status < HTTPStatus.BAD_REQUEST:
+            outreach = payload.get("outreach")
+            if isinstance(outreach, dict):
+                self.gateway.audit_store.publish_client_event("vic.outreach.created", outreach)
+        if path.startswith("/v1/outreach/") and path.endswith("/actions") and status < HTTPStatus.BAD_REQUEST:
+            outreach = payload.get("outreach")
+            if isinstance(outreach, dict):
+                self.gateway.audit_store.publish_client_event(
+                    "vic.outreach.updated",
+                    {"outreach": outreach, "action": payload.get("action")},
+                )
         self._json(status, payload)
 
     def _stream_client_events(self, query: str) -> None:
@@ -1485,6 +1525,9 @@ def create_server(
         selected_coordinator.tools.register_task_tools(
             _rust_task_tool_executor(selected_memory_url)
         )
+        selected_coordinator.tools.register_outreach_tools(
+            _rust_outreach_tool_executor(selected_memory_url, selected_audit)
+        )
     selected_speech_worker_url = (
         speech_worker_url
         if speech_worker_url is not None
@@ -1630,6 +1673,25 @@ def _rust_task_tool_executor(memory_url: str):
         )
         if result is None:
             raise RuntimeError("rust_task_authority_unavailable")
+        return result
+
+    return execute
+
+
+def _rust_outreach_tool_executor(memory_url: str, audit_store: AuditStore):
+    def execute(arguments: dict[str, object]) -> dict[str, object]:
+        result = _post_json(
+            f"{memory_url}/v1/outreach",
+            {
+                **arguments,
+                "actions": ["talk_now", "show_progress", "later", "dismiss"],
+            },
+        )
+        if result is None:
+            raise RuntimeError("rust_outreach_authority_unavailable")
+        outreach = result.get("outreach")
+        if isinstance(outreach, dict):
+            audit_store.publish_client_event("vic.outreach.created", outreach)
         return result
 
     return execute
