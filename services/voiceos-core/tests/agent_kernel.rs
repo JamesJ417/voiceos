@@ -277,3 +277,103 @@ fn repeated_successful_audit_workflows_become_inert_review_proposals() {
         .unwrap();
     assert_eq!("proposed", automation.status);
 }
+
+#[test]
+fn task_detail_projects_owned_steps_blockers_handoffs_artifacts_and_activity() {
+    let store = ConversationStore::in_memory().unwrap();
+    let task = store
+        .create_task(
+            "owner",
+            None,
+            None,
+            "Print recipe cards",
+            "Cards are printed and laminated",
+            40,
+        )
+        .unwrap();
+    let vic_step = store
+        .create_task_step(
+            "owner",
+            &task.id,
+            "Prepare print layout",
+            "vic",
+            "provider:vic",
+        )
+        .unwrap();
+    store
+        .update_task_step(
+            "owner",
+            &task.id,
+            &vic_step.id,
+            "completed",
+            None,
+            json!({"file": "recipe-cards.pdf"}),
+            "provider:vic",
+        )
+        .unwrap();
+    store
+        .create_task_step(
+            "owner",
+            &task.id,
+            "Confirm card size",
+            "user",
+            "provider:vic",
+        )
+        .unwrap();
+    let blocker = store
+        .create_task_blocker(
+            "owner",
+            &task.id,
+            "Card size is unknown",
+            "user",
+            "provider:vic",
+        )
+        .unwrap();
+    store
+        .attach_task_artifact(
+            "owner",
+            &task.id,
+            "pdf",
+            "voiceos://artifacts/recipe-cards.pdf",
+            "Draft print layout",
+            "vic",
+            "provider:vic",
+        )
+        .unwrap();
+    store
+        .create_task_handoff(
+            "owner",
+            &task.id,
+            "vic",
+            "user",
+            "review",
+            "Review the card layout and confirm dimensions",
+            "provider:vic",
+        )
+        .unwrap();
+
+    let detail = store.task_detail("owner", &task.id).unwrap().unwrap();
+    assert_eq!(detail.progress.completed_steps, 1);
+    assert_eq!(detail.progress.total_steps, 2);
+    assert_eq!(detail.progress.open_blockers, 1);
+    assert_eq!(detail.progress.lane, "review");
+    assert_eq!(
+        detail.progress.next_user_action.as_deref(),
+        Some("Confirm card size")
+    );
+    assert_eq!(detail.artifacts.len(), 1);
+    assert!(detail.activity.len() >= 6);
+
+    store
+        .resolve_task_blocker("owner", &task.id, &blocker.id, "device:pixel")
+        .unwrap();
+    assert_eq!(
+        store
+            .task_detail("owner", &task.id)
+            .unwrap()
+            .unwrap()
+            .progress
+            .open_blockers,
+        0
+    );
+}

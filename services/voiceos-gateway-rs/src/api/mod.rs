@@ -28,10 +28,12 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/skills/proposals", get(skills::list_proposals))
         .route("/v1/tasks", get(tasks::list_tasks).post(tasks::create_task))
+        .route("/v1/tasks/{task_id}", get(tasks::task_detail))
         .route(
             "/v1/tasks/{task_id}/status",
             post(tasks::update_task_status),
         )
+        .route("/v1/tasks/{task_id}/actions", post(tasks::task_action))
         .route(
             "/v1/skills/proposals/{skill_id}/decision",
             post(skills::decide_proposal),
@@ -68,6 +70,10 @@ pub(crate) fn router(state: AppState) -> Router {
             post(conversations::commit),
         )
         .route("/internal/v1/tasks/command", post(tasks::voice_command))
+        .route(
+            "/internal/v1/tasks/actions",
+            post(tasks::internal_task_action),
+        )
         .route(
             "/internal/v1/tasks/{task_id}/initiative/claim",
             post(tasks::claim_initiative),

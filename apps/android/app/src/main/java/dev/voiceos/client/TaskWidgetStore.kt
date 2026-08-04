@@ -19,7 +19,14 @@ object TaskWidgetStore {
                         .put("observable_outcome", task.observableOutcome)
                         .put("estimated_minutes", task.estimatedMinutes)
                         .put("status", task.status)
-                        .put("updated_at", task.updatedAt),
+                        .put("updated_at", task.updatedAt)
+                        .put("progress_lane", task.progressLane)
+                        .put("vic_status", task.vicStatus)
+                        .put("completed_steps", task.completedSteps)
+                        .put("total_steps", task.totalSteps)
+                        .put("open_blockers", task.openBlockers)
+                        .put("next_user_action", task.nextUserAction)
+                        .put("next_vic_action", task.nextVicAction),
                 )
             }
         }
@@ -47,6 +54,13 @@ object TaskWidgetStore {
                             estimatedMinutes = task.optInt("estimated_minutes", 20),
                             status = task.optString("status", "ready"),
                             updatedAt = task.optString("updated_at"),
+                            progressLane = task.optString("progress_lane", "shared"),
+                            vicStatus = task.optString("vic_status", "not_analyzed"),
+                            completedSteps = task.optInt("completed_steps"),
+                            totalSteps = task.optInt("total_steps"),
+                            openBlockers = task.optInt("open_blockers"),
+                            nextUserAction = task.optString("next_user_action"),
+                            nextVicAction = task.optString("next_vic_action"),
                         ),
                     )
                 }

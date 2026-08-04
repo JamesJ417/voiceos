@@ -248,6 +248,32 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
 .visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .system-note .secondary-button { margin-top: 18px; }
 
+.task-board { padding: 28px; overflow: visible; }
+.task-rollups { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 22px; }
+.task-rollups button { min-height: 88px; padding: 15px; display: grid; gap: 7px; text-align: left; border: 1px solid var(--line); border-radius: 15px; color: var(--muted); background: rgba(5,8,9,.35); cursor: pointer; }
+.task-rollups button strong { color: var(--white); font-size: 27px; }
+.task-rollups button.active { color: var(--teal); border-color: rgba(53,224,193,.55); background: rgba(53,224,193,.08); }
+.task-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; margin-top: 18px; }
+.task-card { padding: 20px; border: 1px solid var(--line-soft); border-left: 3px solid var(--teal); border-radius: 17px; background: rgba(5,8,9,.38); }
+.task-card.lane-needs_me { border-left-color: var(--amber); }
+.task-card.lane-review { border-left-color: #9d8cff; }
+.task-card.lane-vic_working { border-left-color: var(--cyan); }
+.task-card-head, .task-card footer { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .09em; }
+.task-card-head span { color: var(--teal); }
+.task-card h3 { margin: 12px 0 7px; font-size: 21px; }
+.task-card > p { margin: 0; color: var(--muted); line-height: 1.5; }
+.task-handoff { display: grid; gap: 5px; margin-top: 15px; padding: 13px; border: 1px solid rgba(53,224,193,.2); border-radius: 12px; background: rgba(53,224,193,.045); }
+.task-handoff small { color: var(--teal); letter-spacing: .1em; }
+.task-handoff strong { font-size: 13px; }
+.task-steps { display: grid; gap: 7px; margin-top: 14px; }
+.task-steps div { display: grid; grid-template-columns: 20px 1fr auto; gap: 8px; align-items: center; }
+.task-steps p { margin: 0; font-size: 13px; }
+.task-steps small { color: var(--muted); text-transform: uppercase; }
+.task-card footer { margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--line-soft); }
+
+@media (max-width: 900px) { .task-grid { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .task-rollups { grid-template-columns: repeat(2, 1fr); } }
+
 .skill-proposals-panel { grid-column: 1 / -1; padding: 28px; overflow: visible; }
 .proposal-intro { margin: 12px 0 0; color: var(--muted); line-height: 1.55; }
 .skill-proposal-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 20px; }

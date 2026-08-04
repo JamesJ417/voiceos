@@ -44,6 +44,30 @@ pub fn begin_task_initiative(
         actor,
         serde_json::to_value(&initiative)?,
     )?;
+    store.create_task_step(
+        owner_id,
+        &task.id,
+        &format!(
+            "VIC prepares the smallest useful next step for {}",
+            task.title
+        ),
+        "vic",
+        actor,
+    )?;
+    store.create_task_step(
+        owner_id,
+        &task.id,
+        &format!("Confirm the completion target: {}", task.observable_outcome),
+        "user",
+        actor,
+    )?;
+    store.create_task_step(
+        owner_id,
+        &task.id,
+        "Resolve identified blockers and dependencies",
+        "shared",
+        actor,
+    )?;
     Ok(initiative)
 }
 
@@ -138,9 +162,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(
-            store.execution_events("owner", &task.id, 20).unwrap().len(),
-            1
-        );
+        let detail = store.task_detail("owner", &task.id).unwrap().unwrap();
+        assert_eq!(detail.steps.len(), 3);
+        assert_eq!(detail.progress.lane, "vic_working");
+        assert_eq!(detail.activity.len(), 4);
     }
 }

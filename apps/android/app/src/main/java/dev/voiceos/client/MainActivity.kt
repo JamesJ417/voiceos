@@ -39,6 +39,7 @@ import java.util.UUID
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private enum class VoiceState { READY, STARTING, LISTENING, PROCESSING, SPEAKING, ERROR }
     private enum class AppPage { COMMAND, TASKS, HISTORY, SYSTEM }
+    private enum class TaskFilter { ALL, NEEDS_ME, VIC_WORKING, REVIEW }
 
     private lateinit var statusView: TextView
     private lateinit var voiceTitleView: TextView
@@ -95,6 +96,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var eventSubscription: EventSubscription? = null
     private var conversationActive = false
     private var conversationReceiverRegistered = false
+    private var currentTaskFilter = TaskFilter.ALL
+    private var latestTasks: List<VoiceTask> = emptyList()
 
     private val conversationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -668,6 +671,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     setPadding(0, dp(12), 0, 0)
                 }
                 addView(taskStatusView, fullWidthWrap())
+                val filters = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(secondaryButton("ALL") { setTaskFilter(TaskFilter.ALL) }, weightedButton())
+                    addView(secondaryButton("NEEDS ME") { setTaskFilter(TaskFilter.NEEDS_ME) }, weightedButton().apply { marginStart = dp(5) })
+                    addView(secondaryButton("VIC") { setTaskFilter(TaskFilter.VIC_WORKING) }, weightedButton().apply { marginStart = dp(5) })
+                    addView(secondaryButton("REVIEW") { setTaskFilter(TaskFilter.REVIEW) }, weightedButton().apply { marginStart = dp(5) })
+                }
+                addView(filters, fullWidthWrap().apply { topMargin = dp(11) })
                 taskContainer = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
                 }
@@ -1015,7 +1026,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     when (event.type) {
                         "conversation.turn" -> if (currentPage == AppPage.HISTORY) loadHistory()
-                        "task.changed", "daily_plan.proposed" -> {
+                        "task.changed", "task.progress.updated", "daily_plan.proposed" -> {
                             VoiceWidgetProvider.refreshTasks(this)
                             if (currentPage == AppPage.TASKS) loadTasks()
                         }
@@ -1422,17 +1433,26 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun renderTasks(tasks: List<VoiceTask>, preserveStatus: Boolean = false) {
+        latestTasks = tasks
         taskContainer.removeAllViews()
         val openTasks = tasks.filter { it.status !in setOf("completed", "cancelled") }
+        val visibleTasks = openTasks.filter { task ->
+            when (currentTaskFilter) {
+                TaskFilter.ALL -> true
+                TaskFilter.NEEDS_ME -> task.progressLane == "needs_me"
+                TaskFilter.VIC_WORKING -> task.progressLane == "vic_working"
+                TaskFilter.REVIEW -> task.progressLane == "review"
+            }
+        }
         if (!preserveStatus) {
             taskStatusView.text = if (openTasks.isEmpty()) {
                 "You’re clear. Add a task or ask VIC what to do next."
             } else {
-                "${openTasks.size} open • tap Start or Done"
+                "${visibleTasks.size} shown • ${openTasks.size} open • ${currentTaskFilter.name.replace('_', ' ').lowercase()}"
             }
             taskStatusView.setTextColor(if (openTasks.isEmpty()) CarbonPalette.green else CarbonPalette.teal)
         }
-        openTasks.forEach { task ->
+        visibleTasks.forEach { task ->
             val taskPanel = taskPanel(13)
             val marker = when (task.status) {
                 "active" -> "▶ ACTIVE"
@@ -1442,12 +1462,36 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             taskPanel.addView(taskKicker(marker), fullWidthWrap())
             taskPanel.addView(taskHeading(task.title, 19f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
             taskPanel.addView(TextView(this).apply {
-                text = "${task.observableOutcome}\n${task.estimatedMinutes} minute focus block"
+                val stepProgress = if (task.totalSteps > 0) "${task.completedSteps}/${task.totalSteps} steps" else "No steps yet"
+                val blockerText = if (task.openBlockers > 0) " • ${task.openBlockers} blocked" else ""
+                text = "${task.observableOutcome}\n$stepProgress$blockerText • VIC ${task.vicStatus.replace('_', ' ')}"
                 textSize = 13f
                 setTextColor(CarbonPalette.muted)
                 setLineSpacing(dp(2).toFloat(), 1.12f)
                 setPadding(0, dp(7), 0, 0)
             }, fullWidthWrap())
+            val handoffText = when (task.progressLane) {
+                "needs_me" -> "YOUR NEXT ACTION\n${task.nextUserAction.ifBlank { "Review this task with VIC" }}"
+                "vic_working" -> "VIC NEXT ACTION\n${task.nextVicAction.ifBlank { "Continue safe preparation work" }}"
+                "review" -> "READY FOR REVIEW\n${task.nextUserAction.ifBlank { "Review VIC's latest work" }}"
+                else -> "SHARED WORK\nAsk VIC to break this into owned steps"
+            }
+            taskPanel.addView(TextView(this).apply {
+                text = handoffText
+                textSize = 12f
+                setTextColor(if (task.progressLane == "review") CarbonPalette.amber else CarbonPalette.teal)
+                setPadding(dp(11), dp(10), dp(11), dp(10))
+                background = carbonControl(this@MainActivity, CarbonPalette.line)
+            }, fullWidthWrap().apply { topMargin = dp(9) })
+            task.steps.take(4).forEach { step ->
+                taskPanel.addView(TextView(this).apply {
+                    val mark = if (step.status == "completed") "✓" else "○"
+                    text = "$mark  ${step.title}  •  ${step.owner.uppercase(Locale.US)}"
+                    textSize = 11f
+                    setTextColor(if (step.status == "completed") CarbonPalette.green else CarbonPalette.muted)
+                    setPadding(0, dp(6), 0, 0)
+                }, fullWidthWrap())
+            }
             val actions = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
@@ -1462,6 +1506,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             taskPanel.addView(actions, fullWidthWrap().apply { topMargin = dp(11) })
             taskContainer.addView(taskPanel, fullWidthWrap().apply { topMargin = dp(9) })
         }
+    }
+
+    private fun setTaskFilter(filter: TaskFilter) {
+        currentTaskFilter = filter
+        renderTasks(latestTasks)
     }
 
     private fun updateTaskStatus(task: VoiceTask, status: String) {

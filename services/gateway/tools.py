@@ -128,6 +128,56 @@ class ToolBroker:
             spec.name.replace(".", "_"): spec.name for spec in self._specs.values()
         }
 
+    def register_task_tools(self, executor: ToolFunction) -> None:
+        """Register Rust-backed task progress tools without moving authority into Python."""
+        definitions = {
+            "task.step.create": (
+                "Add a concrete step to an existing task and assign it to the user, VIC, or both.",
+                _task_parameters({"title": {"type": "string"}, "owner": _party_schema(True)}, ["task_id", "title", "owner"]),
+            ),
+            "task.step.update": (
+                "Update a task step's status, ownership, and verified evidence.",
+                _task_parameters({
+                    "step_id": {"type": "string"}, "status": {"type": "string", "enum": ["pending", "active", "blocked", "completed", "cancelled"]},
+                    "owner": _party_schema(True), "evidence": {"type": "object"},
+                }, ["task_id", "step_id", "status"]),
+            ),
+            "task.blocker.create": (
+                "Record a blocker and who must resolve it.",
+                _task_parameters({"description": {"type": "string"}, "owner": _party_schema(True)}, ["task_id", "description", "owner"]),
+            ),
+            "task.blocker.resolve": (
+                "Resolve a known task blocker after receiving evidence that it is resolved.",
+                _task_parameters({"blocker_id": {"type": "string"}}, ["task_id", "blocker_id"]),
+            ),
+            "task.handoff.create": (
+                "Hand the next responsibility between VIC and the user.",
+                _task_parameters({
+                    "from_owner": _party_schema(False), "to_owner": _party_schema(False),
+                    "kind": {"type": "string", "enum": ["handoff", "review", "approval"]}, "summary": {"type": "string"},
+                }, ["task_id", "from_owner", "to_owner", "kind", "summary"]),
+            ),
+            "task.progress.record": (
+                "Record an evidence-backed progress update without claiming the overall task is complete.",
+                _task_parameters({"summary": {"type": "string"}, "evidence": {"type": "object"}}, ["task_id", "summary"]),
+            ),
+            "task.artifact.attach": (
+                "Attach a generated file, document, link, or other work product to a task.",
+                _task_parameters({
+                    "kind": {"type": "string"}, "uri": {"type": "string"},
+                    "description": {"type": "string"}, "owner": _party_schema(False),
+                }, ["task_id", "kind", "uri", "description", "owner"]),
+            ),
+            "task.review.request": (
+                "Ask the user to review VIC's completed portion of a task.",
+                _task_parameters({"summary": {"type": "string"}}, ["task_id", "summary"]),
+            ),
+        }
+        for name, (description, parameters) in definitions.items():
+            self._specs[name] = ToolSpec(name, description, "none", False, parameters)
+            self._functions[name] = lambda arguments, selected=name: executor({"tool": selected, **arguments})
+            self._model_aliases[name.replace(".", "_")] = name
+
     def describe(self) -> list[dict[str, object]]:
         return [asdict(spec) for spec in self._specs.values()]
 
@@ -221,6 +271,8 @@ class ToolBroker:
             if not isinstance(rollback, str) or not rollback.strip() or len(rollback) > 4_000:
                 return "rollback_information_required"
             return None
+        if name.startswith("task."):
+            return _validate_task_tool(name, arguments)
         return "tool_not_allowlisted"
 
     def _root_command(
@@ -339,3 +391,45 @@ def _elapsed(started: float) -> int:
 
 def _empty_parameters() -> dict[str, object]:
     return {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+def _party_schema(shared: bool) -> dict[str, object]:
+    return {"type": "string", "enum": ["user", "vic", "shared"] if shared else ["user", "vic"]}
+
+
+def _task_parameters(properties: dict[str, object], required: list[str]) -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {"task_id": {"type": "string"}, **properties},
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+def _validate_task_tool(name: str, arguments: dict[str, object]) -> str | None:
+    required = {
+        "task.step.create": {"task_id", "title", "owner"},
+        "task.step.update": {"task_id", "step_id", "status"},
+        "task.blocker.create": {"task_id", "description", "owner"},
+        "task.blocker.resolve": {"task_id", "blocker_id"},
+        "task.handoff.create": {"task_id", "from_owner", "to_owner", "kind", "summary"},
+        "task.progress.record": {"task_id", "summary"},
+        "task.artifact.attach": {"task_id", "kind", "uri", "description", "owner"},
+        "task.review.request": {"task_id", "summary"},
+    }.get(name)
+    if required is None:
+        return "tool_not_allowlisted"
+    allowed = required | {"owner", "evidence"}
+    if set(arguments) - allowed:
+        return "arguments_not_allowlisted"
+    if any(not isinstance(arguments.get(key), str) or not str(arguments[key]).strip() for key in required):
+        return "required_string_argument_missing"
+    if "owner" in arguments and arguments["owner"] not in {"user", "vic", "shared"}:
+        return "owner_not_allowlisted"
+    if "from_owner" in arguments and arguments["from_owner"] not in {"user", "vic"}:
+        return "owner_not_allowlisted"
+    if "to_owner" in arguments and arguments["to_owner"] not in {"user", "vic"}:
+        return "owner_not_allowlisted"
+    if "evidence" in arguments and not isinstance(arguments["evidence"], dict):
+        return "evidence_must_be_object"
+    return None

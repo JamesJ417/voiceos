@@ -32,6 +32,26 @@ pub(crate) struct UpdateTaskStatusRequest {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct TaskActionRequest {
+    action: String,
+    #[serde(default)]
+    task_id: String,
+    step_id: Option<String>,
+    blocker_id: Option<String>,
+    title: Option<String>,
+    owner: Option<String>,
+    status: Option<String>,
+    from_owner: Option<String>,
+    to_owner: Option<String>,
+    kind: Option<String>,
+    summary: Option<String>,
+    description: Option<String>,
+    uri: Option<String>,
+    #[serde(default)]
+    evidence: Value,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct VoiceTaskCommandRequest {
     device_id: String,
     text: String,
@@ -65,7 +85,31 @@ pub(crate) async fn list_tasks(
             query.limit.unwrap_or(50),
         )
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
-    Ok(Json(json!({"tasks": tasks})))
+    let details = tasks
+        .iter()
+        .filter_map(|task| {
+            state
+                .store
+                .task_detail(&state.primary_owner_id, &task.id)
+                .ok()
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(json!({"tasks": tasks, "details": details})))
+}
+
+pub(crate) async fn task_detail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    authenticate(&state, &headers)?;
+    state
+        .store
+        .task_detail(&state.primary_owner_id, &task_id)
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?
+        .map(|detail| Json(json!({"detail": detail})))
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "task_not_found"))
 }
 
 pub(crate) async fn create_task(
@@ -126,6 +170,108 @@ pub(crate) async fn update_task_status(
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "task_not_found"))?;
     Ok(Json(json!({"task": task})))
+}
+
+pub(crate) async fn task_action(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+    Json(mut request): Json<TaskActionRequest>,
+) -> ApiResult<Json<Value>> {
+    let device_id = authenticate(&state, &headers)?;
+    request.task_id = task_id;
+    run_task_action(&state, request, &format!("device:{device_id}"))
+}
+
+pub(crate) async fn internal_task_action(
+    State(state): State<AppState>,
+    Json(request): Json<TaskActionRequest>,
+) -> ApiResult<Json<Value>> {
+    run_task_action(&state, request, "provider:vic")
+}
+
+fn run_task_action(
+    state: &AppState,
+    request: TaskActionRequest,
+    actor: &str,
+) -> ApiResult<Json<Value>> {
+    if request.task_id.trim().is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "task_id_required"));
+    }
+    let owner_id = &state.primary_owner_id;
+    let task_id = request.task_id.trim();
+    let value = match request.action.as_str() {
+        "step.create" => json!({"step": state.store.create_task_step(
+            owner_id, task_id, required(&request.title, "title")?,
+            request.owner.as_deref().unwrap_or("shared"), actor,
+        ).map_err(store_error)?}),
+        "step.update" => json!({"step": state.store.update_task_step(
+            owner_id, task_id, required(&request.step_id, "step_id")?,
+            required(&request.status, "status")?, request.owner.as_deref(),
+            object_or_empty(request.evidence), actor,
+        ).map_err(store_error)?.ok_or_else(|| api_error(StatusCode::NOT_FOUND, "step_not_found"))?}),
+        "blocker.create" => json!({"blocker": state.store.create_task_blocker(
+            owner_id, task_id, required(&request.description, "description")?,
+            request.owner.as_deref().unwrap_or("shared"), actor,
+        ).map_err(store_error)?}),
+        "blocker.resolve" => json!({"blocker": state.store.resolve_task_blocker(
+            owner_id, task_id, required(&request.blocker_id, "blocker_id")?, actor,
+        ).map_err(store_error)?.ok_or_else(|| api_error(StatusCode::NOT_FOUND, "blocker_not_found"))?}),
+        "handoff.create" | "review.request" => json!({"handoff": state.store.create_task_handoff(
+            owner_id, task_id,
+            request.from_owner.as_deref().unwrap_or("vic"),
+            request.to_owner.as_deref().unwrap_or("user"),
+            if request.action == "review.request" { "review" } else { request.kind.as_deref().unwrap_or("handoff") },
+            required(&request.summary, "summary")?, actor,
+        ).map_err(store_error)?}),
+        "artifact.attach" => json!({"artifact": state.store.attach_task_artifact(
+            owner_id, task_id, request.kind.as_deref().unwrap_or("reference"),
+            required(&request.uri, "uri")?, required(&request.description, "description")?,
+            request.owner.as_deref().unwrap_or("vic"), actor,
+        ).map_err(store_error)?}),
+        "progress.record" => {
+            state
+                .store
+                .record_task_progress(
+                    owner_id,
+                    task_id,
+                    required(&request.summary, "summary")?,
+                    object_or_empty(request.evidence),
+                    actor,
+                )
+                .map_err(store_error)?;
+            json!({"recorded": true})
+        }
+        _ => {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_task_action",
+            ));
+        }
+    };
+    let detail = state
+        .store
+        .task_detail(owner_id, task_id)
+        .map_err(store_error)?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "task_not_found"))?;
+    Ok(Json(
+        json!({"action": request.action, "result": value, "detail": detail}),
+    ))
+}
+
+fn required<'a>(value: &'a Option<String>, name: &str) -> ApiResult<&'a str> {
+    value
+        .as_deref()
+        .filter(|item| !item.trim().is_empty())
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, format!("{name}_required")))
+}
+
+fn object_or_empty(value: Value) -> Value {
+    if value.is_object() { value } else { json!({}) }
+}
+
+fn store_error(error: voiceos_core::StoreError) -> super::error::ApiError {
+    api_error(StatusCode::BAD_REQUEST, error.to_string())
 }
 
 pub(crate) async fn voice_command(
@@ -392,6 +538,38 @@ pub(crate) async fn complete_initiative(
                 "errors": request.errors,
             }),
         )?;
+        if next_status == "completed" {
+            if let Some(detail) = store.task_detail(&owner, &task_id)? {
+                if let Some(step) = detail
+                    .steps
+                    .iter()
+                    .find(|step| step.owner == "vic" && step.status != "completed")
+                {
+                    store.update_task_step(
+                        &owner,
+                        &task_id,
+                        &step.id,
+                        "completed",
+                        None,
+                        json!({
+                            "provider": request.provider,
+                            "summary": request.response_text,
+                            "job_id": request.job_id,
+                        }),
+                        &format!("provider:{}", request.provider),
+                    )?;
+                }
+                store.create_task_handoff(
+                    &owner,
+                    &task_id,
+                    "vic",
+                    "user",
+                    "review",
+                    &request.response_text,
+                    &format!("provider:{}", request.provider),
+                )?;
+            }
+        }
         Ok(job)
     })
     .await

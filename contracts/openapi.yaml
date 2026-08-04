@@ -283,6 +283,10 @@ paths:
                   tasks:
                     type: array
                     items: { $ref: "#/components/schemas/Task" }
+                  details:
+                    type: array
+                    description: Responsibility and evidence projection for each returned task.
+                    items: { $ref: "#/components/schemas/TaskDetail" }
         "401": { description: Device authentication required }
     post:
       operationId: createTask
@@ -383,6 +387,42 @@ paths:
                   task: { $ref: "#/components/schemas/Task" }
         "401": { description: Device authentication required }
         "404": { description: Task does not exist for the primary owner }
+  /v1/tasks/{task_id}:
+    get:
+      operationId: getTaskDetail
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Task, initiative, responsibility projection, evidence, approvals, artifacts, and append-only activity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail]
+                properties:
+                  detail: { $ref: "#/components/schemas/TaskDetail" }
+        "404": { description: Task does not exist for the primary owner }
+  /v1/tasks/{task_id}/actions:
+    post:
+      operationId: applyTaskProgressAction
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaskAction" }
+      responses:
+        "200": { description: Applied action and refreshed task-detail projection }
+        "400": { description: Invalid or unsupported task action }
+        "404": { description: Task, step, or blocker does not exist }
   /v1/files:
     get:
       operationId: listKnowledgeFiles
@@ -754,7 +794,7 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, task.changed, task.initiative.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed]
+          enum: [conversation.turn, task.changed, task.initiative.updated, task.progress.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed]
         payload: { type: object }
         created_at: { type: string, format: date-time }
     Task:
@@ -789,6 +829,47 @@ components:
           type: array
           items: { type: string }
         approval_boundary: { type: string }
+    TaskProgress:
+      type: object
+      required: [completed_steps, total_steps, open_blockers, lane, vic_status]
+      properties:
+        completed_steps: { type: integer, minimum: 0 }
+        total_steps: { type: integer, minimum: 0 }
+        open_blockers: { type: integer, minimum: 0 }
+        lane: { type: string, enum: [needs_me, vic_working, review, shared] }
+        vic_status: { type: string }
+        next_user_action: { type: [string, "null"] }
+        next_vic_action: { type: [string, "null"] }
+    TaskDetail:
+      type: object
+      required: [task, progress, steps, blockers, handoffs, artifacts, approvals, activity]
+      properties:
+        task: { $ref: "#/components/schemas/Task" }
+        initiative: { type: [object, "null"] }
+        progress: { $ref: "#/components/schemas/TaskProgress" }
+        steps: { type: array, items: { type: object } }
+        blockers: { type: array, items: { type: object } }
+        handoffs: { type: array, items: { type: object } }
+        artifacts: { type: array, items: { type: object } }
+        approvals: { type: array, items: { type: object } }
+        activity: { type: array, items: { type: object } }
+    TaskAction:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [step.create, step.update, blocker.create, blocker.resolve, handoff.create, progress.record, artifact.attach, review.request] }
+        step_id: { type: string }
+        blocker_id: { type: string }
+        title: { type: string }
+        owner: { type: string, enum: [user, vic, shared] }
+        status: { type: string }
+        from_owner: { type: string, enum: [user, vic] }
+        to_owner: { type: string, enum: [user, vic] }
+        kind: { type: string }
+        summary: { type: string }
+        description: { type: string }
+        uri: { type: string }
+        evidence: { type: object }
     CanonicalRequest:
       type: object
       required: [intent, confidence, source]

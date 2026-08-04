@@ -73,7 +73,19 @@ data class VoiceTask(
     val vicInitiativeStatus: String = "",
     val vicSummary: String = "",
     val vicCapabilities: List<String> = emptyList(),
+    val progressLane: String = "shared",
+    val vicStatus: String = "not_analyzed",
+    val completedSteps: Int = 0,
+    val totalSteps: Int = 0,
+    val openBlockers: Int = 0,
+    val nextUserAction: String = "",
+    val nextVicAction: String = "",
+    val steps: List<VoiceTaskStep> = emptyList(),
+    val artifacts: List<VoiceTaskArtifact> = emptyList(),
 )
+
+data class VoiceTaskStep(val title: String, val owner: String, val status: String)
+data class VoiceTaskArtifact(val kind: String, val uri: String, val description: String)
 
 data class ClientEvent(val id: Long, val type: String, val payload: JSONObject)
 
@@ -333,10 +345,20 @@ object GatewayClient {
         val connection = URL("$baseUrl/v1/tasks?limit=$safeLimit").openConnection() as HttpURLConnection
         try {
             configure(connection, deviceToken)
-            val tasks = responseJson(connection).getJSONArray("tasks")
+            val response = responseJson(connection)
+            val tasks = response.getJSONArray("tasks")
+            val details = response.optJSONArray("details")
+            val detailByTask = buildMap {
+                if (details != null) for (index in 0 until details.length()) {
+                    val detail = details.optJSONObject(index) ?: continue
+                    val id = detail.optJSONObject("task")?.optString("id").orEmpty()
+                    if (id.isNotBlank()) put(id, detail)
+                }
+            }
             return buildList {
                 for (index in 0 until tasks.length()) {
-                    add(parseTask(tasks.getJSONObject(index)))
+                    val task = tasks.getJSONObject(index)
+                    add(parseTask(task, detail = detailByTask[task.optString("id")]))
                 }
             }
         } finally {
@@ -391,20 +413,50 @@ object GatewayClient {
         }
     }
 
-    private fun parseTask(payload: JSONObject, initiative: JSONObject? = null): VoiceTask = VoiceTask(
+    private fun parseTask(
+        payload: JSONObject,
+        initiative: JSONObject? = null,
+        detail: JSONObject? = null,
+    ): VoiceTask {
+        val progress = detail?.optJSONObject("progress")
+        val detailInitiative = detail?.optJSONObject("initiative")
+        val steps = detail?.optJSONArray("steps")
+        val artifacts = detail?.optJSONArray("artifacts")
+        return VoiceTask(
         id = payload.getString("id"),
         title = payload.getString("title"),
         observableOutcome = payload.optString("observable_outcome"),
         estimatedMinutes = payload.optInt("estimated_minutes", 20),
         status = payload.optString("status", "ready"),
         updatedAt = payload.optString("updated_at"),
-        vicInitiativeStatus = initiative?.optString("status").orEmpty(),
+        vicInitiativeStatus = initiative?.optString("status")
+            ?: detailInitiative?.optString("status").orEmpty(),
         vicSummary = initiative?.optString("summary").orEmpty(),
         vicCapabilities = buildList {
             val values = initiative?.optJSONArray("capabilities") ?: return@buildList
             for (index in 0 until values.length()) add(values.optString(index))
         },
+        progressLane = progress?.optString("lane", "shared") ?: "shared",
+        vicStatus = progress?.optString("vic_status", "not_analyzed") ?: "not_analyzed",
+        completedSteps = progress?.optInt("completed_steps", 0) ?: 0,
+        totalSteps = progress?.optInt("total_steps", 0) ?: 0,
+        openBlockers = progress?.optInt("open_blockers", 0) ?: 0,
+        nextUserAction = progress?.optString("next_user_action").orEmpty(),
+        nextVicAction = progress?.optString("next_vic_action").orEmpty(),
+        steps = buildList {
+            if (steps != null) for (index in 0 until steps.length()) {
+                val step = steps.optJSONObject(index) ?: continue
+                add(VoiceTaskStep(step.optString("title"), step.optString("owner"), step.optString("status")))
+            }
+        },
+        artifacts = buildList {
+            if (artifacts != null) for (index in 0 until artifacts.length()) {
+                val artifact = artifacts.optJSONObject(index) ?: continue
+                add(VoiceTaskArtifact(artifact.optString("kind"), artifact.optString("uri"), artifact.optString("description")))
+            }
+        },
     )
+    }
 
     private fun getHistoryBlocking(
         baseUrl: String,

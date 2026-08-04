@@ -3,7 +3,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type VoiceState = "ready" | "listening" | "processing" | "speaking" | "error";
-type ViewName = "command" | "history" | "system";
+type ViewName = "command" | "tasks" | "history" | "system";
 
 type Message = {
   id: string;
@@ -38,6 +38,14 @@ type SkillProposal = {
   evidence: unknown[];
   created_at: string;
   updated_at: string;
+};
+type TaskStep = { id: string; title: string; owner: "user" | "vic" | "shared"; status: string };
+type TaskDetail = {
+  task: { id: string; title: string; observable_outcome: string; status: string; estimated_minutes: number };
+  progress: { completed_steps: number; total_steps: number; open_blockers: number; lane: "needs_me" | "vic_working" | "review" | "shared"; vic_status: string; next_user_action?: string | null; next_vic_action?: string | null };
+  steps: TaskStep[];
+  blockers: Array<{ id: string; description: string; owner: string; status: string }>;
+  artifacts: Array<{ id: string; kind: string; uri: string; description: string }>;
 };
 
 type RecognitionResultEvent = {
@@ -107,6 +115,8 @@ export default function Home() {
   const [lastResponse, setLastResponse] = useState("");
   const [pendingApproval, setPendingApproval] = useState<Approval | null>(null);
   const [skillProposals, setSkillProposals] = useState<SkillProposal[]>([]);
+  const [tasks, setTasks] = useState<TaskDetail[]>([]);
+  const [taskFilter, setTaskFilter] = useState<"all" | "needs_me" | "vic_working" | "review">("all");
   const [showSettings, setShowSettings] = useState(false);
   const [enrollmentCode, setEnrollmentCode] = useState("");
   const [speechRate, setSpeechRate] = useState(1.25);
@@ -144,6 +154,11 @@ export default function Home() {
     setSkillProposals(payload.proposals);
   }, [request]);
 
+  const loadTasks = useCallback(async () => {
+    const payload = await request<{ details?: TaskDetail[] }>("/v1/tasks?limit=100");
+    setTasks(payload.details ?? []);
+  }, [request]);
+
   const refreshStatus = useCallback(async () => {
     if (!gateway) return;
     try {
@@ -158,6 +173,7 @@ export default function Home() {
       await Promise.all([
         loadHistory().catch(() => undefined),
         loadSkillProposals().catch(() => undefined),
+        loadTasks().catch(() => undefined),
       ]);
       setConnected(true);
       setStatusMessage(`Connected · ${gatewayHealth.language_model ?? "provider ready"}`);
@@ -167,7 +183,7 @@ export default function Home() {
       setStatusMessage(errorText(error));
       setVoiceState("error");
     }
-  }, [gateway, loadHistory, loadSkillProposals, request]);
+  }, [gateway, loadHistory, loadSkillProposals, loadTasks, request]);
 
   useEffect(() => {
     const restore = window.setTimeout(() => {
@@ -220,8 +236,9 @@ export default function Home() {
             const event = JSON.parse(data) as { id: number; type: string; payload: Record<string, unknown> };
             localStorage.setItem(STORAGE.eventCursor, String(event.id));
             if (event.type === "conversation.turn") void loadHistory();
-            if (event.type === "task.changed" || event.type === "daily_plan.proposed") {
+            if (event.type === "task.changed" || event.type === "task.progress.updated" || event.type === "daily_plan.proposed") {
               setStatusMessage("Shared plan and task state updated.");
+              void loadTasks();
             }
             if (event.type === "task.initiative.updated") {
               const detail = typeof event.payload.response_text === "string" ? event.payload.response_text : "VIC advanced a task.";
@@ -255,7 +272,7 @@ export default function Home() {
       controller.abort();
       if (reconnectTimer) clearTimeout(reconnectTimer);
     };
-  }, [gateway, token, loadHistory]);
+  }, [gateway, token, loadHistory, loadTasks]);
 
   useEffect(() => () => {
     recognition.current?.abort();
@@ -469,6 +486,7 @@ export default function Home() {
         <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>VoiceOS</span></div>
         <nav className="nav-list">
           <NavButton active={view === "command"} label="Command" icon="⌂" onClick={() => setView("command")} />
+          <NavButton active={view === "tasks"} label="Tasks" icon="✓" onClick={() => { setView("tasks"); void loadTasks(); }} />
           <NavButton active={view === "history"} label="History" icon="◷" onClick={() => { setView("history"); void loadHistory(); }} />
           <NavButton active={view === "system"} label="System" icon="⌁" onClick={() => { setView("system"); void refreshStatus(); }} />
         </nav>
@@ -477,7 +495,7 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <div><p className="kicker">Carbon Command · Web</p><h1>{view === "command" ? "Command center" : view === "history" ? "Conversation history" : "System status"}</h1></div>
+          <div><p className="kicker">Carbon Command · Web</p><h1>{view === "command" ? "Command center" : view === "tasks" ? "Shared task operations" : view === "history" ? "Conversation history" : "System status"}</h1></div>
           <div className="top-actions">
             <span className={`online-pill ${connected ? "" : "offline-pill"}`}><span className={`status-dot ${connected ? "" : "offline"}`} /> {connected ? "Online" : "Offline"}</span>
             <button className="icon-button" aria-label="Open connection settings" onClick={() => setShowSettings(true)}>⚙</button>
@@ -523,6 +541,8 @@ export default function Home() {
 
         {view === "history" && <section className="wide-panel panel"><div className="panel-heading"><div><p className="kicker">Persistent timeline</p><h2>Shared conversation with VIC</h2></div><button className="secondary-button" onClick={() => void loadHistory()}>Refresh</button></div><div className="history-list">{messages.length ? messages.map((message) => <MessageCard key={message.id} message={message} />) : <EmptyState text="No conversation history is available yet." />}</div></section>}
 
+        {view === "tasks" && <TaskBoard tasks={tasks} filter={taskFilter} onFilter={setTaskFilter} onRefresh={() => void loadTasks()} />}
+
         {view === "system" && <div className="system-layout"><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => void loadSkillProposals()} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its VoiceOS device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside VoiceOS.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
       </section>
 
@@ -546,6 +566,12 @@ function MessageCard({ message }: { message: Message }) {
 
 function EmptyState({ text }: { text: string }) {
   return <div className="empty-state"><span aria-hidden="true">⬡</span><p>{text}</p></div>;
+}
+
+function TaskBoard({ tasks, filter, onFilter, onRefresh }: { tasks: TaskDetail[]; filter: "all" | "needs_me" | "vic_working" | "review"; onFilter: (value: "all" | "needs_me" | "vic_working" | "review") => void; onRefresh: () => void }) {
+  const visible = tasks.filter((task) => filter === "all" || task.progress.lane === filter);
+  const count = (lane: TaskDetail["progress"]["lane"]) => tasks.filter((task) => task.progress.lane === lane).length;
+  return <section className="task-board panel"><div className="panel-heading"><div><p className="kicker">Human + agent execution</p><h2>Task responsibility board</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><div className="task-rollups"><button className={filter === "needs_me" ? "active" : ""} onClick={() => onFilter("needs_me")}><span>Needs me</span><strong>{count("needs_me")}</strong></button><button className={filter === "vic_working" ? "active" : ""} onClick={() => onFilter("vic_working")}><span>VIC working</span><strong>{count("vic_working")}</strong></button><button className={filter === "review" ? "active" : ""} onClick={() => onFilter("review")}><span>Ready for review</span><strong>{count("review")}</strong></button><button className={filter === "all" ? "active" : ""} onClick={() => onFilter("all")}><span>All open</span><strong>{tasks.length}</strong></button></div><div className="task-grid">{visible.length ? visible.map((detail) => <article className={`task-card lane-${detail.progress.lane}`} key={detail.task.id}><div className="task-card-head"><span>{detail.progress.lane.replaceAll("_", " ")}</span><strong>{detail.progress.total_steps ? `${detail.progress.completed_steps}/${detail.progress.total_steps} steps` : "No steps"}</strong></div><h3>{detail.task.title}</h3><p>{detail.task.observable_outcome}</p><div className="task-handoff"><small>{detail.progress.lane === "vic_working" ? "VIC NEXT ACTION" : detail.progress.lane === "review" ? "READY FOR REVIEW" : "YOUR NEXT ACTION"}</small><strong>{detail.progress.lane === "vic_working" ? detail.progress.next_vic_action || "Continue safe work" : detail.progress.next_user_action || "Review with VIC"}</strong></div><div className="task-steps">{detail.steps.slice(0, 5).map((step) => <div key={step.id}><span>{step.status === "completed" ? "✓" : "○"}</span><p>{step.title}</p><small>{step.owner}</small></div>)}</div><footer><span>VIC {detail.progress.vic_status.replaceAll("_", " ")}</span><span>{detail.progress.open_blockers} blockers</span><span>{detail.artifacts.length} artifacts</span></footer></article>) : <EmptyState text="No tasks are in this responsibility lane." />}</div></section>;
 }
 
 function SkillProposalPanel({ proposals, onDecision, onRefresh }: { proposals: SkillProposal[]; onDecision: (proposal: SkillProposal, approve: boolean) => void; onRefresh: () => void }) {

@@ -37,6 +37,25 @@ class RootToolTest(unittest.TestCase):
             self.assertEqual("denied", denied.status)
             self.assertEqual("absolute_executable_required", denied.error)
 
+    def test_rust_backed_task_tools_are_typed_and_allowlisted(self) -> None:
+        seen: list[dict[str, object]] = []
+        broker = ToolBroker()
+        broker.register_task_tools(lambda arguments: seen.append(arguments) or {"detail": {"progress": {"lane": "vic_working"}}})
+
+        names = {schema["function"]["name"] for schema in broker.model_schemas()}
+        self.assertIn("task_step_create", names)
+        result = broker.execute(
+            "task_step_create",
+            {"task_id": "task-1", "title": "Prepare layout", "owner": "vic"},
+        )
+        self.assertEqual("completed", result.status)
+        self.assertEqual("task.step.create", seen[0]["tool"])
+        denied = broker.execute(
+            "task_step_create",
+            {"task_id": "task-1", "title": "Prepare layout", "owner": "root"},
+        )
+        self.assertEqual("denied", denied.status)
+
 
 if __name__ == "__main__":
     unittest.main()

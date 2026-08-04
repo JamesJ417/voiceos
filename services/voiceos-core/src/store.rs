@@ -59,6 +59,8 @@ impl ConversationStore {
     fn migrate(&self) -> Result<(), StoreError> {
         let connection = self.connection()?;
         crate::schema::migrate(&connection)?;
+        drop(connection);
+        self.backfill_task_progress()?;
         Ok(())
     }
 

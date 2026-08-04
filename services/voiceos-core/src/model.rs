@@ -140,6 +140,78 @@ pub struct TaskRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskStepRecord {
+    pub id: String,
+    pub task_id: String,
+    pub title: String,
+    pub owner: String,
+    pub status: String,
+    pub evidence: serde_json::Value,
+    pub position: u32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskBlockerRecord {
+    pub id: String,
+    pub task_id: String,
+    pub description: String,
+    pub owner: String,
+    pub status: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskHandoffRecord {
+    pub id: String,
+    pub task_id: String,
+    pub from_owner: String,
+    pub to_owner: String,
+    pub kind: String,
+    pub summary: String,
+    pub status: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskArtifactRecord {
+    pub id: String,
+    pub task_id: String,
+    pub kind: String,
+    pub uri: String,
+    pub description: String,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskProgress {
+    pub completed_steps: usize,
+    pub total_steps: usize,
+    pub open_blockers: usize,
+    pub lane: String,
+    pub vic_status: String,
+    pub next_user_action: Option<String>,
+    pub next_vic_action: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskDetail {
+    pub task: TaskRecord,
+    pub initiative: Option<JobRecord>,
+    pub progress: TaskProgress,
+    pub steps: Vec<TaskStepRecord>,
+    pub blockers: Vec<TaskBlockerRecord>,
+    pub handoffs: Vec<TaskHandoffRecord>,
+    pub artifacts: Vec<TaskArtifactRecord>,
+    pub approvals: Vec<serde_json::Value>,
+    pub activity: Vec<ExecutionEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct JobRecord {
     pub id: String,
     pub owner_id: String,

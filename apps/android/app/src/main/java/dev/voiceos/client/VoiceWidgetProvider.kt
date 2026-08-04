@@ -90,13 +90,25 @@ class VoiceWidgetProvider : AppWidgetProvider() {
         private fun views(context: Context, status: String): RemoteViews {
             val tasks = TaskWidgetStore.load(context)
                 .filter { it.status !in setOf("completed", "cancelled") }
-                .sortedBy { if (it.status == "active") 0 else 1 }
+                .sortedBy {
+                    when (it.progressLane) {
+                        "needs_me" -> 0
+                        "review" -> 1
+                        "vic_working" -> 2
+                        else -> 3
+                    }
+                }
             return RemoteViews(context.packageName, R.layout.voice_widget).apply {
                 setTextViewText(R.id.widget_status, "VoiceOS • $status")
                 setTextViewText(R.id.widget_gateway, GatewaySettings.displayName(context))
                 setTextViewText(
                     R.id.widget_task_summary,
-                    if (tasks.isEmpty()) "NEXT TASKS • CLEAR" else "NEXT TASKS • ${tasks.size} OPEN • TAP TO COMPLETE",
+                    if (tasks.isEmpty()) "TASK PROGRESS • CLEAR" else {
+                        val needsMe = tasks.count { it.progressLane == "needs_me" }
+                        val vic = tasks.count { it.progressLane == "vic_working" }
+                        val review = tasks.count { it.progressLane == "review" }
+                        "NEEDS ME $needsMe • VIC $vic • REVIEW $review"
+                    },
                 )
                 setOnClickPendingIntent(R.id.widget_talk, activityIntent(context, MainActivity.ACTION_WIDGET_TALK, 101))
                 setOnClickPendingIntent(R.id.widget_add_task, activityIntent(context, MainActivity.ACTION_WIDGET_ADD_TASK, 102))
@@ -113,15 +125,21 @@ class VoiceWidgetProvider : AppWidgetProvider() {
                 val task = tasks.getOrNull(index)
                 views.setViewVisibility(rows[index], if (task == null) View.GONE else View.VISIBLE)
                 if (task != null) {
-                    val marker = when (task.status) {
-                        "active" -> "▶"
-                        "blocked" -> "!"
-                        else -> "○"
+                    val marker = when (task.progressLane) {
+                        "needs_me" -> "ME"
+                        "vic_working" -> "VIC"
+                        "review" -> "REVIEW"
+                        else -> "SHARED"
                     }
                     views.setTextViewText(titles[index], "$marker  ${task.title}")
                     views.setTextViewText(
                         metadata[index],
-                        "${task.estimatedMinutes} min • ${task.observableOutcome.ifBlank { task.status }}",
+                        when (task.progressLane) {
+                            "needs_me" -> task.nextUserAction.ifBlank { "Your action is needed" }
+                            "vic_working" -> task.nextVicAction.ifBlank { "VIC is working" }
+                            "review" -> task.nextUserAction.ifBlank { "Ready for your review" }
+                            else -> "${task.completedSteps}/${task.totalSteps} steps • ${task.openBlockers} blockers"
+                        },
                     )
                     views.setOnClickPendingIntent(rows[index], completeIntent(context, task.id))
                 }

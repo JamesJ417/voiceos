@@ -6,6 +6,7 @@ mod schema;
 mod skill_proposal;
 mod store;
 mod task_initiative;
+mod task_progress;
 
 pub use engine::{
     ConversationEngine, EngineConfig, EngineError, ExplicitMemoryExtractor, HeuristicSummarizer,
@@ -14,8 +15,9 @@ pub use engine::{
 pub use model::{
     ArtifactRecord, AutomationProposal, ChatMessage, ConversationContext, ConversationMessage,
     DocumentRecord, ExecutionEvent, GoalRecord, JobRecord, Memory, ProjectRecord,
-    ProviderCompletion, ProviderRequest, ProviderRunMetric, Role, SkillProposal, TaskInitiative,
-    TaskRecord, ToolCall, ToolDefinition, Usage,
+    ProviderCompletion, ProviderRequest, ProviderRunMetric, Role, SkillProposal,
+    TaskArtifactRecord, TaskBlockerRecord, TaskDetail, TaskHandoffRecord, TaskInitiative,
+    TaskProgress, TaskRecord, TaskStepRecord, ToolCall, ToolDefinition, Usage,
 };
 pub use provider::{
     CodexBridgeProvider, MockProvider, OllamaProvider, Provider, ProviderError, ProviderRouter,

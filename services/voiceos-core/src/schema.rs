@@ -130,6 +130,62 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(parent_task_id) REFERENCES tasks(task_id)
         );
         CREATE INDEX IF NOT EXISTS tasks_owner_status_idx ON tasks(owner_id, status, updated_at);
+        CREATE TABLE IF NOT EXISTS task_steps (
+            step_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            assigned_owner TEXT NOT NULL CHECK(assigned_owner IN ('user', 'vic', 'shared')),
+            status TEXT NOT NULL CHECK(status IN ('pending', 'active', 'blocked', 'completed', 'cancelled')),
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            position INTEGER NOT NULL CHECK(position >= 0),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS task_steps_task_idx ON task_steps(owner_id, task_id, position);
+        CREATE TABLE IF NOT EXISTS task_blockers (
+            blocker_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            description TEXT NOT NULL,
+            assigned_owner TEXT NOT NULL CHECK(assigned_owner IN ('user', 'vic', 'shared')),
+            status TEXT NOT NULL CHECK(status IN ('open', 'resolved')),
+            created_at TEXT NOT NULL,
+            resolved_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS task_blockers_task_idx ON task_blockers(owner_id, task_id, status);
+        CREATE TABLE IF NOT EXISTS task_handoffs (
+            handoff_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            from_owner TEXT NOT NULL CHECK(from_owner IN ('user', 'vic')),
+            to_owner TEXT NOT NULL CHECK(to_owner IN ('user', 'vic')),
+            kind TEXT NOT NULL CHECK(kind IN ('handoff', 'review', 'approval')),
+            summary TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('pending', 'accepted', 'completed', 'cancelled')),
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS task_handoffs_task_idx ON task_handoffs(owner_id, task_id, status);
+        CREATE TABLE IF NOT EXISTS task_artifacts (
+            task_artifact_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            uri TEXT NOT NULL,
+            description TEXT NOT NULL,
+            created_by TEXT NOT NULL CHECK(created_by IN ('user', 'vic')),
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS task_artifacts_task_idx ON task_artifacts(owner_id, task_id, created_at);
         CREATE TABLE IF NOT EXISTS jobs (
             job_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,

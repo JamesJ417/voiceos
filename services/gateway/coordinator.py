@@ -213,6 +213,14 @@ class TurnCoordinator:
         elif outcome.name == "project.tests" and evidence is not None:
             state = "passed" if evidence["passed"] else "failed"
             message = f"The VoiceOS gateway test suite {state}."
+        elif outcome.name.startswith("task.") and evidence is not None:
+            detail = evidence.get("detail") if isinstance(evidence, dict) else None
+            progress = detail.get("progress") if isinstance(detail, dict) else None
+            lane = progress.get("lane") if isinstance(progress, dict) else None
+            message = (
+                f"I updated the task and recorded the progress. Its current responsibility lane is "
+                f"{str(lane).replace('_', ' ') if lane else 'shared'}."
+            )
         else:
             message = f"The {outcome.name} tool completed."
         return CoordinatedResponse(
