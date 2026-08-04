@@ -119,6 +119,14 @@ object GatewayClient {
         Thread({ callback(runCatching { createTestOutreachBlocking(baseUrl, deviceToken) }) }, "vic-test-outreach").start()
     }
 
+    fun getPendingOutreach(
+        baseUrl: String,
+        deviceToken: String?,
+        callback: (Result<List<VicOutreach>>) -> Unit,
+    ) {
+        Thread({ callback(runCatching { getPendingOutreachBlocking(baseUrl, deviceToken) }) }, "vic-outreach-recovery").start()
+    }
+
     fun actOnOutreach(
         baseUrl: String,
         deviceToken: String?,
@@ -702,6 +710,22 @@ object GatewayClient {
         try {
             configure(connection, deviceToken, request)
             return parseOutreach(responseJson(connection).getJSONObject("outreach"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun getPendingOutreachBlocking(baseUrl: String, deviceToken: String?): List<VicOutreach> {
+        val connection = URL("$baseUrl/v1/outreach?limit=50").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val records = responseJson(connection).getJSONArray("outreach")
+            return buildList {
+                for (index in 0 until records.length()) {
+                    val outreach = parseOutreach(records.getJSONObject(index))
+                    if (outreach.status == "queued") add(outreach)
+                }
+            }
         } finally {
             connection.disconnect()
         }

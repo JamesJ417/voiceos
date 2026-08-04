@@ -18,6 +18,12 @@ class VicOutreachService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var transport: OutreachEventTransport? = null
     private var stopping = false
+    private val recoveryPoll = object : Runnable {
+        override fun run() {
+            syncPendingOutreach()
+            if (!stopping) handler.postDelayed(this, RECOVERY_POLL_MILLIS)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -34,6 +40,8 @@ class VicOutreachService : Service() {
         }
         startForeground(CONNECTION_NOTIFICATION_ID, VicOutreachNotifications.connectionNotification(this))
         connect()
+        handler.removeCallbacks(recoveryPoll)
+        handler.post(recoveryPoll)
         return START_STICKY
     }
 
@@ -54,11 +62,7 @@ class VicOutreachService : Service() {
                 preferences.getLong(CURSOR, 0),
                 onOutreach = { eventId, outreach ->
                     preferences.edit().putLong(CURSOR, eventId).apply()
-                    VicOutreachNotifications.show(this, outreach)
-                    GatewayClient.actOnOutreach(
-                        GatewaySettings.baseUrl(this), DeviceCredentials.token(this),
-                        outreach.id, "delivered",
-                    )
+                    deliver(outreach)
                 },
                 onClosed = {
                     transport = null
@@ -68,6 +72,26 @@ class VicOutreachService : Service() {
         }
     }
 
+    private fun syncPendingOutreach() {
+        val token = DeviceCredentials.token(this) ?: return
+        GatewayClient.getPendingOutreach(GatewaySettings.baseUrl(this), token) { result ->
+            result.getOrNull()?.forEach(::deliver)
+        }
+    }
+
+    @Synchronized
+    private fun deliver(outreach: VicOutreach) {
+        val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+        val shownKey = "shown:${outreach.id}"
+        if (preferences.getBoolean(shownKey, false)) return
+        preferences.edit().putBoolean(shownKey, true).apply()
+        VicOutreachNotifications.show(this, outreach)
+        GatewayClient.actOnOutreach(
+            GatewaySettings.baseUrl(this), DeviceCredentials.token(this),
+            outreach.id, "delivered",
+        )
+    }
+
     companion object {
         const val ACTION_START = "dev.voiceos.client.action.START_OUTREACH"
         const val ACTION_STOP = "dev.voiceos.client.action.STOP_OUTREACH"
@@ -75,6 +99,7 @@ class VicOutreachService : Service() {
         private const val CURSOR = "cursor"
         private const val CONNECTION_NOTIFICATION_ID = 4_200
         private const val RECONNECT_DELAY_MILLIS = 5_000L
+        private const val RECOVERY_POLL_MILLIS = 30_000L
     }
 }
 
