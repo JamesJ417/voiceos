@@ -63,6 +63,16 @@ data class SkillProposal(
     val evidenceCount: Int,
 )
 
+data class SkillUsage(
+    val id: String,
+    val skillId: String,
+    val skillName: String,
+    val skillVersion: Int,
+    val outcome: String,
+    val feedback: String?,
+    val usedAt: String,
+)
+
 data class VoiceTask(
     val id: String,
     val title: String,
@@ -388,6 +398,42 @@ object GatewayClient {
                 }
             })
         }, "voiceos-skill-decision").start()
+    }
+
+    fun getSkills(
+        baseUrl: String,
+        deviceToken: String?,
+        callback: (Result<List<SkillProposal>>) -> Unit,
+    ) {
+        Thread({ callback(runCatching { retryConnection { getSkillsBlocking(baseUrl, deviceToken) } }) }, "voiceos-skills").start()
+    }
+
+    fun getSkillUsages(
+        baseUrl: String,
+        deviceToken: String?,
+        callback: (Result<List<SkillUsage>>) -> Unit,
+    ) {
+        Thread({ callback(runCatching { retryConnection { getSkillUsagesBlocking(baseUrl, deviceToken) } }) }, "voiceos-skill-usages").start()
+    }
+
+    fun setSkillEnabled(
+        baseUrl: String,
+        skillId: String,
+        enabled: Boolean,
+        deviceToken: String?,
+        callback: (Result<SkillProposal>) -> Unit,
+    ) {
+        Thread({ callback(runCatching { retryConnection { setSkillEnabledBlocking(baseUrl, skillId, enabled, deviceToken) } }) }, "voiceos-skill-status").start()
+    }
+
+    fun reviewSkillUsage(
+        baseUrl: String,
+        usageId: String,
+        correct: Boolean,
+        deviceToken: String?,
+        callback: (Result<SkillUsage>) -> Unit,
+    ) {
+        Thread({ callback(runCatching { retryConnection { reviewSkillUsageBlocking(baseUrl, usageId, correct, deviceToken) } }) }, "voiceos-skill-feedback").start()
     }
 
     private fun getHealthBlocking(baseUrl: String, deviceToken: String?): GatewayHealth {
@@ -718,6 +764,74 @@ object GatewayClient {
                     add(parseSkillProposal(proposals.getJSONObject(index)))
                 }
             }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun getSkillsBlocking(baseUrl: String, deviceToken: String?): List<SkillProposal> {
+        val connection = URL("$baseUrl/v1/skills?status=approved&limit=200").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val skills = responseJson(connection).getJSONArray("skills")
+            return buildList { for (index in 0 until skills.length()) add(parseSkillProposal(skills.getJSONObject(index))) }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun getSkillUsagesBlocking(baseUrl: String, deviceToken: String?): List<SkillUsage> {
+        val connection = URL("$baseUrl/v1/skills/usages?limit=30").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val usages = responseJson(connection).getJSONArray("usages")
+            return buildList {
+                for (index in 0 until usages.length()) {
+                    val usage = usages.getJSONObject(index)
+                    add(SkillUsage(
+                        id = usage.getString("id"),
+                        skillId = usage.getString("skill_id"),
+                        skillName = usage.getString("skill_name"),
+                        skillVersion = usage.optInt("skill_version", 1),
+                        outcome = usage.optString("outcome", "completed"),
+                        feedback = usage.optString("feedback").takeIf { it.isNotBlank() && it != "null" },
+                        usedAt = usage.optString("used_at"),
+                    ))
+                }
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun setSkillEnabledBlocking(baseUrl: String, skillId: String, enabled: Boolean, deviceToken: String?): SkillProposal {
+        val encodedId = URLEncoder.encode(skillId, Charsets.UTF_8.name())
+        val request = JSONObject().put("status", if (enabled) "approved" else "disabled").toString().toByteArray(Charsets.UTF_8)
+        val connection = URL("$baseUrl/v1/skills/$encodedId/status").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, request)
+            return parseSkillProposal(responseJson(connection).getJSONObject("skill"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun reviewSkillUsageBlocking(baseUrl: String, usageId: String, correct: Boolean, deviceToken: String?): SkillUsage {
+        val encodedId = URLEncoder.encode(usageId, Charsets.UTF_8.name())
+        val request = JSONObject().put("feedback", if (correct) "correct" else "incorrect").toString().toByteArray(Charsets.UTF_8)
+        val connection = URL("$baseUrl/v1/skills/usages/$encodedId/feedback").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, request)
+            val usage = responseJson(connection).getJSONObject("usage")
+            return SkillUsage(
+                id = usage.getString("id"),
+                skillId = usage.getString("skill_id"),
+                skillName = usage.getString("skill_name"),
+                skillVersion = usage.optInt("skill_version", 1),
+                outcome = usage.optString("outcome", "completed"),
+                feedback = usage.optString("feedback").takeIf { it.isNotBlank() && it != "null" },
+                usedAt = usage.optString("used_at"),
+            )
         } finally {
             connection.disconnect()
         }

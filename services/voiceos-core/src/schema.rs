@@ -257,6 +257,27 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS skills_owner_status_idx
             ON skills(owner_id, status, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS skill_usages (
+            usage_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            skill_id TEXT NOT NULL,
+            conversation_id TEXT,
+            request_id TEXT,
+            tool_calls_json TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            outcome TEXT NOT NULL CHECK(outcome IN ('completed', 'failed')),
+            feedback TEXT CHECK(feedback IN ('correct', 'incorrect')),
+            feedback_note TEXT,
+            used_at TEXT NOT NULL,
+            reviewed_at TEXT,
+            reviewed_by TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(skill_id) REFERENCES skills(skill_id)
+        );
+        CREATE INDEX IF NOT EXISTS skill_usages_owner_idx
+            ON skill_usages(owner_id, used_at DESC);
+        CREATE INDEX IF NOT EXISTS skill_usages_skill_idx
+            ON skill_usages(owner_id, skill_id, used_at DESC);
         CREATE TABLE IF NOT EXISTS automation_proposals (
             automation_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,

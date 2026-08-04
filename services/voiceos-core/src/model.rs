@@ -314,6 +314,25 @@ pub struct SkillProposal {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SkillUsage {
+    pub id: String,
+    pub owner_id: String,
+    pub skill_id: String,
+    pub skill_name: String,
+    pub skill_version: u32,
+    pub conversation_id: Option<String>,
+    pub request_id: Option<String>,
+    pub tool_calls: serde_json::Value,
+    pub result: serde_json::Value,
+    pub outcome: String,
+    pub feedback: Option<String>,
+    pub feedback_note: Option<String>,
+    pub used_at: String,
+    pub reviewed_at: Option<String>,
+    pub reviewed_by: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AutomationProposal {
     pub id: String,
     pub owner_id: String,

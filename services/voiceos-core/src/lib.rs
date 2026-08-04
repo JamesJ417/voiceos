@@ -18,9 +18,9 @@ pub use model::{
     ArtifactRecord, AutomationProposal, ChatMessage, ConversationContext, ConversationFloor,
     ConversationMessage, DocumentRecord, ExecutionEvent, GoalRecord, JobRecord, Memory,
     OutreachPolicy, OutreachRecord, ProjectRecord, ProviderCompletion, ProviderRequest,
-    ProviderRunMetric, Role, SkillProposal, TaskArtifactRecord, TaskBlockerRecord, TaskDetail,
-    TaskHandoffRecord, TaskInitiative, TaskProgress, TaskRecord, TaskStepRecord, ToolCall,
-    ToolDefinition, Usage,
+    ProviderRunMetric, Role, SkillProposal, SkillUsage, TaskArtifactRecord, TaskBlockerRecord,
+    TaskDetail, TaskHandoffRecord, TaskInitiative, TaskProgress, TaskRecord, TaskStepRecord,
+    ToolCall, ToolDefinition, Usage,
 };
 pub use provider::{
     CodexBridgeProvider, MockProvider, OllamaProvider, Provider, ProviderError, ProviderRouter,

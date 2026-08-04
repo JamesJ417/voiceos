@@ -272,10 +272,52 @@ fn repeated_successful_audit_workflows_become_inert_review_proposals() {
     );
     assert_eq!("pixel-device", events[1].actor);
     assert_eq!("approved", events[1].payload["decision"]);
+    let usages = store
+        .record_matching_skill_usages(
+            "owner",
+            Some("conversation"),
+            Some("request"),
+            &json!([{"name": "system.health", "arguments": {}}]),
+            &json!({"results": [{"status": "healthy"}], "errors": []}),
+            "completed",
+        )
+        .unwrap();
+    assert_eq!(1, usages.len());
+    assert_eq!(proposal.id, usages[0].skill_id);
+    let reviewed = store
+        .review_skill_usage_as(
+            "owner",
+            &usages[0].id,
+            "correct",
+            Some("The health summary matched the evidence."),
+            "device:pixel",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some("correct"), reviewed.feedback.as_deref());
+    assert_eq!(1, store.skill_usages("owner", 20).unwrap().len());
     let automation = store
         .create_automation_proposal("owner", &proposal.id, json!({"schedule": "daily"}))
         .unwrap();
     assert_eq!("proposed", automation.status);
+    let disabled = store
+        .set_skill_status_as("owner", &proposal.id, "disabled", "device:pixel")
+        .unwrap()
+        .unwrap();
+    assert_eq!("disabled", disabled.status);
+    assert!(
+        store
+            .record_matching_skill_usages(
+                "owner",
+                None,
+                None,
+                &json!([{"name": "system.health"}]),
+                &json!({}),
+                "completed",
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

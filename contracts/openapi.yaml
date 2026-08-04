@@ -240,7 +240,7 @@ paths:
       parameters:
         - in: query
           name: status
-          schema: { type: string, enum: [proposed, approved, rejected, superseded] }
+          schema: { type: string, enum: [proposed, approved, rejected, disabled] }
         - in: query
           name: limit
           schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
@@ -272,10 +272,9 @@ paths:
           application/json:
             schema:
               type: object
-              required: [approve]
+              required: [decision]
               properties:
-                approve: { type: boolean }
-                reason: { type: string, maxLength: 2000 }
+                decision: { type: string, enum: [approve, reject] }
       responses:
         "200":
           description: Decided proposal with immutable decision evidence
@@ -285,6 +284,94 @@ paths:
         "401": { description: Device authentication required }
         "404": { description: Skill proposal was not found }
         "409": { description: Skill proposal was already decided }
+  /v1/skills:
+    get:
+      operationId: listSkills
+      summary: List approved or disabled VoiceOS skills
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [approved, disabled], default: approved }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 200 }
+      responses:
+        "200":
+          description: Owner-scoped skill catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [skills]
+                properties:
+                  skills: { type: array, items: { $ref: "#/components/schemas/SkillProposal" } }
+        "401": { description: Device authentication required }
+  /v1/skills/{skill_id}/status:
+    post:
+      operationId: setSkillStatus
+      summary: Disable an approved skill version
+      parameters:
+        - in: path
+          name: skill_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [disabled] }
+      responses:
+        "200": { description: Updated skill version }
+        "400": { description: Invalid lifecycle transition }
+        "401": { description: Device authentication required }
+        "404": { description: Skill was not found }
+  /v1/skills/usages:
+    get:
+      operationId: listSkillUsages
+      summary: List recent uses of approved skills and their review status
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Recent owner-scoped skill usages
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [usages]
+                properties:
+                  usages: { type: array, items: { $ref: "#/components/schemas/SkillUsage" } }
+        "401": { description: Device authentication required }
+  /v1/skills/usages/{usage_id}/feedback:
+    post:
+      operationId: reviewSkillUsage
+      summary: Mark a particular VIC skill use correct or incorrect
+      parameters:
+        - in: path
+          name: usage_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [feedback]
+              properties:
+                feedback: { type: string, enum: [correct, incorrect] }
+                note: { type: string, maxLength: 2000 }
+      responses:
+        "200": { description: Reviewed skill usage }
+        "400": { description: Invalid feedback }
+        "401": { description: Device authentication required }
+        "404": { description: Skill usage was not found }
   /v1/audit/turns:
     get:
       operationId: listAuditTurns
@@ -803,18 +890,37 @@ components:
         id: { type: string, format: uuid }
         name: { type: string }
         version: { type: integer, minimum: 1 }
-        status: { type: string, enum: [proposed, approved, rejected, superseded] }
+        status: { type: string, enum: [proposed, approved, rejected, disabled] }
         content: { type: string }
         content_sha256: { type: [string, "null"], pattern: "^[a-f0-9]{64}$" }
         source_run_id: { type: [string, "null"] }
         required_capabilities:
           type: array
-          items: { type: object }
+          items: { type: string }
         evidence:
           type: array
           items: { type: object }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    SkillUsage:
+      type: object
+      required: [id, owner_id, skill_id, skill_name, skill_version, tool_calls, result, outcome, used_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        skill_id: { type: string, format: uuid }
+        skill_name: { type: string }
+        skill_version: { type: integer, minimum: 1 }
+        conversation_id: { type: [string, "null"] }
+        request_id: { type: [string, "null"] }
+        tool_calls: { type: array, items: { type: object } }
+        result: { type: object }
+        outcome: { type: string, enum: [completed, failed] }
+        feedback: { type: [string, "null"], enum: [correct, incorrect, null] }
+        feedback_note: { type: [string, "null"] }
+        used_at: { type: string, format: date-time }
+        reviewed_at: { type: [string, "null"], format: date-time }
+        reviewed_by: { type: [string, "null"] }
     SpeechSession:
       type: object
       required: [session_id, conversation_id, codec, transport_protocol, protocol_version, backend, connection_deadline_unix, expires_at_unix, stream_path]

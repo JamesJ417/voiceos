@@ -60,6 +60,7 @@ type SkillProposal = {
   created_at: string;
   updated_at: string;
 };
+type SkillUsage = { id: string; skill_id: string; skill_name: string; skill_version: number; outcome: string; feedback: "correct" | "incorrect" | null; used_at: string };
 type TaskStep = { id: string; title: string; owner: "user" | "vic" | "shared"; status: string };
 type TaskDetail = {
   task: { id: string; title: string; observable_outcome: string; status: string; estimated_minutes: number };
@@ -140,6 +141,8 @@ export default function Home() {
   const [lastResponse, setLastResponse] = useState("");
   const [pendingApproval, setPendingApproval] = useState<Approval | null>(null);
   const [skillProposals, setSkillProposals] = useState<SkillProposal[]>([]);
+  const [skills, setSkills] = useState<SkillProposal[]>([]);
+  const [skillUsages, setSkillUsages] = useState<SkillUsage[]>([]);
   const [tasks, setTasks] = useState<TaskDetail[]>([]);
   const [taskFilter, setTaskFilter] = useState<"all" | "needs_me" | "vic_working" | "review">("all");
   const [showSettings, setShowSettings] = useState(false);
@@ -203,6 +206,15 @@ export default function Home() {
     setSkillProposals(payload.proposals);
   }, [request]);
 
+  const loadSkills = useCallback(async () => {
+    const [catalog, history] = await Promise.all([
+      request<{ skills: SkillProposal[] }>("/v1/skills?status=approved&limit=200"),
+      request<{ usages: SkillUsage[] }>("/v1/skills/usages?limit=30"),
+    ]);
+    setSkills(catalog.skills);
+    setSkillUsages(history.usages);
+  }, [request]);
+
   const loadTasks = useCallback(async () => {
     const payload = await request<{ details?: TaskDetail[] }>("/v1/tasks?limit=100");
     setTasks(payload.details ?? []);
@@ -222,6 +234,7 @@ export default function Home() {
       await Promise.all([
         loadHistory().catch(() => undefined),
         loadSkillProposals().catch(() => undefined),
+        loadSkills().catch(() => undefined),
         loadTasks().catch(() => undefined),
         loadFloor().catch(() => undefined),
       ]);
@@ -233,7 +246,7 @@ export default function Home() {
       setStatusMessage(errorText(error));
       setVoiceState("error");
     }
-  }, [gateway, loadFloor, loadHistory, loadSkillProposals, loadTasks, request]);
+  }, [gateway, loadFloor, loadHistory, loadSkillProposals, loadSkills, loadTasks, request]);
 
   useEffect(() => {
     const restore = window.setTimeout(() => {
@@ -528,10 +541,27 @@ export default function Home() {
         body: JSON.stringify({ decision: approve ? "approve" : "reject" }),
       });
       setSkillProposals((current) => current.filter((candidate) => candidate.id !== proposal.id));
-      setStatusMessage(`${result.proposal.name} was ${result.proposal.status}. No generated skill content was executed.`);
+      setStatusMessage(`${result.proposal.name} was ${result.proposal.status}.`);
+      await loadSkills();
     } catch (error) {
       setStatusMessage(errorText(error));
     }
+  }
+
+  async function setSkillEnabled(skill: SkillProposal, enabled: boolean) {
+    try {
+      await request(`/v1/skills/${encodeURIComponent(skill.id)}/status`, { method: "POST", body: JSON.stringify({ status: enabled ? "approved" : "disabled" }) });
+      setStatusMessage(`${skill.name} was ${enabled ? "enabled" : "disabled"}.`);
+      await loadSkills();
+    } catch (error) { setStatusMessage(errorText(error)); }
+  }
+
+  async function reviewSkillUsage(usage: SkillUsage, correct: boolean) {
+    try {
+      await request(`/v1/skills/usages/${encodeURIComponent(usage.id)}/feedback`, { method: "POST", body: JSON.stringify({ feedback: correct ? "correct" : "incorrect" }) });
+      setStatusMessage(`${usage.skill_name} use was marked ${correct ? "correct" : "incorrect"}.`);
+      await loadSkills();
+    } catch (error) { setStatusMessage(errorText(error)); }
   }
 
   async function uploadFile(event: ChangeEvent<HTMLInputElement>) {
@@ -635,7 +665,7 @@ export default function Home() {
 
         {view === "tasks" && <TaskBoard tasks={tasks} filter={taskFilter} onFilter={setTaskFilter} onRefresh={() => void loadTasks()} />}
 
-        {view === "system" && <div className="system-layout"><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => void loadSkillProposals()} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its VoiceOS device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside VoiceOS.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
+        {view === "system" && <div className="system-layout"><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its VoiceOS device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside VoiceOS.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
       </section>
 
       {showSettings && <SettingsDialog gateway={gateway} enrollmentCode={enrollmentCode} setEnrollmentCode={setEnrollmentCode} onSaveGateway={saveGateway} onEnroll={enroll} onClose={() => setShowSettings(false)} hasToken={Boolean(token)} onForget={() => { localStorage.removeItem(STORAGE.token); localStorage.removeItem(STORAGE.deviceId); setToken(""); setConnected(false); setStatusMessage("Browser enrollment removed."); }} />}
@@ -668,6 +698,10 @@ function TaskBoard({ tasks, filter, onFilter, onRefresh }: { tasks: TaskDetail[]
 
 function SkillProposalPanel({ proposals, onDecision, onRefresh }: { proposals: SkillProposal[]; onDecision: (proposal: SkillProposal, approve: boolean) => void; onRefresh: () => void }) {
   return <section className="skill-proposals-panel panel"><div className="panel-heading"><div><p className="kicker">Reviewed self-improvement</p><h2>Skill proposals</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><p className="proposal-intro">{proposals.length ? `${proposals.length} evidence-backed proposal${proposals.length === 1 ? "" : "s"} waiting for your decision.` : "Nothing is waiting for review. VoiceOS never enables a generated skill silently."}</p><div className="skill-proposal-list">{proposals.map((proposal) => <article className="skill-proposal-card" key={proposal.id}><div className="skill-proposal-title"><div><span className="proposal-version">Version {proposal.version}</span><h3>{proposal.name}</h3></div><span className="proposal-status">Review required</span></div><div className="proposal-facts"><span><strong>{proposal.evidence.length}</strong> successful audit turns</span><span><strong>{proposal.required_capabilities.length}</strong> typed capabilities</span></div><div className="capability-list">{proposal.required_capabilities.map((capability, index) => <code key={`${String(capability)}-${index}`}>{String(capability)}</code>)}</div><details><summary>Inspect proposed procedure</summary><pre>{proposal.content}</pre></details><details><summary>Inspect source evidence</summary><pre>{JSON.stringify(proposal.evidence, null, 2)}</pre></details><div className="proposal-actions"><button className="deny" onClick={() => onDecision(proposal, false)}>Reject</button><button className="approve" onClick={() => onDecision(proposal, true)}>Approve version</button></div><p className="proposal-safety">Approval records this version for later permissioned use. The proposal itself cannot execute.</p></article>)}</div></section>;
+}
+
+function SkillCatalogPanel({ skills, usages, onDisable, onFeedback }: { skills: SkillProposal[]; usages: SkillUsage[]; onDisable: (skill: SkillProposal) => void; onFeedback: (usage: SkillUsage, correct: boolean) => void }) {
+  return <section className="skill-proposals-panel panel"><div className="panel-heading"><div><p className="kicker">Active capability library</p><h2>VIC skills</h2></div><span className="healthy-label">{skills.length} active</span></div><div className="skill-proposal-list">{skills.map((skill) => <article className="skill-proposal-card" key={skill.id}><div className="skill-proposal-title"><div><span className="proposal-version">Version {skill.version}</span><h3>{skill.name}</h3></div><span className="provider-state green">Active</span></div><div className="capability-list">{skill.required_capabilities.length ? skill.required_capabilities.map((capability, index) => <code key={`${String(capability)}-${index}`}>{String(capability)}</code>) : <code>coordination procedure</code>}</div><details><summary>Inspect procedure</summary><pre>{skill.content}</pre></details><button className="deny" onClick={() => onDisable(skill)}>Disable skill</button></article>)}</div><div className="panel-heading"><div><p className="kicker">Learning from real use</p><h3>Recent skill activity</h3></div></div><div className="skill-proposal-list">{usages.length ? usages.slice(0, 10).map((usage) => <article className="skill-proposal-card" key={usage.id}><div className="skill-proposal-title"><div><span className="proposal-version">Version {usage.skill_version}</span><h3>{usage.skill_name}</h3></div><span className="proposal-status">{usage.outcome}</span></div>{usage.feedback ? <p className="proposal-safety">Reviewed: {usage.feedback}</p> : <div className="proposal-actions"><button className="approve" onClick={() => onFeedback(usage, true)}>Used correctly</button><button className="deny" onClick={() => onFeedback(usage, false)}>Used incorrectly</button></div>}</article>) : <EmptyState text="VIC has not used an approved typed workflow since tracking was enabled." />}</div></section>;
 }
 
 function ProviderPanel({ providers, active, wide = false }: { providers: Provider[]; active?: string; wide?: boolean }) {

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     ArtifactRecord, AutomationProposal, ConversationStore, ExecutionEvent, GoalRecord, JobRecord,
-    ProjectRecord, ProviderRunMetric, SkillProposal, StoreError, TaskRecord,
+    ProjectRecord, ProviderRunMetric, SkillProposal, SkillUsage, StoreError, TaskRecord,
 };
 
 impl ConversationStore {
@@ -510,6 +510,194 @@ impl ConversationStore {
         }
     }
 
+    pub fn set_skill_status_as(
+        &self,
+        owner_id: &str,
+        skill_id: &str,
+        status: &str,
+        actor: &str,
+    ) -> Result<Option<SkillProposal>, StoreError> {
+        require_text("owner_id", owner_id)?;
+        require_text("skill_id", skill_id)?;
+        require_text("actor", actor)?;
+        if status != "disabled" {
+            return Err(StoreError::InvalidInput(
+                "skill lifecycle status must be disabled".to_owned(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE skills SET status=?3, updated_at=?4 WHERE owner_id=?1 AND skill_id=?2 AND status='approved'",
+            params![owner_id.trim(), skill_id.trim(), status, now],
+        )?;
+        if changed == 1 {
+            transaction.execute(
+                "INSERT INTO execution_events(owner_id, stream_id, event_type, actor, payload_json, occurred_at) VALUES(?1, ?2, 'skill.status.changed', ?3, ?4, ?5)",
+                params![owner_id.trim(), skill_id.trim(), actor.trim(), serde_json::json!({"status": status}).to_string(), now],
+            )?;
+        }
+        transaction.commit()?;
+        drop(connection);
+        if changed == 1 {
+            self.skill_proposal(owner_id, skill_id)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn record_matching_skill_usages(
+        &self,
+        owner_id: &str,
+        conversation_id: Option<&str>,
+        request_id: Option<&str>,
+        tool_calls: &Value,
+        result: &Value,
+        outcome: &str,
+    ) -> Result<Vec<SkillUsage>, StoreError> {
+        require_text("owner_id", owner_id)?;
+        if !matches!(outcome, "completed" | "failed") {
+            return Err(StoreError::InvalidInput(
+                "invalid skill usage outcome".to_owned(),
+            ));
+        }
+        let names = tool_calls
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|call| call.get("name").and_then(Value::as_str))
+            .collect::<std::collections::HashSet<_>>();
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let approved = {
+            let mut statement = connection.prepare(
+                "SELECT skill_id, name, version, required_capabilities_json
+                 FROM skills s
+                 WHERE owner_id=?1 AND status='approved'
+                   AND version=(SELECT MAX(version) FROM skills newest WHERE newest.owner_id=s.owner_id AND newest.name=s.name AND newest.status='approved')",
+            )?;
+            let rows = statement.query_map([owner_id.trim()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let transaction = connection.transaction()?;
+        let mut recorded = Vec::new();
+        for (skill_id, skill_name, skill_version, capabilities_json) in approved {
+            let capabilities: Value = serde_json::from_str(&capabilities_json)?;
+            let matched = capabilities.as_array().is_some_and(|items| {
+                !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|item| item.as_str().is_some_and(|name| names.contains(name)))
+            });
+            if !matched {
+                continue;
+            }
+            let usage_id = Uuid::new_v4().to_string();
+            transaction.execute(
+                "INSERT INTO skill_usages(usage_id,owner_id,skill_id,conversation_id,request_id,tool_calls_json,result_json,outcome,used_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![usage_id, owner_id.trim(), skill_id, conversation_id, request_id, tool_calls.to_string(), result.to_string(), outcome, now],
+            )?;
+            transaction.execute(
+                "INSERT INTO execution_events(owner_id, stream_id, event_type, actor, payload_json, occurred_at) VALUES(?1, ?2, 'skill.used', 'vic', ?3, ?4)",
+                params![owner_id.trim(), skill_id, serde_json::json!({"usage_id": usage_id, "skill_name": skill_name, "skill_version": skill_version, "outcome": outcome}).to_string(), now],
+            )?;
+            recorded.push(SkillUsage {
+                id: usage_id,
+                owner_id: owner_id.trim().to_owned(),
+                skill_id,
+                skill_name,
+                skill_version,
+                conversation_id: conversation_id.map(str::to_owned),
+                request_id: request_id.map(str::to_owned),
+                tool_calls: tool_calls.clone(),
+                result: result.clone(),
+                outcome: outcome.to_owned(),
+                feedback: None,
+                feedback_note: None,
+                used_at: now.clone(),
+                reviewed_at: None,
+                reviewed_by: None,
+            });
+        }
+        transaction.commit()?;
+        Ok(recorded)
+    }
+
+    pub fn skill_usages(
+        &self,
+        owner_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SkillUsage>, StoreError> {
+        require_text("owner_id", owner_id)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT u.usage_id,u.owner_id,u.skill_id,s.name,s.version,u.conversation_id,u.request_id,u.tool_calls_json,u.result_json,u.outcome,u.feedback,u.feedback_note,u.used_at,u.reviewed_at,u.reviewed_by
+             FROM skill_usages u JOIN skills s ON s.skill_id=u.skill_id
+             WHERE u.owner_id=?1 ORDER BY u.used_at DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(
+            params![owner_id.trim(), limit.clamp(1, 200)],
+            skill_usage_row,
+        )?;
+        rows.map(|row| row.map_err(StoreError::from)).collect()
+    }
+
+    pub fn review_skill_usage_as(
+        &self,
+        owner_id: &str,
+        usage_id: &str,
+        feedback: &str,
+        note: Option<&str>,
+        actor: &str,
+    ) -> Result<Option<SkillUsage>, StoreError> {
+        require_text("owner_id", owner_id)?;
+        require_text("usage_id", usage_id)?;
+        require_text("actor", actor)?;
+        if !matches!(feedback, "correct" | "incorrect") {
+            return Err(StoreError::InvalidInput(
+                "feedback must be correct or incorrect".to_owned(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let skill_id: Option<String> = transaction
+            .query_row(
+                "SELECT skill_id FROM skill_usages WHERE owner_id=?1 AND usage_id=?2",
+                params![owner_id.trim(), usage_id.trim()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(skill_id) = skill_id else {
+            return Ok(None);
+        };
+        transaction.execute(
+            "UPDATE skill_usages SET feedback=?3,feedback_note=?4,reviewed_at=?5,reviewed_by=?6 WHERE owner_id=?1 AND usage_id=?2",
+            params![owner_id.trim(), usage_id.trim(), feedback, note.map(str::trim).filter(|value| !value.is_empty()), now, actor.trim()],
+        )?;
+        transaction.execute(
+            "INSERT INTO execution_events(owner_id, stream_id, event_type, actor, payload_json, occurred_at) VALUES(?1, ?2, 'skill.feedback.recorded', ?3, ?4, ?5)",
+            params![owner_id.trim(), skill_id, actor.trim(), serde_json::json!({"usage_id": usage_id.trim(), "feedback": feedback, "note": note}).to_string(), now],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        Ok(self
+            .skill_usages(owner_id, 200)?
+            .into_iter()
+            .find(|usage| usage.id == usage_id))
+    }
+
     pub fn create_automation_proposal(
         &self,
         owner_id: &str,
@@ -789,5 +977,36 @@ fn skill_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SkillRow> {
         evidence_json: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+    })
+}
+
+fn skill_usage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SkillUsage> {
+    let tool_calls_json: String = row.get(7)?;
+    let result_json: String = row.get(8)?;
+    let decode = |value: &str| {
+        serde_json::from_str(value).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                value.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
+    };
+    Ok(SkillUsage {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        skill_id: row.get(2)?,
+        skill_name: row.get(3)?,
+        skill_version: row.get(4)?,
+        conversation_id: row.get(5)?,
+        request_id: row.get(6)?,
+        tool_calls: decode(&tool_calls_json)?,
+        result: decode(&result_json)?,
+        outcome: row.get(9)?,
+        feedback: row.get(10)?,
+        feedback_note: row.get(11)?,
+        used_at: row.get(12)?,
+        reviewed_at: row.get(13)?,
+        reviewed_by: row.get(14)?,
     })
 }

@@ -276,7 +276,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 return
             self._proxy_capability_request(self.gateway.crawl4ai_url, "GET", "/v1/health", "crawl4ai_unavailable")
             return
-        if parsed.path == "/v1/skills/proposals":
+        if parsed.path in {"/v1/skills", "/v1/skills/usages", "/v1/skills/proposals"}:
             if not self._require_device():
                 return
             suffix = f"?{parsed.query}" if parsed.query else ""
@@ -445,6 +445,16 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             if not self._require_device():
                 return
             self._handle_skill_decision(path)
+            return
+        if path.startswith("/v1/skills/") and path.endswith("/status"):
+            if not self._require_device():
+                return
+            self._handle_skill_status(path)
+            return
+        if path.startswith("/v1/skills/usages/") and path.endswith("/feedback"):
+            if not self._require_device():
+                return
+            self._proxy_json_memory_request(path)
             return
         if path == "/v1/tasks" or (
             path.startswith("/v1/tasks/")
@@ -714,6 +724,13 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             output_tokens=coordinated.output_tokens,
             cost_usd=coordinated.cost_usd,
         )
+        self._record_skill_usages(
+            memory_conversation_id,
+            request_id,
+            coordinated.tool_calls,
+            coordinated.results,
+            coordinated.errors,
+        )
         self._json(
             HTTPStatus.OK,
             {
@@ -816,6 +833,46 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             return None
         context = payload.get("context") if isinstance(payload, dict) else None
         return context if isinstance(context, str) and context.strip() else None
+
+    def _record_skill_usages(
+        self,
+        conversation_id: str | None,
+        request_id: str | None,
+        tool_calls: list[dict[str, object]],
+        results: list[dict[str, object]],
+        errors: list[dict[str, object]],
+    ) -> None:
+        if not self.gateway.memory_url or not tool_calls:
+            return
+        body = json.dumps(
+            {
+                "conversation_id": conversation_id,
+                "request_id": request_id,
+                "tool_calls": tool_calls,
+                "result": {"results": results, "errors": errors},
+                "outcome": "failed" if errors else "completed",
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = Request(
+            f"{self.gateway.memory_url}/internal/v1/skills/usages",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read(MAX_TEXT_BYTES))
+            usages = payload.get("usages", []) if isinstance(payload, dict) else []
+            for usage in usages if isinstance(usages, list) else []:
+                if isinstance(usage, dict):
+                    self.gateway.audit_store.publish_client_event("skill.used", usage)
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+            self.gateway.audit_store.record_event(
+                "skill.usage.recording.failed",
+                {"request_id": request_id},
+                actor="gateway",
+            )
 
     def _record_ontology_shadow(self, text: str) -> None:
         """Fail open while Rust ontology decisions are evaluated in shadow mode."""
@@ -1403,6 +1460,53 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             )
         self._json(status, result)
 
+    def _handle_skill_status(self, path: str) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        if payload.get("status") != "disabled":
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "skill_status_must_be_disabled"})
+            return
+        if not self.gateway.memory_url:
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "skill_memory_unavailable"})
+            return
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        authorization = self.headers.get("Authorization")
+        if authorization:
+            headers["Authorization"] = authorization
+        request = Request(f"{self.gateway.memory_url}{path}", data=body, headers=headers, method="POST")
+        try:
+            with urlopen(request, timeout=10) as response:
+                result = json.loads(response.read(MAX_TEXT_BYTES))
+                status = HTTPStatus(response.status)
+        except HTTPError as error:
+            try:
+                result = json.loads(error.read(MAX_TEXT_BYTES))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                result = {"error": "skill_status_failed"}
+            self._json(HTTPStatus(error.code), result)
+            return
+        except (URLError, TimeoutError, json.JSONDecodeError):
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "skill_memory_unavailable"})
+            return
+        skill = result.get("skill") if isinstance(result, dict) else None
+        if isinstance(skill, dict) and _is_hermes_skill_proposal(skill):
+            skill_id = skill.get("id")
+            if isinstance(skill_id, str):
+                try:
+                    result["activation"] = self._skill_worker_rollback(skill_id)
+                except (OSError, HTTPError, URLError, TimeoutError, json.JSONDecodeError) as error:
+                    self.gateway.audit_store.record_event(
+                        "skill.rollback.failed",
+                        {"skill_id": skill_id, "error": str(error)[:500]},
+                        actor="hermes-skill-worker",
+                    )
+                    self._json(HTTPStatus.BAD_GATEWAY, {"error": "skill_rollback_failed", "skill": skill})
+                    return
+        self.gateway.audit_store.publish_client_event("skill.status.changed", result)
+        self._json(status, result)
+
     def _skill_worker_decision(self, skill_id: str, decision: str) -> dict[str, object]:
         if not self.gateway.skill_worker_url or not self.gateway.skill_worker_token_file:
             raise OSError("Hermes skill worker is not configured")
@@ -1410,6 +1514,22 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.skill_worker_url}/v1/proposals/{skill_id}/decision",
             data=json.dumps({"decision": decision}).encode("utf-8"),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=10) as response:
+            value = json.loads(response.read(MAX_TEXT_BYTES))
+        if not isinstance(value, dict):
+            raise OSError("Hermes skill worker returned malformed JSON")
+        return cast(dict[str, object], value)
+
+    def _skill_worker_rollback(self, skill_id: str) -> dict[str, object]:
+        if not self.gateway.skill_worker_url or not self.gateway.skill_worker_token_file:
+            raise OSError("Hermes skill worker is not configured")
+        token = Path(self.gateway.skill_worker_token_file).read_text(encoding="utf-8").strip()
+        request = Request(
+            f"{self.gateway.skill_worker_url}/v1/proposals/{skill_id}/rollback",
+            data=b"{}",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             method="POST",
         )

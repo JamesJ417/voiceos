@@ -33,6 +33,13 @@ pub(crate) fn router(state: AppState) -> Router {
             get(floor::get_floor).post(floor::change_floor),
         )
         .route("/v1/skills/proposals", get(skills::list_proposals))
+        .route("/v1/skills", get(skills::list_skills))
+        .route("/v1/skills/usages", get(skills::list_usages))
+        .route(
+            "/v1/skills/usages/{usage_id}/feedback",
+            post(skills::review_usage),
+        )
+        .route("/v1/skills/{skill_id}/status", post(skills::set_status))
         .route("/v1/tasks", get(tasks::list_tasks).post(tasks::create_task))
         .route("/v1/tasks/{task_id}", get(tasks::task_detail))
         .route(
@@ -92,5 +99,6 @@ pub(crate) fn router(state: AppState) -> Router {
             post(tasks::complete_initiative),
         )
         .route("/internal/v1/skills/import", post(skills::import_proposal))
+        .route("/internal/v1/skills/usages", post(skills::record_usage))
         .with_state(state)
 }

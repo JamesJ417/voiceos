@@ -51,6 +51,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var systemDetailView: TextView
     private lateinit var skillProposalStatusView: TextView
     private lateinit var skillProposalContainer: LinearLayout
+    private lateinit var skillCatalogStatusView: TextView
+    private lateinit var skillCatalogContainer: LinearLayout
+    private lateinit var skillUsageContainer: LinearLayout
     private lateinit var historyView: TextView
     private lateinit var taskStatusView: TextView
     private lateinit var taskContainer: LinearLayout
@@ -773,7 +776,20 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     orientation = LinearLayout.VERTICAL
                 }
                 addView(skillProposalContainer, fullWidthWrap().apply { topMargin = dp(8) })
-                addView(secondaryButton("REFRESH SKILL PROPOSALS") { loadSkillProposals() }, fullWidthWrap().apply { topMargin = dp(14) })
+                addView(secondaryButton("REFRESH SKILLS") { loadSkillProposals() }, fullWidthWrap().apply { topMargin = dp(14) })
+                addView(kicker("Active capability library").apply { setPadding(0, dp(20), 0, 0) }, fullWidthWrap())
+                skillCatalogStatusView = TextView(this@MainActivity).apply {
+                    text = "Loading approved skills…"
+                    textSize = 13f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(10), 0, 0)
+                }
+                addView(skillCatalogStatusView, fullWidthWrap())
+                skillCatalogContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(skillCatalogContainer, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(kicker("Recent VIC skill use").apply { setPadding(0, dp(20), 0, 0) }, fullWidthWrap())
+                skillUsageContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(skillUsageContainer, fullWidthWrap().apply { topMargin = dp(8) })
             }, fullWidthWrap().apply { topMargin = dp(14) })
         }
 
@@ -1736,6 +1752,112 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         skillProposalStatusView.setTextColor(CarbonPalette.red)
                     },
                 )
+            }
+        }
+        loadSkillCatalog()
+        loadSkillUsages()
+    }
+
+    private fun loadSkillCatalog() {
+        if (!::skillCatalogContainer.isInitialized) return
+        GatewayClient.getSkills(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(onSuccess = { skills ->
+                    skillCatalogContainer.removeAllViews()
+                    skillCatalogStatusView.text = "${skills.size} active skill${if (skills.size == 1) "" else "s"}. Newest approved version is used."
+                    skillCatalogStatusView.setTextColor(CarbonPalette.green)
+                    skills.forEach { skill ->
+                        val card = LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(dp(14), dp(12), dp(14), dp(12))
+                            background = carbonControl(this@MainActivity, CarbonPalette.green)
+                        }
+                        card.addView(TextView(this).apply {
+                            text = "${skill.name}  •  VERSION ${skill.version}"
+                            textSize = 15f
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextColor(CarbonPalette.white)
+                        }, fullWidthWrap())
+                        card.addView(TextView(this).apply {
+                            text = skill.requiredCapabilities.joinToString().ifBlank { "Coordination procedure" }
+                            textSize = 11f
+                            setTextColor(CarbonPalette.muted)
+                            setPadding(0, dp(6), 0, 0)
+                        }, fullWidthWrap())
+                        card.addView(secondaryButton("DISABLE") { setSkillEnabled(skill, false) }, fullWidthWrap().apply { topMargin = dp(10) })
+                        skillCatalogContainer.addView(card, fullWidthWrap().apply { topMargin = dp(8) })
+                    }
+                }, onFailure = { error ->
+                    skillCatalogStatusView.text = "Active skills unavailable. ${error.message.orEmpty()}"
+                    skillCatalogStatusView.setTextColor(CarbonPalette.red)
+                })
+            }
+        }
+    }
+
+    private fun setSkillEnabled(skill: SkillProposal, enabled: Boolean) {
+        GatewayClient.setSkillEnabled(GatewaySettings.baseUrl(this), skill.id, enabled, DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                result.fold(onSuccess = {
+                    Toast.makeText(this, "${skill.name} ${if (enabled) "enabled" else "disabled"}.", Toast.LENGTH_LONG).show()
+                    loadSkillProposals()
+                }, onFailure = { Toast.makeText(this, it.message.orEmpty(), Toast.LENGTH_LONG).show() })
+            }
+        }
+    }
+
+    private fun loadSkillUsages() {
+        if (!::skillUsageContainer.isInitialized) return
+        GatewayClient.getSkillUsages(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                skillUsageContainer.removeAllViews()
+                result.onSuccess { usages ->
+                    if (usages.isEmpty()) {
+                        skillUsageContainer.addView(TextView(this).apply {
+                            text = "VIC has not used an approved typed workflow since tracking was enabled."
+                            setTextColor(CarbonPalette.muted)
+                        }, fullWidthWrap())
+                    }
+                    usages.take(10).forEach { usage ->
+                        val row = LinearLayout(this).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(dp(12), dp(10), dp(12), dp(10))
+                            background = carbonControl(this@MainActivity, CarbonPalette.line)
+                        }
+                        row.addView(TextView(this).apply {
+                            text = "${usage.skillName} v${usage.skillVersion}  •  ${usage.outcome}"
+                            typeface = Typeface.DEFAULT_BOLD
+                            setTextColor(CarbonPalette.white)
+                        }, fullWidthWrap())
+                        if (usage.feedback == null) {
+                            val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                            actions.addView(secondaryButton("USED CORRECTLY") { reviewSkillUsage(usage, true) }, weightedButton())
+                            actions.addView(secondaryButton("USED INCORRECTLY") { reviewSkillUsage(usage, false) }, weightedButton().apply { marginStart = dp(8) })
+                            row.addView(actions, fullWidthWrap().apply { topMargin = dp(8) })
+                        } else {
+                            row.addView(TextView(this).apply {
+                                text = "REVIEWED: ${usage.feedback.uppercase()}"
+                                setTextColor(if (usage.feedback == "correct") CarbonPalette.green else CarbonPalette.red)
+                            }, fullWidthWrap())
+                        }
+                        skillUsageContainer.addView(row, fullWidthWrap().apply { topMargin = dp(8) })
+                    }
+                }.onFailure { error ->
+                    skillUsageContainer.addView(TextView(this).apply {
+                        text = "Skill history unavailable. ${error.message.orEmpty()}"
+                        setTextColor(CarbonPalette.red)
+                    }, fullWidthWrap())
+                }
+            }
+        }
+    }
+
+    private fun reviewSkillUsage(usage: SkillUsage, correct: Boolean) {
+        GatewayClient.reviewSkillUsage(GatewaySettings.baseUrl(this), usage.id, correct, DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                result.fold(onSuccess = { loadSkillUsages() }, onFailure = { Toast.makeText(this, it.message.orEmpty(), Toast.LENGTH_LONG).show() })
             }
         }
     }
