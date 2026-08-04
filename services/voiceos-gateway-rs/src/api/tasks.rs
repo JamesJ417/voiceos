@@ -538,37 +538,37 @@ pub(crate) async fn complete_initiative(
                 "errors": request.errors,
             }),
         )?;
-        if next_status == "completed" {
-            if let Some(detail) = store.task_detail(&owner, &task_id)? {
-                if let Some(step) = detail
-                    .steps
-                    .iter()
-                    .find(|step| step.owner == "vic" && step.status != "completed")
-                {
-                    store.update_task_step(
-                        &owner,
-                        &task_id,
-                        &step.id,
-                        "completed",
-                        None,
-                        json!({
-                            "provider": request.provider,
-                            "summary": request.response_text,
-                            "job_id": request.job_id,
-                        }),
-                        &format!("provider:{}", request.provider),
-                    )?;
-                }
-                store.create_task_handoff(
+        if next_status == "completed"
+            && let Some(detail) = store.task_detail(&owner, &task_id)?
+        {
+            if let Some(step) = detail
+                .steps
+                .iter()
+                .find(|step| step.owner == "vic" && step.status != "completed")
+            {
+                store.update_task_step(
                     &owner,
                     &task_id,
-                    "vic",
-                    "user",
-                    "review",
-                    &request.response_text,
+                    &step.id,
+                    "completed",
+                    None,
+                    json!({
+                        "provider": request.provider,
+                        "summary": request.response_text,
+                        "job_id": request.job_id,
+                    }),
                     &format!("provider:{}", request.provider),
                 )?;
             }
+            store.create_task_handoff(
+                &owner,
+                &task_id,
+                "vic",
+                "user",
+                "review",
+                &request.response_text,
+                &format!("provider:{}", request.provider),
+            )?;
         }
         Ok(job)
     })

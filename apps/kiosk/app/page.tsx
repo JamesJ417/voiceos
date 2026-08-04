@@ -12,6 +12,27 @@ type Message = {
   meta: string;
 };
 
+type ConversationFloor = {
+  conversation_id: string;
+  holder_device_id: string | null;
+  holder_display_name: string | null;
+  phase: "idle" | "listening" | "processing" | "speaking";
+  partial_transcript: string | null;
+  response_text: string | null;
+  revision: number;
+  expires_at_unix: number;
+  active: boolean;
+};
+
+type CanonicalMessage = {
+  sequence: number;
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  provider: string | null;
+  origin_device_id: string | null;
+  created_at: string;
+};
+
 type Approval = { request_id: string; tool: string; expires_at_unix?: number };
 type Provider = { name: string; configured?: boolean; role?: string };
 type GatewayHealth = {
@@ -98,6 +119,10 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : "VoiceOS could not complete that request.";
 }
 
+function isContinueHereCommand(text: string) {
+  return /^(vic[,.]?\s*)?(continue|pick up|move|switch)( the conversation)? here[.!?]?$/i.test(text.trim());
+}
+
 export default function Home() {
   const [view, setView] = useState<ViewName>("command");
   const [voiceState, setVoiceState] = useState<VoiceState>("ready");
@@ -120,6 +145,7 @@ export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [enrollmentCode, setEnrollmentCode] = useState("");
   const [speechRate, setSpeechRate] = useState(1.25);
+  const [floor, setFloor] = useState<ConversationFloor | null>(null);
   const recognition = useRef<RecognitionLike | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
@@ -139,14 +165,37 @@ export default function Home() {
   }, [gateway, token]);
 
   const loadHistory = useCallback(async () => {
-    const payload = await request<{ turns: Array<{ transcript: string; response_text: string; provider: string; processing_ms: number; created_at: string }> }>("/v1/audit/turns?limit=60");
-    const history = [...payload.turns].reverse().flatMap((turn) => [
-      { id: `${turn.created_at}-user`, role: "You" as const, body: turn.transcript, meta: formatTime(turn.created_at) },
-      { id: `${turn.created_at}-assistant`, role: "VIC" as const, body: turn.response_text, meta: `${turn.provider || "VIC"} · ${formatDuration(turn.processing_ms)}` },
-    ]);
+    const payload = await request<{ conversation_id: string | null; messages: CanonicalMessage[] }>("/v1/conversations/active");
+    const history = payload.messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map((message) => ({
+        id: String(message.sequence),
+        role: message.role === "user" ? "You" as const : "VIC" as const,
+        body: message.content,
+        meta: message.provider ? `${message.provider} · ${formatTime(message.created_at)}` : formatTime(message.created_at),
+      }));
     setMessages(history);
     const latest = history.filter((message) => message.role === "VIC").at(-1);
     if (latest) setLastResponse(latest.body);
+  }, [request]);
+
+  const loadFloor = useCallback(async () => {
+    const payload = await request<{ floor: ConversationFloor | null }>("/v1/conversations/active/floor");
+    setFloor(payload.floor);
+  }, [request]);
+
+  const changeFloor = useCallback(async (
+    action: "claim" | "update" | "release",
+    phase: ConversationFloor["phase"] = "listening",
+    partialTranscript?: string,
+    responseText?: string,
+  ) => {
+    const payload = await request<{ floor: ConversationFloor }>("/v1/conversations/active/floor", {
+      method: "POST",
+      body: JSON.stringify({ action, phase, partial_transcript: partialTranscript || null, response_text: responseText || null, display_name: "VoiceOS touch panel", ttl_seconds: 45 }),
+    });
+    setFloor(payload.floor);
+    return payload.floor;
   }, [request]);
 
   const loadSkillProposals = useCallback(async () => {
@@ -174,6 +223,7 @@ export default function Home() {
         loadHistory().catch(() => undefined),
         loadSkillProposals().catch(() => undefined),
         loadTasks().catch(() => undefined),
+        loadFloor().catch(() => undefined),
       ]);
       setConnected(true);
       setStatusMessage(`Connected · ${gatewayHealth.language_model ?? "provider ready"}`);
@@ -183,7 +233,7 @@ export default function Home() {
       setStatusMessage(errorText(error));
       setVoiceState("error");
     }
-  }, [gateway, loadHistory, loadSkillProposals, loadTasks, request]);
+  }, [gateway, loadFloor, loadHistory, loadSkillProposals, loadTasks, request]);
 
   useEffect(() => {
     const restore = window.setTimeout(() => {
@@ -206,6 +256,12 @@ export default function Home() {
     const refresh = window.setTimeout(() => void refreshStatus(), 0);
     return () => window.clearTimeout(refresh);
   }, [gateway, token, refreshStatus]);
+
+  useEffect(() => {
+    if (!gateway || !token) return;
+    const timer = window.setInterval(() => void loadFloor().catch(() => undefined), 15_000);
+    return () => window.clearInterval(timer);
+  }, [gateway, token, loadFloor]);
 
   useEffect(() => {
     if (!gateway || !token) return;
@@ -236,6 +292,20 @@ export default function Home() {
             const event = JSON.parse(data) as { id: number; type: string; payload: Record<string, unknown> };
             localStorage.setItem(STORAGE.eventCursor, String(event.id));
             if (event.type === "conversation.turn") void loadHistory();
+            if (event.type === "conversation.floor.changed") {
+              const nextFloor = event.payload.floor as ConversationFloor | undefined;
+              if (nextFloor) {
+                setFloor(nextFloor);
+                const thisDevice = localStorage.getItem(STORAGE.deviceId);
+                if (nextFloor.active && nextFloor.holder_device_id !== thisDevice) {
+                  recognition.current?.abort();
+                  speechSynthesis.cancel();
+                  setVoiceState("ready");
+                  setLiveTranscript(nextFloor.partial_transcript ?? "");
+                  setStatusMessage(`Conversation active on ${nextFloor.holder_display_name ?? "another device"}.`);
+                }
+              }
+            }
             if (event.type === "task.changed" || event.type === "task.progress.updated" || event.type === "daily_plan.proposed") {
               setStatusMessage("Shared plan and task state updated.");
               void loadTasks();
@@ -286,6 +356,7 @@ export default function Home() {
     setDraft("");
     setLiveTranscript(normalized);
     setVoiceState("processing");
+    await changeFloor("claim", "processing", normalized).catch(() => undefined);
     setMessages((current) => [...current, { id: makeId(), role: "You", body: normalized, meta: "Now" }]);
     try {
       const result = await request<{
@@ -307,7 +378,9 @@ export default function Home() {
       }]);
       setPendingApproval(result.approvals?.[0] ?? null);
       setStatusMessage(result.approvals?.length ? "Approval required before the tool can run." : "Response complete");
-      speak(result.response_text);
+      const currentDevice = localStorage.getItem(STORAGE.deviceId);
+      const speakingFloor = await changeFloor("update", "speaking", normalized, result.response_text).catch(() => null);
+      if (speakingFloor?.holder_device_id === currentDevice) speak(result.response_text);
     } catch (error) {
       setStatusMessage(errorText(error));
       setVoiceState("error");
@@ -323,8 +396,8 @@ export default function Home() {
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = speechRate;
     utterance.onstart = () => setVoiceState("speaking");
-    utterance.onend = () => setVoiceState("ready");
-    utterance.onerror = () => setVoiceState("ready");
+    utterance.onend = () => { setVoiceState("ready"); void changeFloor("release", "idle").catch(() => undefined); };
+    utterance.onerror = () => { setVoiceState("ready"); void changeFloor("release", "idle").catch(() => undefined); };
     speechSynthesis.speak(utterance);
   }
 
@@ -351,32 +424,48 @@ export default function Home() {
         transcript += event.results[index][0].transcript;
         final ||= event.results[index].isFinal;
       }
-      setLiveTranscript(transcript.trim());
+      const nextTranscript = transcript.trim();
+      setLiveTranscript(nextTranscript);
+      void changeFloor("update", "listening", nextTranscript).catch(() => undefined);
       if (final) {
         instance.stop();
-        void sendText(transcript);
+        if (isContinueHereCommand(transcript)) {
+          setStatusMessage("Conversation moved to this touch panel.");
+          setVoiceState("ready");
+          window.setTimeout(startListening, 250);
+        } else {
+          void sendText(transcript);
+        }
       }
     };
     instance.onerror = (event) => {
       setStatusMessage(`Microphone: ${event.error.replaceAll("-", " ")}`);
       setVoiceState("error");
+      void changeFloor("release", "idle").catch(() => undefined);
     };
     instance.onend = () => {
       recognition.current = null;
       setVoiceState((current) => current === "listening" ? "ready" : current);
     };
     setLiveTranscript("");
-    setVoiceState("listening");
-    instance.start();
+    void changeFloor("claim", "listening").then(() => {
+      setVoiceState("listening");
+      instance.start();
+    }).catch((error) => {
+      setStatusMessage(errorText(error));
+      setVoiceState("error");
+    });
   }
 
   function handleTalk() {
     if (voiceState === "listening") {
       recognition.current?.stop();
       setVoiceState("ready");
+      void changeFloor("release", "idle").catch(() => undefined);
     } else if (voiceState === "speaking") {
       speechSynthesis.cancel();
       setVoiceState("ready");
+      void changeFloor("release", "idle").catch(() => undefined);
     } else if (voiceState === "processing") {
       setStatusMessage("The current response is already processing.");
     } else {
@@ -479,6 +568,8 @@ export default function Home() {
 
   const copy = voiceCopy[voiceState];
   const recentMessages = useMemo(() => messages.slice(-4), [messages]);
+  const thisDeviceId = typeof window === "undefined" ? null : localStorage.getItem(STORAGE.deviceId);
+  const floorIsRemote = Boolean(floor?.active && floor.holder_device_id && floor.holder_device_id !== thisDeviceId);
 
   return (
     <main className="shell">
@@ -513,6 +604,7 @@ export default function Home() {
                 <button className="talk-hex" onClick={handleTalk} aria-label={`${copy.action}. ${copy.title}`}><span className="mic" aria-hidden="true"><i /></span><strong>{copy.action}</strong><small>{voiceState === "ready" ? "Touch to begin" : copy.eyebrow}</small></button>
               </div>
               <div className="state-track" aria-label={`Current state: ${voiceState}`}>{(["ready", "listening", "processing", "speaking"] as VoiceState[]).map((state) => <span key={state} className={state === voiceState ? "active" : ""}>{state}</span>)}</div>
+              {floorIsRemote && <button className="continue-here" onClick={startListening}>Continue here from {floor?.holder_display_name ?? "the other device"}</button>}
               <form className="text-composer" onSubmit={(event) => { event.preventDefault(); void sendText(draft); }}>
                 <label htmlFor="voiceos-text">Type a request</label>
                 <div><input id="voiceos-text" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask VIC…" /><button disabled={!draft.trim() || voiceState === "processing"}>Send</button></div>

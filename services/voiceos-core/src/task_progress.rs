@@ -89,6 +89,7 @@ impl ConversationStore {
         Ok(step)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_task_step(
         &self,
         owner_id: &str,
@@ -197,6 +198,7 @@ impl ConversationStore {
         Ok(Some(blocker))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_task_handoff(
         &self,
         owner_id: &str,
@@ -242,6 +244,7 @@ impl ConversationStore {
         Ok(handoff)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn attach_task_artifact(
         &self,
         owner_id: &str,

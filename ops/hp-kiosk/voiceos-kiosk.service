@@ -1,0 +1,38 @@
+[Unit]
+Description=VoiceOS Carbon Command wall terminal
+After=network-online.target tailscaled.service sound.target
+Wants=network-online.target
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+User=voiceos-kiosk
+Group=voiceos-kiosk
+SupplementaryGroups=audio video render input
+EnvironmentFile=/etc/voiceos/kiosk.env
+Environment=XDG_SESSION_TYPE=wayland
+Environment=MOZ_ENABLE_WAYLAND=1
+PAMName=login
+TTYPath=/dev/tty1
+StandardInput=tty-force
+StandardOutput=journal
+StandardError=journal
+ExecStart=/opt/voiceos/bin/start-carbon-kiosk
+Restart=on-failure
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+ReadWritePaths=/var/lib/voiceos-kiosk
+
+[Install]
+WantedBy=graphical.target

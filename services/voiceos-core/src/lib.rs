@@ -1,5 +1,6 @@
 mod agent_store;
 mod engine;
+mod floor;
 mod model;
 mod outreach;
 mod provider;
@@ -14,11 +15,12 @@ pub use engine::{
     MemoryExtractor, OwnerTurnInput, Summarizer,
 };
 pub use model::{
-    ArtifactRecord, AutomationProposal, ChatMessage, ConversationContext, ConversationMessage,
-    DocumentRecord, ExecutionEvent, GoalRecord, JobRecord, Memory, OutreachPolicy, OutreachRecord,
-    ProjectRecord, ProviderCompletion, ProviderRequest, ProviderRunMetric, Role, SkillProposal,
-    TaskArtifactRecord, TaskBlockerRecord, TaskDetail, TaskHandoffRecord, TaskInitiative,
-    TaskProgress, TaskRecord, TaskStepRecord, ToolCall, ToolDefinition, Usage,
+    ArtifactRecord, AutomationProposal, ChatMessage, ConversationContext, ConversationFloor,
+    ConversationMessage, DocumentRecord, ExecutionEvent, GoalRecord, JobRecord, Memory,
+    OutreachPolicy, OutreachRecord, ProjectRecord, ProviderCompletion, ProviderRequest,
+    ProviderRunMetric, Role, SkillProposal, TaskArtifactRecord, TaskBlockerRecord, TaskDetail,
+    TaskHandoffRecord, TaskInitiative, TaskProgress, TaskRecord, TaskStepRecord, ToolCall,
+    ToolDefinition, Usage,
 };
 pub use provider::{
     CodexBridgeProvider, MockProvider, OllamaProvider, Provider, ProviderError, ProviderRouter,

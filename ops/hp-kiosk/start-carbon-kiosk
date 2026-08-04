@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${VOICEOS_KIOSK_URL:?VOICEOS_KIOSK_URL must be set in /etc/voiceos/kiosk.env}"
+
+browser=""
+for candidate in /usr/bin/google-chrome-stable /usr/bin/chromium /usr/bin/chromium-browser /snap/bin/chromium; do
+  if [[ -x "$candidate" ]]; then
+    browser="$candidate"
+    break
+  fi
+done
+if [[ -z "$browser" ]]; then
+  echo "No supported Chromium browser is installed" >&2
+  exit 1
+fi
+
+install -d -m 0700 /var/lib/voiceos-kiosk/browser
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+install -d -m 0700 "$XDG_RUNTIME_DIR"
+
+exec dbus-run-session -- cage -s -- "$browser" \
+  --kiosk \
+  --no-first-run \
+  --disable-session-crashed-bubble \
+  --disable-infobars \
+  --autoplay-policy=no-user-gesture-required \
+  --user-data-dir=/var/lib/voiceos-kiosk/browser \
+  "$VOICEOS_KIOSK_URL"

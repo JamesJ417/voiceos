@@ -381,24 +381,54 @@ fn task_detail_projects_owned_steps_blockers_handoffs_artifacts_and_activity() {
 #[test]
 fn vic_outreach_is_durable_deduplicated_and_actionable() {
     let store = ConversationStore::in_memory().unwrap();
-    let actions = vec!["talk_now".to_owned(), "show_progress".to_owned(), "later".to_owned()];
-    let first = store.create_outreach(
-        "owner", "status_update", "check_in", "VIC wants to talk",
-        "I finished the first useful step.", "Task progress changed", None, None,
-        Some("task-1-progress"), &actions, None,
-    ).unwrap();
-    let duplicate = store.create_outreach(
-        "owner", "status_update", "check_in", "Duplicate",
-        "This should resolve to the active event.", "Same reason", None, None,
-        Some("task-1-progress"), &actions, None,
-    ).unwrap();
+    let actions = vec![
+        "talk_now".to_owned(),
+        "show_progress".to_owned(),
+        "later".to_owned(),
+    ];
+    let first = store
+        .create_outreach(
+            "owner",
+            "status_update",
+            "check_in",
+            "VIC wants to talk",
+            "I finished the first useful step.",
+            "Task progress changed",
+            None,
+            None,
+            Some("task-1-progress"),
+            &actions,
+            None,
+        )
+        .unwrap();
+    let duplicate = store
+        .create_outreach(
+            "owner",
+            "status_update",
+            "check_in",
+            "Duplicate",
+            "This should resolve to the active event.",
+            "Same reason",
+            None,
+            None,
+            Some("task-1-progress"),
+            &actions,
+            None,
+        )
+        .unwrap();
     assert_eq!(first.id, duplicate.id);
     assert_eq!(store.outreaches("owner", false, 20).unwrap().len(), 1);
 
-    let delivered = store.act_on_outreach("owner", &first.id, "delivered", None).unwrap().unwrap();
+    let delivered = store
+        .act_on_outreach("owner", &first.id, "delivered", None)
+        .unwrap()
+        .unwrap();
     assert_eq!(delivered.status, "delivered");
     assert!(delivered.delivered_at.is_some());
-    let snoozed = store.act_on_outreach("owner", &first.id, "later", Some(20)).unwrap().unwrap();
+    let snoozed = store
+        .act_on_outreach("owner", &first.id, "later", Some(20))
+        .unwrap()
+        .unwrap();
     assert_eq!(snoozed.status, "snoozed");
     assert!(snoozed.snoozed_until.is_some());
 

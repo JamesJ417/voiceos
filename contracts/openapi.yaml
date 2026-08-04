@@ -132,6 +132,40 @@ paths:
                 type: string
                 description: Each message event contains a ConversationMessage JSON payload.
         "401": { description: Device authentication required }
+  /v1/conversations/active/floor:
+    get:
+      operationId: getActiveConversationFloor
+      summary: Inspect the active microphone and playback lease
+      responses:
+        "200":
+          description: Current floor state; the floor is inactive after its lease expires
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [floor]
+                properties:
+                  floor: { oneOf: [{ $ref: "#/components/schemas/ConversationFloor" }, { type: "null" }] }
+    post:
+      operationId: changeActiveConversationFloor
+      summary: Claim, renew, update, or release the active conversation floor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConversationFloorRequest"
+      responses:
+        "200":
+          description: Updated floor state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [floor]
+                properties:
+                  floor: { $ref: "#/components/schemas/ConversationFloor" }
+        "409": { description: A non-holder attempted to update an active lease }
   /v1/events:
     get:
       operationId: streamSharedClientEvents
@@ -493,7 +527,7 @@ paths:
       responses:
         "200": { description: Applied action and refreshed task-detail projection }
         "400": { description: Invalid or unsupported task action }
-        "404": { description: Task, step, or blocker does not exist }
+        "404": { description: "Task, step, or blocker does not exist" }
   /v1/files:
     get:
       operationId: listKnowledgeFiles
@@ -858,6 +892,33 @@ components:
           type: integer
           minimum: 0
           description: Persist this value after applying every returned message.
+    ConversationFloorRequest:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [claim, update, release] }
+        phase: { type: string, enum: [idle, listening, processing, speaking] }
+        partial_transcript: { type: [string, "null"], maxLength: 4000 }
+        response_text: { type: [string, "null"], maxLength: 16000 }
+        display_name: { type: [string, "null"], maxLength: 120 }
+        ttl_seconds: { type: integer, minimum: 10, maximum: 120, default: 45 }
+    ConversationFloor:
+      type: object
+      required: [owner_id, conversation_id, phase, revision, updated_at, expires_at_unix, active]
+      properties:
+        owner_id: { type: string }
+        conversation_id: { type: string, format: uuid }
+        lease_id: { type: [string, "null"], format: uuid }
+        holder_device_id: { type: [string, "null"], format: uuid }
+        holder_display_name: { type: [string, "null"] }
+        phase: { type: string, enum: [idle, listening, processing, speaking] }
+        partial_transcript: { type: [string, "null"] }
+        response_text: { type: [string, "null"] }
+        revision: { type: integer, minimum: 0 }
+        acquired_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: string, format: date-time }
+        expires_at_unix: { type: integer }
+        active: { type: boolean }
     ClientEvent:
       type: object
       required: [id, type, payload, created_at]
@@ -865,7 +926,7 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, task.changed, task.initiative.updated, task.progress.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
+          enum: [conversation.turn, conversation.floor.changed, task.changed, task.initiative.updated, task.progress.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
         payload: { type: object }
         created_at: { type: string, format: date-time }
     Task:

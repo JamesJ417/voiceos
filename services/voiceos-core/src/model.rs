@@ -282,6 +282,23 @@ pub struct ExecutionEvent {
     pub occurred_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationFloor {
+    pub owner_id: String,
+    pub conversation_id: String,
+    pub lease_id: Option<String>,
+    pub holder_device_id: Option<String>,
+    pub holder_display_name: Option<String>,
+    pub phase: String,
+    pub partial_transcript: Option<String>,
+    pub response_text: Option<String>,
+    pub revision: i64,
+    pub acquired_at: Option<String>,
+    pub updated_at: String,
+    pub expires_at_unix: i64,
+    pub active: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SkillProposal {
     pub id: String,

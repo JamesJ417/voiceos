@@ -291,6 +291,23 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS execution_events_stream_idx
             ON execution_events(owner_id, stream_id, event_id);
+        CREATE TABLE IF NOT EXISTS conversation_floors (
+            owner_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            lease_id TEXT,
+            holder_device_id TEXT,
+            holder_display_name TEXT,
+            phase TEXT NOT NULL CHECK(phase IN ('idle', 'listening', 'processing', 'speaking')),
+            partial_transcript TEXT,
+            response_text TEXT,
+            revision INTEGER NOT NULL DEFAULT 0,
+            acquired_at TEXT,
+            updated_at TEXT NOT NULL,
+            expires_at_unix INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id),
+            FOREIGN KEY(holder_device_id) REFERENCES devices(device_id)
+        );
         CREATE TRIGGER IF NOT EXISTS execution_events_no_update
             BEFORE UPDATE ON execution_events BEGIN
                 SELECT RAISE(ABORT, 'execution_events are append-only');

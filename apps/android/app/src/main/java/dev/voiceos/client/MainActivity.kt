@@ -209,6 +209,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             val partial = recognitionText(partialResults) ?: return
             latestPartialTranscript = partial
             transcriptView.text = "You: $partial"
+            changeFloor("update", "listening", partial)
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
@@ -975,6 +976,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val generation = ++requestGeneration
         renderState(VoiceState.PROCESSING, "Contacting gateway")
         VoiceWidgetProvider.updateStatus(this, "Processing")
+        changeFloor("claim", "processing", text)
 
         GatewayClient.submitText(
             GatewaySettings.baseUrl(this),
@@ -1008,6 +1010,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         VoiceWidgetProvider.updateStatus(this, "Speaking")
                         VoiceWidgetProvider.refreshTasks(this)
                         if (currentPage == AppPage.TASKS) loadTasks()
+                        changeFloor("update", "speaking", turn.transcript, turn.responseText)
                         speak(turn.responseText, RESPONSE_UTTERANCE_ID)
                     },
                     onFailure = { error ->
@@ -1062,6 +1065,21 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     if (isFinishing || isDestroyed) return@runOnUiThread
                     when (event.type) {
                         "conversation.turn" -> if (currentPage == AppPage.HISTORY) loadHistory()
+                        "conversation.floor.changed" -> {
+                            val floorValue = event.payload.optJSONObject("floor")
+                            if (floorValue != null) {
+                                val floor = GatewayClient.parseConversationFloor(floorValue)
+                                val thisDevice = DeviceCredentials.deviceId(this)
+                                if (floor.active && floor.holderDeviceId != thisDevice) {
+                                    speechRecognizer?.cancel()
+                                    textToSpeech?.stop()
+                                    renderState(
+                                        VoiceState.READY,
+                                        "Conversation active on ${floor.holderDisplayName ?: "another device"}",
+                                    )
+                                }
+                            }
+                        }
                         "task.changed", "task.progress.updated", "daily_plan.proposed" -> {
                             VoiceWidgetProvider.refreshTasks(this)
                             if (currentPage == AppPage.TASKS) loadTasks()
@@ -1108,6 +1126,22 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     }
                 }
             },
+        )
+    }
+
+    private fun changeFloor(
+        action: String,
+        phase: String,
+        transcript: String? = null,
+        response: String? = null,
+    ) {
+        GatewayClient.changeConversationFloor(
+            baseUrl = GatewaySettings.baseUrl(this),
+            action = action,
+            phase = phase,
+            partialTranscript = transcript,
+            responseText = response,
+            deviceToken = DeviceCredentials.token(this),
         )
     }
 

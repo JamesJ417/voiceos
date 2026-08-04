@@ -89,6 +89,17 @@ data class VoiceTaskArtifact(val kind: String, val uri: String, val description:
 
 data class ClientEvent(val id: Long, val type: String, val payload: JSONObject)
 
+data class ConversationFloor(
+    val conversationId: String,
+    val holderDeviceId: String?,
+    val holderDisplayName: String?,
+    val phase: String,
+    val partialTranscript: String?,
+    val responseText: String?,
+    val revision: Long,
+    val active: Boolean,
+)
+
 data class VicOutreach(
     val id: String,
     val kind: String,
@@ -111,6 +122,26 @@ class EventSubscription internal constructor(
 }
 
 object GatewayClient {
+    fun changeConversationFloor(
+        baseUrl: String,
+        action: String,
+        phase: String,
+        partialTranscript: String? = null,
+        responseText: String? = null,
+        deviceToken: String?,
+        callback: (Result<ConversationFloor>) -> Unit = {},
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection {
+                    changeConversationFloorBlocking(
+                        baseUrl, action, phase, partialTranscript, responseText, deviceToken,
+                    )
+                }
+            })
+        }, "voiceos-conversation-floor").start()
+    }
+
     fun createTestOutreach(
         baseUrl: String,
         deviceToken: String?,
@@ -561,6 +592,44 @@ object GatewayClient {
             connection.disconnect()
         }
     }
+
+    private fun changeConversationFloorBlocking(
+        baseUrl: String,
+        action: String,
+        phase: String,
+        partialTranscript: String?,
+        responseText: String?,
+        deviceToken: String?,
+    ): ConversationFloor {
+        val request = JSONObject()
+            .put("action", action)
+            .put("phase", phase)
+            .put("partial_transcript", partialTranscript)
+            .put("response_text", responseText)
+            .put("display_name", "Pixel")
+            .put("ttl_seconds", 45)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val connection = URL("$baseUrl/v1/conversations/active/floor")
+            .openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, request)
+            return parseConversationFloor(responseJson(connection).getJSONObject("floor"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    fun parseConversationFloor(value: JSONObject): ConversationFloor = ConversationFloor(
+        conversationId = value.optString("conversation_id"),
+        holderDeviceId = value.optString("holder_device_id").takeIf(String::isNotBlank),
+        holderDisplayName = value.optString("holder_display_name").takeIf(String::isNotBlank),
+        phase = value.optString("phase", "idle"),
+        partialTranscript = value.optString("partial_transcript").takeIf(String::isNotBlank),
+        responseText = value.optString("response_text").takeIf(String::isNotBlank),
+        revision = value.optLong("revision", 0),
+        active = value.optBoolean("active", false),
+    )
 
     private fun decideApprovalBlocking(
         baseUrl: String,

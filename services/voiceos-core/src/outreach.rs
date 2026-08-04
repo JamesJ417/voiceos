@@ -64,13 +64,13 @@ impl ConversationStore {
             "INSERT INTO owners(owner_id, display_name, created_at, updated_at) VALUES(?1, NULL, ?2, ?2) ON CONFLICT(owner_id) DO UPDATE SET updated_at=excluded.updated_at",
             params![owner, now],
         )?;
-        if let Some(key) = dedupe_key.filter(|key| !key.trim().is_empty()) {
-            if let Some(existing) = connection.query_row(
+        if let Some(key) = dedupe_key.filter(|key| !key.trim().is_empty())
+            && let Some(existing) = connection.query_row(
                 "SELECT outreach_id, owner_id, kind, priority, title, body, reason, status, task_id, conversation_id, dedupe_key, actions_json, scheduled_for, created_at, delivered_at, responded_at, snoozed_until FROM outreach_events WHERE owner_id=?1 AND dedupe_key=?2 AND status IN ('queued','delivered','snoozed') ORDER BY created_at DESC LIMIT 1",
                 params![owner, key.trim()], outreach_row,
-            ).optional()? {
-                return Ok(existing);
-            }
+            ).optional()?
+        {
+            return Ok(existing);
         }
         let id = Uuid::new_v4().to_string();
         connection.execute(

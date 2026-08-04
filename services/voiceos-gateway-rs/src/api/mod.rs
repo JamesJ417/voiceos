@@ -2,6 +2,7 @@ mod auth;
 mod conversations;
 mod documents;
 mod error;
+mod floor;
 mod health;
 mod ontology;
 mod outreach;
@@ -26,6 +27,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/v1/conversations/active/events",
             get(conversations::events),
+        )
+        .route(
+            "/v1/conversations/active/floor",
+            get(floor::get_floor).post(floor::change_floor),
         )
         .route("/v1/skills/proposals", get(skills::list_proposals))
         .route("/v1/tasks", get(tasks::list_tasks).post(tasks::create_task))

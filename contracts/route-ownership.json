@@ -13,6 +13,8 @@
     { "method": "GET", "path": "/v1/conversations/active", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/conversations/active/messages", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/conversations/active/events", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
+    { "method": "GET", "path": "/v1/conversations/active/floor", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
+    { "method": "POST", "path": "/v1/conversations/active/floor", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/events", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/events/recovery", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/capabilities/speech/health", "current_implementation": "python-proxy-speech", "target_owner": "rust-control-plane", "backend": "speech-worker" },

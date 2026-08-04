@@ -326,6 +326,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         if parsed.path in {
             "/v1/conversations/active",
             "/v1/conversations/active/messages",
+            "/v1/conversations/active/floor",
         }:
             if not self._require_device():
                 return
@@ -419,6 +420,11 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             if not self._require_device():
                 return
             self._handle_text_turn()
+            return
+        if path == "/v1/conversations/active/floor":
+            if not self._require_device():
+                return
+            self._proxy_json_memory_request(path)
             return
         if path == "/v1/speech/sessions":
             if not self._require_device():
@@ -1193,6 +1199,12 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             self.gateway.audit_store.publish_client_event(
                 "task.changed", {"path": path, "method": method, "response": payload}
             )
+        if path == "/v1/conversations/active/floor" and status < HTTPStatus.BAD_REQUEST:
+            floor = payload.get("floor")
+            if isinstance(floor, dict):
+                self.gateway.audit_store.publish_client_event(
+                    "conversation.floor.changed", {"floor": floor}
+                )
         if path == "/v1/tasks" and method == "POST" and status < HTTPStatus.BAD_REQUEST:
             self.gateway.start_task_initiative(payload, self.authenticated_device_id)
         if path == "/v1/outreach" and method == "POST" and status < HTTPStatus.BAD_REQUEST:

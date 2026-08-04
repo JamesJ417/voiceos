@@ -43,6 +43,9 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     private var silentAttempts = 0
     private var generation = 0
     private var pendingApproval: ApprovalRequest? = null
+    private var floorEvents: EventSubscription? = null
+    private var floorCursor = 0L
+    private var lastFloorUpdateMillis = 0L
     private val sessionId by lazy {
         val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
         preferences.getString(SESSION_ID, null)?.takeIf(String::isNotBlank)
@@ -113,6 +116,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         super.onCreate()
         createNotificationChannel()
         textToSpeech = TextToSpeech(this, this)
+        startFloorEvents()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -182,6 +186,9 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         textToSpeech?.shutdown()
         textToSpeech = null
         releaseWakeLock()
+        floorEvents?.close()
+        floorEvents = null
+        changeFloor("release", "idle")
         active = false
         persistSnapshot(STATE_STOPPED, false, null, null, null, 0L)
         super.onDestroy()
@@ -213,8 +220,18 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         acquireWakeLock()
         handler.removeCallbacks(sessionTimeout)
         handler.postDelayed(sessionTimeout, SESSION_MAX_MILLIS)
-        publish(STATE_STARTING, detail = "Conversation Mode starting")
-        scheduleListening(150L)
+        changeFloor("claim", "listening") { result ->
+            handler.post {
+                if (!active) return@post
+                result.fold(
+                    onSuccess = {
+                        publish(STATE_STARTING, detail = "Conversation Mode starting")
+                        scheduleListening(150L)
+                    },
+                    onFailure = { failAndStop("I could not claim the VoiceOS conversation channel.") },
+                )
+            }
+        }
     }
 
     private fun pauseSession() {
@@ -226,6 +243,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         recognizer?.cancel()
         textToSpeech?.stop()
         publish(STATE_PAUSED, detail = "Conversation paused")
+        changeFloor("release", "idle")
         updateNotification("Conversation paused", paused = true)
     }
 
@@ -237,9 +255,18 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         paused = false
         stopAfterSpeech = false
         pauseAfterSpeech = false
-        publish(STATE_STARTING, detail = "Resuming conversation")
-        updateNotification("Listening for you", paused = false)
-        scheduleListening(150L)
+        changeFloor("claim", "listening") { result ->
+            handler.post {
+                result.fold(
+                    onSuccess = {
+                        publish(STATE_STARTING, detail = "Resuming conversation")
+                        updateNotification("Listening for you", paused = false)
+                        scheduleListening(150L)
+                    },
+                    onFailure = { pauseSession() },
+                )
+            }
+        }
     }
 
     private fun stopSession(detail: String) {
@@ -261,6 +288,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         releaseWakeLock()
         pendingApproval = null
         publish(STATE_STOPPED, detail = detail, activeOverride = false)
+        changeFloor("release", "idle")
         VoiceWidgetProvider.updateStatus(this, "Ready")
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -467,6 +495,62 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             STATE_ERROR -> "Conversation error"
             else -> "Ready"
         })
+        val phase = when (state) {
+            STATE_LISTENING, STATE_STARTING -> "listening"
+            STATE_PROCESSING -> "processing"
+            STATE_SPEAKING -> "speaking"
+            else -> null
+        }
+        if (phase != null && activeOverride) {
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (transcript.isNullOrBlank() || now - lastFloorUpdateMillis >= 750L) {
+                lastFloorUpdateMillis = now
+                changeFloor("update", phase, transcript, response)
+            }
+        }
+    }
+
+    private fun changeFloor(
+        action: String,
+        phase: String,
+        transcript: String? = null,
+        response: String? = null,
+        callback: (Result<ConversationFloor>) -> Unit = {},
+    ) {
+        GatewayClient.changeConversationFloor(
+            baseUrl = GatewaySettings.baseUrl(this),
+            action = action,
+            phase = phase,
+            partialTranscript = transcript,
+            responseText = response,
+            deviceToken = DeviceCredentials.token(this),
+            callback = callback,
+        )
+    }
+
+    private fun startFloorEvents() {
+        val token = DeviceCredentials.token(this) ?: return
+        floorEvents?.close()
+        floorEvents = GatewayClient.streamEvents(
+            GatewaySettings.baseUrl(this),
+            token,
+            floorCursor,
+            onEvent = { event ->
+                floorCursor = event.id
+                if (event.type != "conversation.floor.changed") return@streamEvents
+                val value = event.payload.optJSONObject("floor") ?: return@streamEvents
+                val next = GatewayClient.parseConversationFloor(value)
+                val thisDevice = DeviceCredentials.deviceId(this)
+                if (active && next.active && next.holderDeviceId != thisDevice) {
+                    handler.post {
+                        stopSession("Conversation continued on ${next.holderDisplayName ?: "another device"}")
+                    }
+                }
+            },
+            onClosed = {
+                if (active) handler.postDelayed({ startFloorEvents() }, 2_000L)
+            },
+        )
     }
 
     private fun persistSnapshot(
