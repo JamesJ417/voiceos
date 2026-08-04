@@ -1,0 +1,24 @@
+[Unit]
+Description=VoiceOS Rust conversation and memory gateway
+After=network-online.target ollama.service voiceos-codex.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voiceos
+Group=voiceos
+WorkingDirectory=/opt/voiceos
+EnvironmentFile=/etc/voiceos/rust.env
+ExecStart=/opt/voiceos/bin/voiceos-gateway
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voiceos-rust
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

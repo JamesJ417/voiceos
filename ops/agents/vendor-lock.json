@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "dependencies": {
+    "hermes-agent": {
+      "repository": "https://github.com/NousResearch/hermes-agent.git",
+      "commit": "a01f979b6e86d24a798968d5341788e008f96caf",
+      "license": "MIT",
+      "integration": "isolated upstream Python service"
+    },
+    "buzz": {
+      "repository": "https://github.com/block/buzz.git",
+      "commit": "a5dbdf5e61e4c512acd99c219c79c154ddb57295",
+      "license": "Apache-2.0",
+      "integration": "upstream Rust relay and JSON CLI adapter"
+    }
+  }
+}

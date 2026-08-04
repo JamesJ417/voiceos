@@ -1,0 +1,12 @@
+<resources>
+    <style name="Theme.VoiceOS" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:navigationBarColor">@color/voice_surface</item>
+        <item name="android:statusBarColor">@color/voice_surface</item>
+        <item name="android:colorAccent">@color/voice_accent</item>
+        <item name="android:windowBackground">@color/voice_surface</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

@@ -1,0 +1,23 @@
+[Unit]
+Description=VoiceOS Moshi Candle Q8 speech backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voiceos
+Group=voiceos
+SupplementaryGroups=video render
+WorkingDirectory=/var/lib/voiceos/moshi
+Environment=HOME=/var/lib/voiceos/moshi
+Environment=HF_HOME=/var/lib/voiceos/moshi/huggingface
+Environment=LD_LIBRARY_PATH=/usr/local/cuda-13.1/targets/x86_64-linux/lib
+ExecStart=/opt/voiceos/bin/moshi-backend --config /etc/voiceos/moshi-q8.json standalone
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voiceos/moshi

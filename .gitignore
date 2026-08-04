@@ -1,0 +1,47 @@
+# IDE and local tool state
+.gradle/
+.idea/
+.vscode/
+*.iml
+local.properties
+
+# Generated build output
+/target/
+**/build/
+**/dist/
+**/.next/
+**/node_modules/
+**/__pycache__/
+*.py[cod]
+
+# Runtime data and local deployment staging
+/.voiceos-deploy-*/
+/work/
+/outputs/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.jsonl
+*.log
+*.pid
+
+# Credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*credentials*.json
+*secrets*.json
+
+# Operating-system noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,29 @@
+[Unit]
+Description=VoiceOS read-only Codex Sol bridge
+After=network-online.target
+Wants=network-online.target
+Before=voiceos-gateway.service
+
+[Service]
+Type=simple
+User=llm
+Group=voiceos
+WorkingDirectory=@@REPO_ROOT@@
+Environment=HOME=/home/llm
+Environment=PATH=/home/llm/.local/bin:/usr/local/bin:/usr/bin:/bin
+RuntimeDirectory=voiceos-codex
+RuntimeDirectoryMode=0750
+StateDirectory=voiceos-codex
+StateDirectoryMode=0750
+ExecStart=/usr/bin/python3 -m services.codex_bridge.server --socket /run/voiceos-codex/codex.sock --codex /home/llm/.local/bin/codex --model gpt-5.6-sol --reasoning-effort high --workdir /var/lib/voiceos-codex/work
+Restart=on-failure
+RestartSec=3
+UMask=0007
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/llm/.codex /var/lib/voiceos-codex /run/voiceos-codex
+
+[Install]
+WantedBy=multi-user.target

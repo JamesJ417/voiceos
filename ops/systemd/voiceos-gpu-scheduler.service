@@ -1,0 +1,25 @@
+[Unit]
+Description=VoiceOS exclusive GPU lease scheduler
+After=ollama.service voiceos-moshi.service
+
+[Service]
+Type=simple
+User=root
+Group=voiceos
+WorkingDirectory=/opt/voiceos
+EnvironmentFile=/etc/voiceos/voiceos-gateway.env
+EnvironmentFile=-/etc/voiceos/voiceos-gpu.env
+ExecStart=/usr/bin/python3 /opt/voiceos/ops/rig/gpu_scheduler.py
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=voiceos-gpu-scheduler
+RuntimeDirectoryMode=0750
+UMask=0007
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/voiceos-gpu-scheduler
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+[Unit]
+Description=Warm the VoiceOS Ollama model
+Requires=ollama.service
+After=ollama.service
+Before=voiceos-gateway.service
+PartOf=ollama.service
+
+[Service]
+Type=oneshot
+User=voiceos
+Group=voiceos
+WorkingDirectory=@@REPO_ROOT@@
+EnvironmentFile=/etc/voiceos/voiceos-gateway.env
+ExecStart=/usr/bin/python3 @@REPO_ROOT@@/ops/rig/warm_ollama.py
+TimeoutStartSec=180
+RemainAfterExit=true
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voiceos.local/contracts/web-retrieval-evidence.schema.json",
+  "title": "VoiceOS web retrieval evidence",
+  "type": "object",
+  "required": ["requested_url", "final_url", "retrieved_at", "content_sha256", "markdown", "links", "truncated", "trust", "can_issue_instructions"],
+  "properties": {
+    "requested_url": { "type": "string", "format": "uri" },
+    "final_url": { "type": "string", "format": "uri" },
+    "retrieved_at": { "type": "string", "format": "date-time" },
+    "content_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "markdown": { "type": "string" },
+    "links": { "type": "array", "items": { "type": "string" } },
+    "truncated": { "type": "boolean" },
+    "trust": { "const": "untrusted_external_content" },
+    "can_issue_instructions": { "const": false }
+  },
+  "additionalProperties": false
+}

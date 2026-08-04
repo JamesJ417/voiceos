@@ -1,0 +1,867 @@
+openapi: 3.1.0
+info:
+  title: VoiceOS Gateway
+  version: 0.7.0
+servers:
+  - url: http://127.0.0.1:8787
+security:
+  - deviceBearer: []
+paths:
+  /v1/health:
+    get:
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Gateway and model availability
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/tools/system.health:
+    get:
+      operationId: getSystemHealth
+      responses:
+        "200":
+          description: Deterministic gateway-host health evidence
+          content:
+            application/json:
+              schema:
+                type: object
+  /v1/providers:
+    get:
+      operationId: listProviders
+      responses:
+        "200": { description: Configured and disabled provider slots }
+  /v1/tools:
+    get:
+      operationId: listTools
+      responses:
+        "200": { description: Allowlisted tools and approval policies }
+  /v1/tools/execute:
+    post:
+      operationId: executeTool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                arguments: { type: object }
+                approved: { type: boolean, default: false }
+                session_id: { type: string }
+      responses:
+        "200": { description: Tool result or approval-required proposal }
+        "403": { description: Tool is not allowlisted }
+  /v1/enrollment/sessions:
+    post:
+      operationId: createEnrollment
+      security: []
+      parameters:
+        - in: header
+          name: X-VoiceOS-Admin-Token
+          required: true
+          schema: { type: string }
+      responses:
+        "201": { description: One-time QR payload and expiration }
+        "401": { description: Administrator authentication required }
+  /v1/enrollment/exchange:
+    post:
+      operationId: exchangeEnrollment
+      security: []
+      responses:
+        "201": { description: Device ID and bearer credential }
+        "401": { description: "Enrollment is invalid, expired, or already used" }
+  /v1/conversations/active:
+    get:
+      operationId: getActiveConversation
+      summary: Recover the authenticated owner's current conversation snapshot
+      parameters:
+        - $ref: "#/components/parameters/DeviceAuthorization"
+      responses:
+        "200":
+          description: The active conversation and its newest bounded message window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConversationSnapshot" }
+        "401": { description: Device authentication required }
+  /v1/conversations/active/messages:
+    get:
+      operationId: listActiveConversationMessages
+      summary: Recover messages after a durable event cursor
+      parameters:
+        - $ref: "#/components/parameters/DeviceAuthorization"
+        - in: query
+          name: after
+          schema: { type: integer, minimum: 0, default: 0 }
+          description: Return messages with a sequence greater than this cursor.
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+      responses:
+        "200":
+          description: Ordered messages and the newest returned cursor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConversationMessagePage" }
+        "401": { description: Device authentication required }
+  /v1/conversations/active/events:
+    get:
+      operationId: streamActiveConversationEvents
+      summary: Subscribe to resumable active-conversation events
+      parameters:
+        - $ref: "#/components/parameters/DeviceAuthorization"
+        - in: query
+          name: after
+          schema: { type: integer, minimum: 0, default: 0 }
+          description: Start after this sequence when Last-Event-ID is unavailable.
+        - in: header
+          name: Last-Event-ID
+          required: false
+          schema: { type: integer, minimum: 0 }
+          description: Reconnection cursor used when the explicit after query is absent.
+      responses:
+        "200":
+          description: SSE message events whose id is the durable message sequence
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Each message event contains a ConversationMessage JSON payload.
+        "401": { description: Device authentication required }
+  /v1/events:
+    get:
+      operationId: streamSharedClientEvents
+      summary: Resume the shared messages, tasks, approvals, plans, and status stream
+      parameters:
+        - $ref: "#/components/parameters/DeviceAuthorization"
+        - in: query
+          name: after
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: header
+          name: Last-Event-ID
+          required: false
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Durable SSE events with globally increasing IDs
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { description: Device authentication required }
+  /v1/events/recovery:
+    get:
+      operationId: recoverSharedClientEvents
+      parameters:
+        - $ref: "#/components/parameters/DeviceAuthorization"
+        - in: query
+          name: after
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        "200":
+          description: Bounded durable events after the supplied cursor
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [after, latest_event_id, events]
+                properties:
+                  after: { type: integer, minimum: 0 }
+                  latest_event_id: { type: integer, minimum: 0 }
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/ClientEvent" }
+        "401": { description: Device authentication required }
+  /v1/capabilities/speech/health:
+    get:
+      operationId: getSpeechCapabilityHealth
+      summary: Inspect the isolated speech-to-speech worker and GPU scheduler
+      responses:
+        "200":
+          description: Speech worker configuration, capacity, backend, and scheduler state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapabilityHealth" }
+        "401": { description: Device authentication required }
+        "503": { description: Speech worker is unavailable }
+  /v1/capabilities/crawl4ai/health:
+    get:
+      operationId: getCrawlCapabilityHealth
+      summary: Inspect the isolated Crawl4AI adapter
+      responses:
+        "200":
+          description: Crawl adapter configuration and availability
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CapabilityHealth" }
+        "401": { description: Device authentication required }
+        "503": { description: Crawl4AI adapter is unavailable }
+  /v1/skills/proposals:
+    get:
+      operationId: listSkillProposals
+      summary: List validated Hermes skill proposals mirrored into VoiceOS
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [proposed, approved, rejected, superseded] }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Owner-scoped skill proposals with evidence and provenance
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposals]
+                properties:
+                  proposals:
+                    type: array
+                    items: { $ref: "#/components/schemas/SkillProposal" }
+        "401": { description: Device authentication required }
+  /v1/skills/proposals/{skill_id}/decision:
+    post:
+      operationId: decideSkillProposal
+      summary: Approve or reject a validated Hermes skill proposal
+      parameters:
+        - in: path
+          name: skill_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approve]
+              properties:
+                approve: { type: boolean }
+                reason: { type: string, maxLength: 2000 }
+      responses:
+        "200":
+          description: Decided proposal with immutable decision evidence
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { description: Device authentication required }
+        "404": { description: Skill proposal was not found }
+        "409": { description: Skill proposal was already decided }
+  /v1/audit/turns:
+    get:
+      operationId: listAuditTurns
+      responses:
+        "200": { description: Recent conversation audit records }
+  /v1/audit/events:
+    get:
+      operationId: listAuditEvents
+      responses:
+        "200": { description: Recent enrollment and tool-decision events }
+  /v1/tasks:
+    get:
+      operationId: listTasks
+      parameters:
+        - in: query
+          name: include_completed
+          schema: { type: boolean, default: false }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: The primary owner's shared task board
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tasks]
+                properties:
+                  tasks:
+                    type: array
+                    items: { $ref: "#/components/schemas/Task" }
+        "401": { description: Device authentication required }
+    post:
+      operationId: createTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, observable_outcome, estimated_minutes]
+              properties:
+                title: { type: string, minLength: 1 }
+                observable_outcome: { type: string, minLength: 1 }
+                estimated_minutes: { type: integer, minimum: 1 }
+                project_id: { type: [string, "null"] }
+                parent_task_id: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Task created, analyzed immediately, and queued for safe proactive work
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task, initiative]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+                  initiative: { $ref: "#/components/schemas/TaskInitiative" }
+        "401": { description: Device authentication required }
+  /v1/checkins/daily:
+    get:
+      operationId: getDailyCheckin
+      summary: Get today's shared twelve-question planning progress
+      parameters:
+        - $ref: "#/components/parameters/DeviceAuthorization"
+      responses:
+        "200":
+          description: Current status, durable answers, and the next question
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [date, status, answered, total, answers]
+                properties:
+                  date: { type: string, format: date }
+                  status: { type: string, enum: [not_started, active, paused, completed] }
+                  answered: { type: integer, minimum: 0, maximum: 12 }
+                  total: { type: integer, const: 12 }
+                  next_question:
+                    type: [object, "null"]
+                    properties:
+                      index: { type: integer, minimum: 1, maximum: 12 }
+                      text: { type: string }
+                  answers:
+                    type: array
+                    items: { type: object }
+        "401": { description: Device authentication required }
+  /v1/plans/daily:
+    get:
+      operationId: getDailyActionPlan
+      summary: Get the plan proposed from today's twelve-question check-in
+      parameters:
+        - $ref: "#/components/parameters/DeviceAuthorization"
+      responses:
+        "200":
+          description: Today's top priorities, next actions, blockers, dependencies, and approval items
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { description: Device authentication required }
+  /v1/tasks/{task_id}/status:
+    post:
+      operationId: updateTaskStatus
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [proposed, ready, active, blocked, completed, cancelled]
+      responses:
+        "200":
+          description: Updated and audited task
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+        "401": { description: Device authentication required }
+        "404": { description: Task does not exist for the primary owner }
+  /v1/files:
+    get:
+      operationId: listKnowledgeFiles
+      responses:
+        "200": { description: Device-owned private knowledge files }
+        "401": { description: Device authentication required }
+    post:
+      operationId: uploadKnowledgeFile
+      parameters:
+        - in: header
+          name: X-VoiceOS-File-Name
+          required: true
+          schema: { type: string }
+        - in: header
+          name: X-VoiceOS-Document-Mode
+          required: false
+          schema: { type: string, enum: [profile, reference], default: reference }
+      requestBody:
+        required: true
+        content:
+          text/plain: { schema: { type: string } }
+          text/markdown: { schema: { type: string } }
+          text/csv: { schema: { type: string } }
+          application/json: { schema: { type: string } }
+      responses:
+        "201": { description: "File stored, hashed, and chunked" }
+        "401": { description: Device authentication required }
+        "413": { description: File exceeds 5 MB }
+        "415": { description: File type is not supported }
+  /v1/files/{document_id}:
+    delete:
+      operationId: deleteKnowledgeFile
+      parameters:
+        - in: path
+          name: document_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: File and extracted passages deleted }
+        "404": { description: File does not exist for this device }
+  /v1/ontology/catalog:
+    get:
+      operationId: getOntologyCatalog
+      responses:
+        "200": { description: "Versioned canonical intents, entities, argument schemas, units, and approval requirements" }
+        "401": { description: Device authentication required }
+  /v1/ontology/interpret:
+    post:
+      operationId: interpretPhrase
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phrase]
+              properties:
+                phrase: { type: string, minLength: 1, maxLength: 8000 }
+      responses:
+        "200":
+          description: Audited canonical interpretation or an unrecognized/rejected decision
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [decision]
+                properties:
+                  decision: { $ref: "#/components/schemas/InterpretationDecision" }
+        "401": { description: Device authentication required }
+  /v1/ontology/aliases:
+    get:
+      operationId: listApprovedAliases
+      responses:
+        "200": { description: Owner-approved aliases visible to this enrolled identity }
+    post:
+      operationId: approveAlias
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phrase, entity_kind, entity_id]
+              properties:
+                phrase: { type: string, minLength: 1 }
+                entity_kind: { type: string, enum: [device, provider, service, document, memory, decision] }
+                entity_id: { type: string }
+      responses:
+        "201": { description: Alias validated against the catalog and stored }
+        "400": { description: Alias phrase or canonical entity is invalid }
+  /v1/ontology/interpretations/{interpretation_id}/correct:
+    post:
+      operationId: correctInterpretation
+      parameters:
+        - in: path
+          name: interpretation_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request]
+              properties:
+                request: { $ref: "#/components/schemas/CanonicalRequest" }
+                note: { type: string }
+      responses:
+        "200": { description: Corrected interpretation with durable correction history }
+        "400": { description: Correction failed schema validation or is not owned by this identity }
+  /v1/approvals/decide:
+    post:
+      operationId: decideApproval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id, decision]
+              properties:
+                request_id: { type: string, format: uuid }
+                decision: { type: string, enum: [approve, deny] }
+      responses:
+        "200": { description: Approval decision and optional tool result }
+        "404": { description: Approval request does not exist }
+        "409": { description: Approval expired or was already decided }
+  /v1/sessions:
+    post:
+      operationId: createSession
+      responses:
+        "201":
+          description: New conversation session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+  /v1/speech/sessions:
+    post:
+      operationId: createSpeechSession
+      summary: Reserve a short-lived authenticated speech-to-speech session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [conversation_id]
+              properties:
+                conversation_id: { type: string, minLength: 1, maxLength: 200 }
+      responses:
+        "201":
+          description: Pending speech session and private stream path
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpeechSession" }
+        "401": { description: Device authentication required }
+        "429": { description: Speech capacity has been reached }
+        "503": { description: Speech backend is unavailable }
+  /v1/retrieval/web:
+    post:
+      operationId: retrieveWebEvidence
+      summary: Retrieve one public web page as untrusted evidence
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url]
+              properties:
+                url: { type: string, format: uri, maxLength: 4096 }
+      responses:
+        "200":
+          description: Bounded evidence that cannot issue VoiceOS instructions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [evidence]
+                properties:
+                  evidence: { $ref: "#/components/schemas/RetrievalEvidence" }
+        "400": { description: URL violates the public-network retrieval policy }
+        "401": { description: Device authentication required }
+        "503": { description: Crawl4AI adapter is unavailable }
+  /v1/turns/audio:
+    post:
+      operationId: submitAudioTurn
+      parameters:
+        - in: header
+          name: X-Session-Id
+          required: false
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              contentMediaType: audio/L16;rate=16000;channels=1
+      responses:
+        "200":
+          description: Completed mock turn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Turn"
+        "413":
+          description: Audio payload is too large
+  /v1/turns/text:
+    post:
+      operationId: submitTextTurn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                session_id:
+                  type: string
+                  description: Compatibility alias; authenticated devices resume their server-owned active conversation.
+                text: { type: string, minLength: 1, maxLength: 8000 }
+                provider:
+                  type: string
+                  description: Optional explicit provider hint for trusted clients.
+      responses:
+        "200":
+          description: Completed text turn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Turn"
+        "400":
+          description: Invalid JSON or missing text
+components:
+  securitySchemes:
+    deviceBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: VoiceOSDeviceCredential
+  parameters:
+    DeviceAuthorization:
+      in: header
+      name: Authorization
+      required: true
+      schema: { type: string, pattern: "^Bearer .+" }
+      description: Bearer credential issued during device enrollment.
+  schemas:
+    Health:
+      type: object
+      required: [status, gateway, speech_to_text, language_model, text_to_speech]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        gateway: { type: string }
+        speech_to_text: { type: string }
+        language_model: { type: string }
+        text_to_speech: { type: string }
+    CapabilityHealth:
+      type: object
+      required: [status]
+      additionalProperties: true
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        configured: { type: boolean }
+    SkillProposal:
+      type: object
+      required: [id, name, version, status, content, required_capabilities, evidence, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [proposed, approved, rejected, superseded] }
+        content: { type: string }
+        content_sha256: { type: [string, "null"], pattern: "^[a-f0-9]{64}$" }
+        source_run_id: { type: [string, "null"] }
+        required_capabilities:
+          type: array
+          items: { type: object }
+        evidence:
+          type: array
+          items: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SpeechSession:
+      type: object
+      required: [session_id, conversation_id, codec, transport_protocol, protocol_version, backend, connection_deadline_unix, expires_at_unix, stream_path]
+      properties:
+        session_id: { type: string, format: uuid }
+        conversation_id: { type: string }
+        input_sample_rate_hz: { type: integer, minimum: 8000 }
+        output_sample_rate_hz: { type: integer, minimum: 8000 }
+        codec: { type: string }
+        transport_protocol: { type: string }
+        protocol_version: { type: integer, minimum: 0 }
+        backend: { type: string }
+        created_at_unix: { type: integer }
+        connection_deadline_unix: { type: integer }
+        expires_at_unix: { type: integer }
+        stream_path: { type: string }
+    RetrievalEvidence:
+      type: object
+      required: [requested_url, final_url, retrieved_at, content_sha256, markdown, links, truncated, trust, can_issue_instructions]
+      properties:
+        requested_url: { type: string, format: uri }
+        final_url: { type: string, format: uri }
+        retrieved_at: { type: string, format: date-time }
+        content_sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        markdown: { type: string }
+        links:
+          type: array
+          items: { type: string, format: uri }
+        truncated: { type: boolean }
+        trust: { type: string, const: untrusted_external_content }
+        can_issue_instructions: { type: boolean, const: false }
+    Session:
+      type: object
+      required: [session_id, created_at]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          description: Server-owned persistent conversation identifier.
+        created_at: { type: string, format: date-time }
+    ConversationMessage:
+      type: object
+      required: [sequence, conversation_id, role, content, created_at]
+      properties:
+        sequence: { type: integer, minimum: 1 }
+        conversation_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant, system, tool] }
+        content: { type: string }
+        provider: { type: [string, "null"] }
+        origin_device_id: { type: [string, "null"], format: uuid }
+        created_at: { type: string, format: date-time }
+    ConversationSnapshot:
+      type: object
+      required: [conversation_id, messages, latest_sequence]
+      properties:
+        conversation_id: { type: string, format: uuid }
+        messages:
+          type: array
+          maxItems: 200
+          description: Newest bounded message window, ordered by sequence.
+          items: { $ref: "#/components/schemas/ConversationMessage" }
+        latest_sequence:
+          type: integer
+          minimum: 0
+          description: Persist this value as the next recovery and SSE cursor.
+    ConversationMessagePage:
+      type: object
+      required: [after, messages, latest_sequence]
+      properties:
+        after: { type: integer, minimum: 0 }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/ConversationMessage" }
+        latest_sequence:
+          type: integer
+          minimum: 0
+          description: Persist this value after applying every returned message.
+    ClientEvent:
+      type: object
+      required: [id, type, payload, created_at]
+      properties:
+        id: { type: integer, minimum: 1 }
+        type:
+          type: string
+          enum: [conversation.turn, task.changed, task.initiative.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed]
+        payload: { type: object }
+        created_at: { type: string, format: date-time }
+    Task:
+      type: object
+      required: [id, owner_id, title, observable_outcome, estimated_minutes, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        project_id: { type: [string, "null"] }
+        parent_task_id: { type: [string, "null"] }
+        title: { type: string }
+        observable_outcome: { type: string }
+        estimated_minutes: { type: integer, minimum: 1 }
+        status: { type: string, enum: [proposed, ready, active, blocked, completed, cancelled] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TaskInitiative:
+      type: object
+      required: [task_id, job_id, status, summary, capabilities, started_actions, next_actions, approval_boundary]
+      properties:
+        task_id: { type: string, format: uuid }
+        job_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, paused, completed, failed] }
+        summary: { type: string }
+        capabilities:
+          type: array
+          items: { type: string }
+        started_actions:
+          type: array
+          items: { type: string }
+        next_actions:
+          type: array
+          items: { type: string }
+        approval_boundary: { type: string }
+    CanonicalRequest:
+      type: object
+      required: [intent, confidence, source]
+      properties:
+        intent: { type: string }
+        entities:
+          type: array
+          items:
+            type: object
+            required: [kind, id]
+            properties:
+              kind: { type: string }
+              id: { type: string }
+              surface: { type: [string, "null"] }
+        arguments: { type: object, additionalProperties: true }
+        confidence:
+          type: object
+          required: [score, level]
+          properties:
+            score: { type: number, minimum: 0, maximum: 1 }
+            level: { type: string, enum: [low, medium, high] }
+        source: { type: string, enum: [deterministic, approved_alias, model_fallback, user_correction] }
+    InterpretationDecision:
+      type: object
+      required: [id, owner_id, original_phrase, normalized_phrase, status, validation_issues, corrections, final_decision, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        original_phrase: { type: string }
+        normalized_phrase: { type: string }
+        interpretation:
+          anyOf:
+            - { $ref: "#/components/schemas/CanonicalRequest" }
+            - { type: "null" }
+        status: { type: string, enum: [resolved, needs_confirmation, unrecognized, rejected] }
+        validation_issues:
+          type: array
+          items: { type: object }
+        corrections:
+          type: array
+          items: { type: object }
+        final_decision: { type: string, enum: [resolved, needs_confirmation, unrecognized, rejected] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    Turn:
+      type: object
+      required: [session_id, transcript, response_text, processing_ms]
+      properties:
+        session_id:
+          type: string
+          format: uuid
+          description: Server-owned persistent conversation identifier.
+        transcript: { type: string }
+        response_text: { type: string }
+        processing_ms: { type: integer }
+        provider: { type: string }
+        tool_calls:
+          type: array
+          items: { type: object }
+        approvals:
+          type: array
+          items: { type: object }
+        results:
+          type: array
+          items: { type: object }
+        errors:
+          type: array
+          items: { type: object }
+        evidence: { type: [object, "null"] }
+        usage:
+          type: object
+          properties:
+            input_tokens: { type: [integer, "null"] }
+            output_tokens: { type: [integer, "null"] }
+            cost_usd: { type: [number, "null"] }
+        reply_audio_url: { type: [string, "null"] }

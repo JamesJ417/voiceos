@@ -1,0 +1,14 @@
+[Unit]
+Description=VoiceOS security and reliability evaluation
+After=voiceos-gateway.service
+
+[Service]
+Type=oneshot
+User=voiceos
+Group=voiceos
+WorkingDirectory=/opt/voiceos
+ExecStart=/usr/bin/python3 /opt/voiceos/ops/evaluation/run_voiceos_evaluation.py --database /var/lib/voiceos/audit.sqlite3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/voiceos/evaluations

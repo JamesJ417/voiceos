@@ -1,0 +1,24 @@
+[Unit]
+Description=VoiceOS Gateway
+After=network-online.target tailscaled.service ollama.service voiceos-model-warm.service voiceos-codex.service voiceos-hermes.service voiceos-hermes-skill-worker.service
+Wants=network-online.target voiceos-model-warm.service voiceos-codex.service voiceos-hermes.service voiceos-hermes-skill-worker.service
+
+[Service]
+Type=simple
+User=voiceos
+Group=voiceos
+WorkingDirectory=@@REPO_ROOT@@
+EnvironmentFile=/etc/voiceos/voiceos-gateway.env
+EnvironmentFile=-/etc/voiceos/voiceos-admin.env
+ExecStart=/usr/bin/python3 -m services.gateway.server --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=3
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voiceos
+
+[Install]
+WantedBy=multi-user.target

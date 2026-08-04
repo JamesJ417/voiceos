@@ -1,0 +1,19 @@
+[Unit]
+Description=VoiceOS signed single-use root action broker
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=voiceos
+RuntimeDirectory=voiceos-root-broker
+RuntimeDirectoryMode=0750
+StateDirectory=voiceos-root-broker
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3 /opt/voiceos/services/gateway/root_broker.py --socket /run/voiceos-root-broker/broker.sock --key-file /etc/voiceos/root-broker.key --state /var/lib/voiceos-root-broker/consumed.sqlite3
+Restart=on-failure
+RestartSec=2s
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

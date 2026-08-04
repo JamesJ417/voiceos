@@ -1,0 +1,27 @@
+[Unit]
+Description=VoiceOS Hermes skill quarantine and provenance worker
+After=network-online.target voiceos-hermes.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voiceos-hermes
+Group=voiceos-agents
+WorkingDirectory=/opt/voiceos
+Environment=HOME=/var/lib/voiceos/hermes
+Environment=HERMES_SKILLS_ROOT=/var/lib/voiceos/hermes/skills
+Environment=VOICEOS_SKILL_CONTROL_ROOT=/var/lib/voiceos/hermes-skill-control
+Environment=VOICEOS_SKILL_WORKER_TOKEN_FILE=/etc/voiceos/hermes-skill-worker.key
+Environment=VOICEOS_MEMORY_URL=http://127.0.0.1:8790
+ExecStart=/usr/bin/python3 -m services.gateway.hermes_skill_worker --host 127.0.0.1 --port 8794
+Restart=on-failure
+RestartSec=3
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voiceos/hermes/skills /var/lib/voiceos/hermes-skill-control
+
+[Install]
+WantedBy=multi-user.target

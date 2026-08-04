@@ -1,0 +1,25 @@
+[Unit]
+Description=VoiceOS isolated Crawl4AI retrieval adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voiceos
+Group=voiceos
+WorkingDirectory=/opt/voiceos
+Environment=HOME=/var/lib/voiceos/crawl4ai
+EnvironmentFile=-/etc/voiceos/voiceos-crawl4ai.env
+ExecStart=/opt/voiceos/venvs/crawl4ai/bin/uvicorn services.crawl4ai_adapter.app:app --host 127.0.0.1 --port 8793
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voiceos/crawl4ai
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=link-local multicast
+
+[Install]
+WantedBy=multi-user.target

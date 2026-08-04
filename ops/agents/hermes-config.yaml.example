@@ -1,0 +1,17 @@
+model:
+  provider: "custom"
+  default: "replace-with-installed-ollama-model"
+  base_url: "http://127.0.0.1:11434/v1"
+  # Hermes enforces a 64K minimum. The RTX 5060 Ti should be monitored during
+  # the first long-context run; reduce model size rather than this window.
+  context_length: 65536
+  ollama_num_ctx: 65536
+
+platforms:
+  api_server:
+    enabled: true
+    host: "127.0.0.1"
+    port: 8642
+
+# Hermes owns skills and agent tools inside its isolated home. VoiceOS still
+# owns device identity, canonical memory, deterministic commands, and approvals.

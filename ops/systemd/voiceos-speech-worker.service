@@ -1,0 +1,24 @@
+[Unit]
+Description=VoiceOS full-duplex speech relay
+After=network-online.target voiceos-gpu-scheduler.service
+Wants=network-online.target
+Requires=voiceos-gpu-scheduler.service
+
+[Service]
+Type=simple
+User=voiceos
+Group=voiceos
+SupplementaryGroups=video render
+WorkingDirectory=/opt/voiceos
+EnvironmentFile=-/etc/voiceos/voiceos-speech.env
+ExecStart=/opt/voiceos/venvs/speech/bin/uvicorn services.speech_worker.app:app --host 127.0.0.1 --port 8792
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voiceos/speech
+
+[Install]
+WantedBy=multi-user.target
