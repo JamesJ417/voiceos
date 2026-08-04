@@ -154,19 +154,13 @@ pub(crate) async fn voice_command(
             .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
 
     let Some(command) = decision.interpretation else {
-        return Ok(Json(clarification(
-            "I heard a task request, but I need a little more detail. Say, for example, add a task to call the dentist.",
-            None,
-        )));
+        return Ok(Json(model_fallback(None)));
     };
     if !command.intent.0.starts_with("task.") {
         return Ok(Json(json!({"handled": false})));
     }
     if decision.status != DecisionStatus::Resolved {
-        return Ok(Json(clarification(
-            "I am not confident enough to change your task list. Please say the task more specifically.",
-            Some(&command),
-        )));
+        return Ok(Json(model_fallback(Some(&command))));
     }
 
     let owner = state.primary_owner_id.clone();
@@ -626,6 +620,22 @@ fn clarification(message: &str, command: Option<&CanonicalRequest>) -> Value {
     })
 }
 
+fn model_fallback(command: Option<&CanonicalRequest>) -> Value {
+    json!({
+        "handled": false,
+        "task_candidate": true,
+        "canonical_candidate": command.map(|request| json!({
+            "intent": request.intent.0,
+            "arguments": request.arguments,
+            "confidence": request.confidence.score,
+        })),
+        "evidence": {
+            "reason": "task_interpretation_unresolved",
+            "fallback": "reasoning_provider"
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -634,7 +644,7 @@ mod tests {
     use voiceos_core::ConversationStore;
     use voiceos_ontology::{Confidence, IntentId, ResolutionSource};
 
-    use super::{execute_voice_task_command, looks_like_task_command};
+    use super::{execute_voice_task_command, looks_like_task_command, model_fallback};
 
     fn command(
         intent: &str,
@@ -704,6 +714,23 @@ mod tests {
             "How can you help me with my task list?"
         ));
         assert!(!looks_like_task_command("Tell me about black holes"));
+    }
+
+    #[test]
+    fn unresolved_task_language_falls_through_to_the_reasoning_provider() {
+        let candidate = command(
+            "task.assist",
+            BTreeMap::from([("reference".to_owned(), json!("my list"))]),
+        );
+        let result = model_fallback(Some(&candidate));
+
+        assert_eq!(result["handled"], json!(false));
+        assert_eq!(result["task_candidate"], json!(true));
+        assert_eq!(result["evidence"]["fallback"], json!("reasoning_provider"));
+        assert_eq!(
+            result["canonical_candidate"]["intent"],
+            json!("task.assist")
+        );
     }
 
     #[test]

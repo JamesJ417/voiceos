@@ -524,6 +524,80 @@ class GatewayTest(unittest.TestCase):
             core.server_close()
             thread.join(timeout=2)
 
+    def test_unresolved_task_language_reaches_model_with_authoritative_board(self) -> None:
+        class TaskCoreStub(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                payload = {
+                    "tasks": [
+                        {
+                            "id": "task-recipe-cards",
+                            "title": "Print and laminate recipe cards",
+                            "status": "ready",
+                            "estimated_minutes": 20,
+                        }
+                    ]
+                }
+                self._reply(payload)
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                if self.path == "/internal/v1/tasks/command":
+                    self._reply({"handled": False})
+                else:
+                    self._reply({})
+
+            def _reply(self, payload: dict[str, object]) -> None:
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        class TaskRouterStub:
+            default_name = "ollama"
+            context: str | None = None
+
+            def respond(self, text: str, provider=None, tools=None, context=None, conversation_id=None):
+                del text, provider, tools, conversation_id
+                self.context = context
+                return ProviderResponse(
+                    text="I can help organize, print, and laminate the recipe cards.",
+                    provider="ollama",
+                )
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), TaskCoreStub)
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        original_router = self.server.coordinator.router
+        router = TaskRouterStub()
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        self.server.coordinator.router = router  # type: ignore[assignment]
+        try:
+            body = json.dumps(
+                {"text": "How can you move the things on my list forward?"}
+            ).encode()
+            status, payload = self.request(
+                "POST", "/v1/turns/text", body, content_type="application/json"
+            )
+
+            self.assertEqual(200, status)
+            self.assertEqual("ollama", payload["provider"])
+            self.assertIn("recipe cards", payload["response_text"])
+            self.assertIn("Print and laminate recipe cards", router.context or "")
+            self.assertIn("authoritative", (router.context or "").casefold())
+        finally:
+            self.server.memory_url = original_memory_url
+            self.server.coordinator.router = original_router
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
     def test_daily_checkin_asks_and_persists_twelve_questions(self) -> None:
         start = json.dumps({"text": "Start my daily check-in"}).encode()
         status, payload = self.request(
