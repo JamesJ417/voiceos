@@ -8,4 +8,5 @@
     <color name="voice_text_muted">#8D9B9D</color>
     <color name="voice_line">#2A3438</color>
     <color name="voice_healthy">#4ADE80</color>
+    <color name="launcher_background">#060809</color>
 </resources>

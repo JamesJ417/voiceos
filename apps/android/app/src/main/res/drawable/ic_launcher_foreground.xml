@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Carbon Command hexagon. Everything important stays inside the adaptive-icon safe zone. -->
+    <path
+        android:fillColor="#35E0C1"
+        android:pathData="M54,18 L84,35 L84,73 L54,90 L24,73 L24,35 Z" />
+
+    <!-- V -->
+    <path
+        android:fillColor="#07100F"
+        android:pathData="M31,43 L36,43 L40,64 L44,43 L49,43 L43,70 L37,70 Z" />
+
+    <!-- O, cut out with an even-odd inner contour. -->
+    <path
+        android:fillColor="#07100F"
+        android:fillType="evenOdd"
+        android:pathData="M48,49 C48,44.6 51.6,41 56,41 C60.4,41 64,44.6 64,49 L64,64 C64,68.4 60.4,72 56,72 C51.6,72 48,68.4 48,64 Z M53,49 L53,64 C53,65.7 54.3,67 56,67 C57.7,67 59,65.7 59,64 L59,49 C59,47.3 57.7,46 56,46 C54.3,46 53,47.3 53,49 Z" />
+
+    <!-- S -->
+    <path
+        android:fillColor="#07100F"
+        android:pathData="M77,48 C76.2,46.3 74.8,45.5 72.7,45.5 C70.5,45.5 69,46.6 69,48.2 C69,50.3 70.7,51.1 74.1,52.3 C79.3,54.1 82,56.5 82,61.7 C82,68 77.8,71.8 71.8,71.8 C66.6,71.8 62.8,69.1 61.5,64.1 L66.4,62.6 C67.2,65.6 69,67.1 71.8,67.1 C74.8,67.1 76.7,65.5 76.7,62.8 C76.7,60.4 75.2,59.3 71.5,58 C66.3,56.2 63.7,53.7 63.7,49 C63.7,43.8 67.5,40.7 72.8,40.7 C77.3,40.7 80.4,42.8 81.8,46.6 Z" />
+</vector>
