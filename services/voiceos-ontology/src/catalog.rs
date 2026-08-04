@@ -1,9 +1,30 @@
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
 use crate::{
-    ArgumentKind, ArgumentSpec, EntityDefinition, EntityKind, EntityRef, IntentDefinition,
-    IntentId, Unit,
+    ArgumentKind, ArgumentSpec, CanonicalRequest, Confidence, EntityDefinition, EntityKind,
+    EntityRef, IntentDefinition, IntentId, ResolutionSource, Unit, contains_phrase,
 };
+
+pub const CATALOG_VERSION: u32 = 2;
+pub const MINIMUM_COMPATIBLE_VERSION: u32 = 1;
+
+const ENTITY_KINDS: [EntityKind; 13] = [
+    EntityKind::Device,
+    EntityKind::Provider,
+    EntityKind::Service,
+    EntityKind::Document,
+    EntityKind::Artifact,
+    EntityKind::Task,
+    EntityKind::Person,
+    EntityKind::Project,
+    EntityKind::Skill,
+    EntityKind::Email,
+    EntityKind::Location,
+    EntityKind::Memory,
+    EntityKind::Decision,
+];
 
 #[derive(Clone, Debug)]
 pub struct Catalog {
@@ -19,7 +40,7 @@ impl Default for Catalog {
 
 impl Catalog {
     pub fn seeded() -> Self {
-        let intents = [
+        let intents = vec![
             intent(
                 "voice.playback_speed.set",
                 "Set spoken reply playback speed.",
@@ -52,22 +73,50 @@ impl Catalog {
             ),
             intent("memory.list", "List durable memories.", vec![], false),
             intent(
-                "document.add",
-                "Add a private knowledge document.",
+                "knowledge.document.add",
+                "Add a private knowledge document used as context.",
                 vec![],
                 false,
             ),
             intent(
-                "document.list",
+                "knowledge.document.list",
                 "List private knowledge documents.",
                 vec![],
                 false,
             ),
             intent(
-                "document.delete",
+                "knowledge.document.delete",
                 "Delete a private knowledge document.",
                 vec![string("document", true)],
                 true,
+            ),
+            intent(
+                "artifact.pdf.create",
+                "Create a VIC-managed PDF.",
+                pdf_arguments(false),
+                false,
+            ),
+            intent(
+                "artifact.pdf.revise",
+                "Create an immutable revision of a VIC-managed PDF.",
+                pdf_arguments(true),
+                false,
+            ),
+            intent(
+                "artifact.search",
+                "Search VIC-created files.",
+                vec![string("query", false)],
+                false,
+            ),
+            intent(
+                "artifact.attach",
+                "Attach a ready managed artifact to a task.",
+                vec![
+                    string("artifact_id", true),
+                    string("task_id", true),
+                    string("description", true),
+                ],
+                false,
             ),
             intent("system.health.check", "Check system health.", vec![], false),
             intent("system.disk.check", "Check free disk space.", vec![], false),
@@ -82,6 +131,26 @@ impl Catalog {
                 "Check an allowlisted service.",
                 vec![entity("service", EntityKind::Service, true)],
                 false,
+            ),
+            intent(
+                "system.admin.execute",
+                "Execute an exact capability-brokered administrative command.",
+                vec![
+                    array("argv", true),
+                    string("cwd", true),
+                    number("timeout_seconds", false, Some(Unit::Seconds), 1.0, 300.0),
+                    string("rollback", true),
+                ],
+                true,
+            ),
+            intent(
+                "device.revoke",
+                "Revoke one enrolled device credential after explicit approval.",
+                vec![
+                    string("device_id", true),
+                    string("requesting_device_id", true),
+                ],
+                true,
             ),
             intent(
                 "project.tests.run",
@@ -141,10 +210,106 @@ impl Catalog {
                 vec![string("reference", false)],
                 false,
             ),
-        ]
-        .into_iter()
-        .map(|definition| (definition.id.clone(), definition))
-        .collect();
+            intent(
+                "task.step.create",
+                "Create and assign a task step.",
+                vec![
+                    string("task_id", true),
+                    string("title", true),
+                    enumeration("owner", true, &["user", "vic", "shared"]),
+                ],
+                false,
+            ),
+            intent(
+                "task.step.update",
+                "Update a task step with evidence.",
+                vec![
+                    string("task_id", true),
+                    string("step_id", true),
+                    enumeration(
+                        "status",
+                        true,
+                        &["pending", "active", "blocked", "completed", "cancelled"],
+                    ),
+                    enumeration("owner", false, &["user", "vic", "shared"]),
+                    object("evidence", false),
+                ],
+                false,
+            ),
+            intent(
+                "task.blocker.create",
+                "Record a task blocker.",
+                vec![
+                    string("task_id", true),
+                    string("description", true),
+                    enumeration("owner", true, &["user", "vic", "shared"]),
+                ],
+                false,
+            ),
+            intent(
+                "task.blocker.resolve",
+                "Resolve a task blocker.",
+                vec![string("task_id", true), string("blocker_id", true)],
+                false,
+            ),
+            intent(
+                "task.handoff.create",
+                "Hand responsibility between VIC and the user.",
+                vec![
+                    string("task_id", true),
+                    enumeration("from_owner", true, &["user", "vic"]),
+                    enumeration("to_owner", true, &["user", "vic"]),
+                    enumeration("kind", true, &["handoff", "review", "approval"]),
+                    string("summary", true),
+                ],
+                false,
+            ),
+            intent(
+                "task.progress.record",
+                "Record evidence-backed progress on a task.",
+                vec![
+                    string("task_id", true),
+                    string("summary", true),
+                    object("evidence", false),
+                ],
+                false,
+            ),
+            intent(
+                "task.review.request",
+                "Request review of VIC's task work.",
+                vec![string("task_id", true), string("summary", true)],
+                false,
+            ),
+            intent(
+                "outreach.create",
+                "Queue a policy-governed VIC outreach event.",
+                vec![
+                    enumeration(
+                        "kind",
+                        true,
+                        &[
+                            "status_update",
+                            "check_in",
+                            "question",
+                            "blocker",
+                            "review",
+                            "digest",
+                        ],
+                    ),
+                    enumeration("priority", true, &["quiet", "check_in", "needs_you"]),
+                    string("title", true),
+                    string("body", true),
+                    string("reason", true),
+                    string("task_id", false),
+                    string("dedupe_key", false),
+                ],
+                false,
+            ),
+        ];
+        let intents = intents
+            .into_iter()
+            .map(|definition| (definition.id.clone(), definition))
+            .collect();
 
         let entities = vec![
             entity_definition(
@@ -200,27 +365,119 @@ impl Catalog {
                 &["voice os", "voiceos", "gateway", "voice os gateway"],
             ),
             entity_definition(EntityKind::Service, "ollama", &["ollama", "model server"]),
+            entity_definition(
+                EntityKind::Artifact,
+                "vic-created-file",
+                &["vic file", "created file", "generated file"],
+            ),
+            entity_definition(EntityKind::Task, "shared-task", &["task", "to do", "todo"]),
+            entity_definition(
+                EntityKind::Person,
+                "primary-owner",
+                &["me", "myself", "owner"],
+            ),
+            entity_definition(
+                EntityKind::Project,
+                "voiceos",
+                &["voice os project", "voiceos project"],
+            ),
+            entity_definition(
+                EntityKind::Skill,
+                "hermes-skill",
+                &["hermes skill", "vic skill"],
+            ),
+            entity_definition(
+                EntityKind::Email,
+                "inbox-message",
+                &["email", "message", "inbox item"],
+            ),
+            entity_definition(EntityKind::Location, "home", &["home", "house"]),
+            entity_definition(
+                EntityKind::Location,
+                "business",
+                &["business", "office", "work"],
+            ),
         ];
-
         Self { intents, entities }
     }
 
+    pub fn version(&self) -> u32 {
+        CATALOG_VERSION
+    }
+    pub fn minimum_compatible_version(&self) -> u32 {
+        MINIMUM_COMPATIBLE_VERSION
+    }
+    pub fn supports_version(&self, version: u32) -> bool {
+        (MINIMUM_COMPATIBLE_VERSION..=CATALOG_VERSION).contains(&version)
+    }
+    pub fn entity_kinds(&self) -> &'static [EntityKind] {
+        &ENTITY_KINDS
+    }
     pub fn intent(&self, id: &IntentId) -> Option<&IntentDefinition> {
         self.intents.get(id)
     }
-
     pub fn intents(&self) -> impl Iterator<Item = &IntentDefinition> {
         self.intents.values()
     }
-
     pub fn entities(&self) -> impl Iterator<Item = &EntityDefinition> {
         self.entities.iter()
     }
-
     pub fn entity(&self, kind: &EntityKind, id: &str) -> Option<&EntityDefinition> {
         self.entities
             .iter()
             .find(|entity| &entity.kind == kind && entity.id == id)
+    }
+
+    pub fn canonical_intent(&self, id: &IntentId) -> IntentId {
+        match id.0.as_str() {
+            "document.add" => IntentId::from("knowledge.document.add"),
+            "document.list" => IntentId::from("knowledge.document.list"),
+            "document.delete" => IntentId::from("knowledge.document.delete"),
+            "artifact.find" => IntentId::from("artifact.search"),
+            _ => id.clone(),
+        }
+    }
+
+    pub fn migrate_request(&self, request: &mut CanonicalRequest) {
+        request.intent = self.canonical_intent(&request.intent);
+    }
+
+    pub fn request_for_tool(
+        &self,
+        tool: &str,
+        arguments: BTreeMap<String, Value>,
+        confidence: f32,
+        source: ResolutionSource,
+    ) -> Option<CanonicalRequest> {
+        let intent = match tool {
+            "system.health" => "system.health.check",
+            "disk.space" => "system.disk.check",
+            "network.status" => "system.network.check",
+            "service.status" => "system.service.check",
+            "project.tests" => "project.tests.run",
+            "rig.root_command" => "system.admin.execute",
+            "device.revoke" => "device.revoke",
+            "artifact.pdf.create" => "artifact.pdf.create",
+            "artifact.pdf.revise" => "artifact.pdf.revise",
+            "artifact.find" => "artifact.search",
+            "artifact.attach" => "artifact.attach",
+            "task.step.create" => "task.step.create",
+            "task.step.update" => "task.step.update",
+            "task.blocker.create" => "task.blocker.create",
+            "task.blocker.resolve" => "task.blocker.resolve",
+            "task.handoff.create" => "task.handoff.create",
+            "task.progress.record" => "task.progress.record",
+            "task.review.request" => "task.review.request",
+            "outreach.create" => "outreach.create",
+            _ => return None,
+        };
+        Some(CanonicalRequest {
+            intent: IntentId::from(intent),
+            entities: Vec::new(),
+            arguments,
+            confidence: Confidence::new(confidence),
+            source,
+        })
     }
 
     pub fn resolve_builtin_entity(&self, phrase: &str, kind: &EntityKind) -> Option<EntityRef> {
@@ -233,14 +490,30 @@ impl Catalog {
                     .iter()
                     .map(move |alias| (entity, alias.as_str()))
             })
-            .filter(|(_, alias)| phrase.contains(alias))
+            .filter(|(_, alias)| contains_phrase(phrase, alias))
             .max_by_key(|(_, alias)| alias.len())
             .map(|(entity, surface)| EntityRef {
-                kind: entity.kind.clone(),
+                kind: entity.kind,
                 id: entity.id.clone(),
                 surface: Some(surface.to_owned()),
             })
     }
+}
+
+fn pdf_arguments(revision: bool) -> Vec<ArgumentSpec> {
+    let mut values = Vec::new();
+    if revision {
+        values.push(string("artifact_id", true));
+    }
+    values.extend([
+        string("title", true),
+        string("description", false),
+        string("filename", false),
+        string("task_id", false),
+        enumeration("template", false, &["recipe-card"]),
+        object("spec", false),
+    ]);
+    values
 }
 
 fn intent(
@@ -256,7 +529,6 @@ fn intent(
         approval_required,
     }
 }
-
 fn entity_definition(kind: EntityKind, id: &str, aliases: &[&str]) -> EntityDefinition {
     EntityDefinition {
         kind,
@@ -264,11 +536,19 @@ fn entity_definition(kind: EntityKind, id: &str, aliases: &[&str]) -> EntityDefi
         aliases: aliases.iter().map(|value| (*value).to_owned()).collect(),
     }
 }
-
 fn string(name: &str, required: bool) -> ArgumentSpec {
+    argument(name, ArgumentKind::String, required)
+}
+fn object(name: &str, required: bool) -> ArgumentSpec {
+    argument(name, ArgumentKind::Object, required)
+}
+fn array(name: &str, required: bool) -> ArgumentSpec {
+    argument(name, ArgumentKind::Array, required)
+}
+fn argument(name: &str, kind: ArgumentKind, required: bool) -> ArgumentSpec {
     ArgumentSpec {
         name: name.to_owned(),
-        kind: ArgumentKind::String,
+        kind,
         required,
         unit: None,
         minimum: None,
@@ -276,7 +556,6 @@ fn string(name: &str, required: bool) -> ArgumentSpec {
         allowed_values: vec![],
     }
 }
-
 fn number(
     name: &str,
     required: bool,
@@ -294,7 +573,6 @@ fn number(
         allowed_values: vec![],
     }
 }
-
 fn enumeration(name: &str, required: bool, allowed_values: &[&str]) -> ArgumentSpec {
     ArgumentSpec {
         name: name.to_owned(),
@@ -309,7 +587,6 @@ fn enumeration(name: &str, required: bool, allowed_values: &[&str]) -> ArgumentS
             .collect(),
     }
 }
-
 fn entity(name: &str, kind: EntityKind, required: bool) -> ArgumentSpec {
     ArgumentSpec {
         name: name.to_owned(),

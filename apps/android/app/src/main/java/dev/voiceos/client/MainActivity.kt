@@ -12,10 +12,13 @@ import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
 import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -30,15 +33,17 @@ import android.view.WindowInsets
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ImageView
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.util.Locale
 import java.util.UUID
+import java.io.File
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private enum class VoiceState { READY, STARTING, LISTENING, PROCESSING, SPEAKING, ERROR }
-    private enum class AppPage { COMMAND, TASKS, HISTORY, SYSTEM }
+    private enum class AppPage { COMMAND, TASKS, FILES, HISTORY, SYSTEM }
     private enum class TaskFilter { ALL, NEEDS_ME, VIC_WORKING, REVIEW }
 
     private lateinit var statusView: TextView
@@ -54,11 +59,21 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var skillCatalogStatusView: TextView
     private lateinit var skillCatalogContainer: LinearLayout
     private lateinit var skillUsageContainer: LinearLayout
+    private lateinit var updateStatusView: TextView
+    private lateinit var updateContainer: LinearLayout
+    private lateinit var attentionContainer: LinearLayout
+    private lateinit var activityContainer: LinearLayout
+    private lateinit var adminStatusView: TextView
+    private lateinit var deviceContainer: LinearLayout
     private lateinit var historyView: TextView
     private lateinit var taskStatusView: TextView
     private lateinit var taskContainer: LinearLayout
+    private lateinit var artifactStatusView: TextView
+    private lateinit var artifactContainer: LinearLayout
+    private lateinit var artifactPreviewView: ImageView
     private lateinit var ttsStatusView: TextView
     private lateinit var voiceButton: Button
+    private lateinit var wakeWordButton: Button
     private lateinit var rootScroll: ScrollView
     private lateinit var talkButton: HexTalkButton
     private lateinit var cancelButton: Button
@@ -88,6 +103,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var correctionMode = false
     private var pendingCorrectionAfterSpeech = false
     private var pendingPermissionCorrection = false
+    private var pendingWakeWordEnable = false
     private var requestGeneration = 0
     private var latestPartialTranscript: String? = null
 
@@ -97,6 +113,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var failedTranscript: String? = null
     private var pendingApproval: ApprovalRequest? = null
     private var eventSubscription: EventSubscription? = null
+    private var artifactEventSubscription: EventSubscription? = null
+    private var artifactRenderer: PdfRenderer? = null
+    private var artifactDescriptor: ParcelFileDescriptor? = null
+    private var pendingArtifactDownload: Pair<String, ByteArray>? = null
     private var conversationActive = false
     private var conversationReceiverRegistered = false
     private var currentTaskFilter = TaskFilter.ALL
@@ -229,7 +249,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         renderState(VoiceState.READY, "Ready")
         handleEnrollment(enrollment)
         startSharedEventStream()
+        startArtifactEventStream()
         DailyCheckinScheduler.schedule(this)
+        VICWakeService.ensureStartedIfEnabled(this)
         if (
             android.os.Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -262,6 +284,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         conversationReceiverRegistered = true
         restoreConversationSnapshot()
+        updateWakeWordButton()
     }
 
     override fun onStop() {
@@ -275,6 +298,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_ARTIFACT_DOWNLOAD) {
+            val pending = pendingArtifactDownload
+            pendingArtifactDownload = null
+            if (resultCode == RESULT_OK && pending != null && data?.data != null) {
+                contentResolver.openOutputStream(data.data!!)?.use { it.write(pending.second) }
+                Toast.makeText(this, "Saved ${pending.first}", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
         if (requestCode != REQUEST_DOCUMENT || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         val filename = DocumentInput.filename(contentResolver, uri)
@@ -292,6 +324,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         requestGeneration += 1
         eventSubscription?.close()
         eventSubscription = null
+        artifactEventSubscription?.close()
+        artifactEventSubscription = null
+        artifactRenderer?.close()
+        artifactDescriptor?.close()
         speechRecognizer?.cancel()
         speechRecognizer?.destroy()
         speechRecognizer = null
@@ -385,11 +421,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         if (requestCode != REQUEST_MICROPHONE) return
         if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            if (pendingPermissionCorrection) startRecognition(correction = true)
-            else startConversationMode()
+            when {
+                pendingWakeWordEnable -> setWakeWordEnabled(true)
+                pendingPermissionCorrection -> startRecognition(correction = true)
+                else -> startConversationMode()
+            }
         } else {
             showRecoverableError("Microphone permission is required for voice requests.", speakError = true)
         }
+        pendingWakeWordEnable = false
     }
 
     private fun createContentView(): ScrollView {
@@ -488,15 +528,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         val commandNav = navChip("⌂  COMMAND", true)
         val tasksNav = navChip("✓  TASKS", false)
+        val filesNav = navChip("▤  FILES", false)
         val historyNav = navChip("◷  HISTORY", false)
         val systemNav = navChip("⌁  SYSTEM", false)
         navViews.clear()
         navViews[AppPage.COMMAND] = commandNav
         navViews[AppPage.TASKS] = tasksNav
+        navViews[AppPage.FILES] = filesNav
         navViews[AppPage.HISTORY] = historyNav
         navViews[AppPage.SYSTEM] = systemNav
         navigation.addView(commandNav, weightedButton())
         navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(7) })
+        navigation.addView(filesNav, weightedButton().apply { marginStart = dp(7) })
         navigation.addView(historyNav, weightedButton().apply { marginStart = dp(7) })
         navigation.addView(systemNav, weightedButton().apply { marginStart = dp(7) })
         content.addView(navigation, fullWidthWrap().apply { topMargin = dp(18) })
@@ -724,11 +767,82 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }, fullWidthWrap().apply { topMargin = dp(18) })
         }
 
+        val filesPage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            addView(kicker("Managed output storage"), fullWidthWrap().apply { topMargin = dp(24) })
+            addView(heading("Files", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+            addView(panel(17).apply {
+                addView(kicker("VIC artifact catalog"), fullWidthWrap())
+                artifactStatusView = TextView(this@MainActivity).apply {
+                    text = "Loading files…"; textSize = 13f; setTextColor(CarbonPalette.muted); setPadding(0, dp(12), 0, 0)
+                }
+                addView(artifactStatusView, fullWidthWrap())
+                artifactContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(artifactContainer, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("REFRESH FILES") { loadArtifacts() }, fullWidthWrap().apply { topMargin = dp(14) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            addView(panel(17).apply {
+                addView(kicker("Checksum-validated preview"), fullWidthWrap())
+                artifactPreviewView = ImageView(this@MainActivity).apply {
+                    adjustViewBounds = true; scaleType = ImageView.ScaleType.FIT_CENTER
+                    setBackgroundColor(0xffeef2f1.toInt()); contentDescription = "PDF preview"
+                }
+                addView(artifactPreviewView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(520)).apply { topMargin = dp(12) })
+            }, fullWidthWrap().apply { topMargin = dp(14) })
+        }
+
         val systemPage = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
             addView(kicker("VoiceOS infrastructure"), fullWidthWrap().apply { topMargin = dp(24) })
             addView(heading("System", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+            addView(panel(17).apply {
+                addView(kicker("One attention queue"), fullWidthWrap())
+                addView(heading("VIC inbox", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                attentionContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(attentionContainer, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("REFRESH INBOX") { loadOperations() }, fullWidthWrap().apply { topMargin = dp(12) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            addView(panel(17).apply {
+                addView(kicker("Evidence and decisions"), fullWidthWrap())
+                addView(heading("Unified activity", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                activityContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(activityContainer, fullWidthWrap().apply { topMargin = dp(8) })
+            }, fullWidthWrap().apply { topMargin = dp(14) })
+            addView(panel(17).apply {
+                addView(kicker("Installation control center"), fullWidthWrap())
+                addView(heading("Rig and devices", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                adminStatusView = TextView(this@MainActivity).apply {
+                    text = "Loading installation evidence..."; textSize = 12f; setTextColor(CarbonPalette.white)
+                    setTextIsSelectable(true); setPadding(0, dp(10), 0, 0)
+                }
+                addView(adminStatusView, fullWidthWrap())
+                deviceContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(deviceContainer, fullWidthWrap().apply { topMargin = dp(10) })
+            }, fullWidthWrap().apply { topMargin = dp(14) })
+            addView(panel(17).apply {
+                addView(kicker("Safe upstream review"), fullWidthWrap())
+                addView(heading("Hermes updates", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                updateStatusView = TextView(this@MainActivity).apply { text = "Loading update candidatesâ€¦"; textSize = 13f; setTextColor(CarbonPalette.muted); setPadding(0, dp(12), 0, 0) }
+                addView(updateStatusView, fullWidthWrap())
+                updateContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(updateContainer, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("REFRESH UPDATES") { loadUpdateProposals() }, fullWidthWrap().apply { topMargin = dp(14) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            addView(panel(17).apply {
+                addView(kicker("Hands-free access"), fullWidthWrap())
+                addView(heading("Wake word", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "Runs locally on this Pixel. Say “Hey VIC” to begin and “Goodbye VIC” to end."
+                    textSize = 14f
+                    setTextColor(CarbonPalette.muted)
+                    setLineSpacing(dp(3).toFloat(), 1.12f)
+                    setPadding(0, dp(10), 0, 0)
+                }, fullWidthWrap())
+                wakeWordButton = secondaryButton("ENABLE “HEY VIC”") { toggleWakeWord() }
+                addView(wakeWordButton, fullWidthWrap().apply { topMargin = dp(14) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
             addView(panel(17).apply {
                 addView(kicker("Audio playback"), fullWidthWrap())
                 addView(heading("Speech engine", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
@@ -796,21 +910,24 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         pageViews.clear()
         pageViews[AppPage.COMMAND] = commandPage
         pageViews[AppPage.TASKS] = tasksPage
+        pageViews[AppPage.FILES] = filesPage
         pageViews[AppPage.HISTORY] = historyPage
         pageViews[AppPage.SYSTEM] = systemPage
         content.addView(commandPage, fullWidthWrap())
         content.addView(tasksPage, fullWidthWrap())
+        content.addView(filesPage, fullWidthWrap())
         content.addView(historyPage, fullWidthWrap())
         content.addView(systemPage, fullWidthWrap())
 
         commandNav.setOnClickListener { showPage(AppPage.COMMAND) }
         tasksNav.setOnClickListener { showPage(AppPage.TASKS) }
+        filesNav.setOnClickListener { showPage(AppPage.FILES) }
         historyNav.setOnClickListener { showPage(AppPage.HISTORY) }
         systemNav.setOnClickListener { showPage(AppPage.SYSTEM) }
 
         rootScroll = ScrollView(this).apply {
             isFillViewport = true
-            setBackgroundColor(CarbonPalette.black)
+            background = CarbonBackgroundDrawable(this@MainActivity)
             addView(content)
         }
         return rootScroll
@@ -1509,10 +1626,100 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         rootScroll.post { rootScroll.smoothScrollTo(0, 0) }
         if (page == AppPage.TASKS) loadTasks()
+        if (page == AppPage.FILES) loadArtifacts()
         if (page == AppPage.HISTORY) loadHistory()
         if (page == AppPage.SYSTEM) {
+            updateWakeWordButton()
             checkGatewayHealth(justEnrolled = false)
             loadSkillProposals()
+            loadUpdateProposals()
+            loadOperations()
+        }
+    }
+
+    private fun loadOperations() {
+        val baseUrl = GatewaySettings.baseUrl(this)
+        val token = DeviceCredentials.token(this)
+        if (::attentionContainer.isInitialized) GatewayClient.getAttention(baseUrl, token) { result -> runOnUiThread {
+            attentionContainer.removeAllViews()
+            result.fold(onSuccess = { items ->
+                if (items.isEmpty()) attentionContainer.addView(operationText("Inbox clear", CarbonPalette.green))
+                items.take(20).forEach { item -> attentionContainer.addView(operationText(
+                    "${item.urgency.uppercase(Locale.US)}  •  ${item.category.uppercase(Locale.US)}\n${item.title}\n${item.summary}${if (item.approvalRequired) "\nNEEDS YOUR APPROVAL" else ""}",
+                    if (item.approvalRequired || item.urgency == "urgent") CarbonPalette.amber else CarbonPalette.line,
+                ), fullWidthWrap().apply { topMargin = dp(7) }) }
+            }, onFailure = { attentionContainer.addView(operationText("Inbox unavailable: ${it.message.orEmpty()}", CarbonPalette.red)) })
+        } }
+        if (::activityContainer.isInitialized) GatewayClient.getActivity(baseUrl, token) { result -> runOnUiThread {
+            activityContainer.removeAllViews()
+            result.fold(onSuccess = { items ->
+                if (items.isEmpty()) activityContainer.addView(operationText("No activity has been recorded yet.", CarbonPalette.line))
+                items.take(20).forEach { item -> activityContainer.addView(operationText(
+                    "${item.occurredAt}\nNOTICED  ${item.noticed}\nDECISION  ${item.decision}\nMODEL  ${item.model}\nCHANGED  ${item.changed}${if (item.needsYou) "\nNEEDS YOU" else ""}${if (item.rollback.isNotBlank()) "\nROLLBACK  ${item.rollback}" else ""}",
+                    if (item.needsYou) CarbonPalette.amber else CarbonPalette.line,
+                ), fullWidthWrap().apply { topMargin = dp(7) }) }
+            }, onFailure = { activityContainer.addView(operationText("Activity unavailable: ${it.message.orEmpty()}", CarbonPalette.red)) })
+        } }
+        if (::adminStatusView.isInitialized) GatewayClient.getAdminStatus(baseUrl, token) { result -> runOnUiThread {
+            result.fold(onSuccess = { adminStatusView.text = it.installationJson }, onFailure = { adminStatusView.text = "Control center unavailable: ${it.message.orEmpty()}" })
+        } }
+        if (::deviceContainer.isInitialized) GatewayClient.getDevices(baseUrl, token) { result -> runOnUiThread {
+            deviceContainer.removeAllViews()
+            result.fold(onSuccess = { devices -> devices.forEach { device ->
+                val row = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(10), dp(12), dp(10)); background = carbonControl(this@MainActivity, if (device.status == "active") CarbonPalette.teal else CarbonPalette.line) }
+                row.addView(TextView(this).apply { text = "${device.displayName}${if (device.current) "  •  THIS DEVICE" else ""}\n${device.status.uppercase(Locale.US)}  •  last seen ${device.lastSeenAt}"; setTextColor(CarbonPalette.white); textSize = 13f }, fullWidthWrap())
+                if (device.status == "active" && !device.current) row.addView(secondaryButton("REQUEST REVOCATION") { requestDeviceRevocation(device) }, fullWidthWrap().apply { topMargin = dp(8) })
+                deviceContainer.addView(row, fullWidthWrap().apply { topMargin = dp(7) })
+            } }, onFailure = { deviceContainer.addView(operationText("Device inventory unavailable: ${it.message.orEmpty()}", CarbonPalette.red)) })
+        } }
+    }
+
+    private fun operationText(value: String, accent: Int) = TextView(this).apply {
+        text = value; textSize = 12f; setTextColor(CarbonPalette.white); setTextIsSelectable(true)
+        setPadding(dp(12), dp(10), dp(12), dp(10)); background = carbonControl(this@MainActivity, accent)
+    }
+
+    private fun requestDeviceRevocation(device: EnrolledDevice) {
+        GatewayClient.requestDeviceRevocation(GatewaySettings.baseUrl(this), device.id, DeviceCredentials.token(this)) { result -> runOnUiThread {
+            result.fold(onSuccess = { approval -> pendingApproval = approval; Toast.makeText(this, "Review the approval card to revoke ${device.displayName}.", Toast.LENGTH_LONG).show(); showPage(AppPage.COMMAND) },
+                onFailure = { Toast.makeText(this, "Revocation request failed: ${it.message.orEmpty()}", Toast.LENGTH_LONG).show() })
+        } }
+    }
+
+    private fun toggleWakeWord() {
+        if (WakeWordSettings.isEnabled(this)) {
+            setWakeWordEnabled(false)
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            setWakeWordEnabled(true)
+        } else {
+            pendingWakeWordEnable = true
+            pendingPermissionCorrection = false
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+        }
+    }
+
+    private fun setWakeWordEnabled(enabled: Boolean) {
+        if (enabled) VICWakeService.enable(this) else VICWakeService.disable(this)
+        updateWakeWordButton()
+        Toast.makeText(
+            this,
+            if (enabled) "Hey VIC is listening locally" else "Hey VIC disabled",
+            Toast.LENGTH_SHORT,
+        ).show()
+    }
+
+    private fun updateWakeWordButton() {
+        if (!::wakeWordButton.isInitialized) return
+        val enabled = WakeWordSettings.isEnabled(this)
+        wakeWordButton.text = if (enabled) "HEY VIC: ENABLED — TAP TO DISABLE" else "ENABLE “HEY VIC”"
+        wakeWordButton.setTextColor(if (enabled) CarbonPalette.black else CarbonPalette.white)
+        wakeWordButton.background = carbonControl(this, if (enabled) CarbonPalette.teal else CarbonPalette.line)
+        wakeWordButton.contentDescription = if (enabled) {
+            "Hey VIC wake word enabled. Tap to disable."
+        } else {
+            "Hey VIC wake word disabled. Tap to enable."
         }
     }
 
@@ -1547,6 +1754,109 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 )
             }
         }
+    }
+
+    private fun startArtifactEventStream() {
+        val token = DeviceCredentials.token(this) ?: return
+        artifactEventSubscription?.close()
+        artifactEventSubscription = GatewayClient.streamArtifactEvents(
+            GatewaySettings.baseUrl(this), token,
+            onEvent = { runOnUiThread { if (!isFinishing && !isDestroyed && currentPage == AppPage.FILES) loadArtifacts() } },
+            onClosed = { error -> if (error != null && !isFinishing && !isDestroyed) runOnUiThread {
+                artifactStatusView.postDelayed({ if (!isFinishing && !isDestroyed) startArtifactEventStream() }, 2_000)
+            } },
+        )
+    }
+
+    private fun loadArtifacts() {
+        if (!::artifactStatusView.isInitialized) return
+        artifactStatusView.text = "Loading managed files…"
+        GatewayClient.getArtifacts(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(onSuccess = ::renderArtifacts, onFailure = {
+                    artifactStatusView.text = "Files are unavailable.\n${it.message.orEmpty()}"
+                    artifactStatusView.setTextColor(CarbonPalette.red)
+                })
+            }
+        }
+    }
+
+    private fun renderArtifacts(artifacts: List<VoiceArtifact>) {
+        artifactContainer.removeAllViews()
+        artifactStatusView.text = "${artifacts.size} managed file${if (artifacts.size == 1) "" else "s"} · live progress"
+        artifactStatusView.setTextColor(CarbonPalette.muted)
+        artifacts.forEach { artifact ->
+            val card = artifactPanel(13).apply {
+                addView(artifactHeading(artifact.title.ifBlank { artifact.filename }, 18f), fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "${artifact.filename} · v${artifact.version} · ${artifact.status.uppercase(Locale.US)} · ${artifact.progressPercent}%"
+                    textSize = 11f; setTextColor(if (artifact.status == "ready") CarbonPalette.green else CarbonPalette.teal)
+                    setPadding(0, dp(6), 0, 0)
+                }, fullWidthWrap())
+                if (artifact.description.isNotBlank()) addView(TextView(this@MainActivity).apply {
+                    text = artifact.description; textSize = 13f; setTextColor(CarbonPalette.muted); setPadding(0, dp(8), 0, 0)
+                }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = if (artifact.sha256.isBlank()) "Checksum pending" else "SHA-256 ${artifact.sha256.take(12)}…"
+                    textSize = 10f; setTextColor(CarbonPalette.muted); setPadding(0, dp(8), 0, 0)
+                }, fullWidthWrap())
+                val actions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                actions.addView(secondaryButton("PREVIEW") { previewArtifact(artifact) }.apply { isEnabled = artifact.status == "ready" }, weightedButton())
+                actions.addView(secondaryButton("DOWNLOAD") { saveArtifact(artifact) }.apply { isEnabled = artifact.status == "ready" }, weightedButton().apply { marginStart = dp(6) })
+                addView(actions, fullWidthWrap().apply { topMargin = dp(10) })
+            }
+            artifactContainer.addView(card, fullWidthWrap().apply { topMargin = dp(8) })
+        }
+        if (artifacts.isEmpty()) artifactStatusView.text = "No files yet. Ask VIC to create a PDF."
+    }
+
+    private fun previewArtifact(artifact: VoiceArtifact) {
+        artifactStatusView.text = "Validating and opening ${artifact.filename}…"
+        GatewayClient.downloadArtifact(GatewaySettings.baseUrl(this), artifact.id, DeviceCredentials.token(this)) { result ->
+            result.onSuccess { bytes ->
+                val file = File(cacheDir, "voiceos-${artifact.id}.pdf")
+                file.writeBytes(bytes)
+                runOnUiThread {
+                    try {
+                        artifactRenderer?.close(); artifactDescriptor?.close()
+                        artifactDescriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                        artifactRenderer = PdfRenderer(artifactDescriptor!!)
+                        val page = artifactRenderer!!.openPage(0)
+                        val width = resources.displayMetrics.widthPixels - dp(64)
+                        val height = (width.toFloat() / page.width * page.height).toInt()
+                        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY); page.close()
+                        artifactPreviewView.setImageBitmap(bitmap)
+                        artifactStatusView.text = "Previewing ${artifact.filename} · checksum validated"
+                    } catch (error: Exception) { artifactStatusView.text = "Could not preview PDF: ${error.message.orEmpty()}" }
+                }
+            }.onFailure { runOnUiThread { artifactStatusView.text = "Could not open PDF: ${it.message.orEmpty()}" } }
+        }
+    }
+
+    private fun saveArtifact(artifact: VoiceArtifact) {
+        artifactStatusView.text = "Preparing ${artifact.filename} for download…"
+        GatewayClient.downloadArtifact(GatewaySettings.baseUrl(this), artifact.id, DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                result.onSuccess { bytes ->
+                    pendingArtifactDownload = artifact.filename to bytes
+                    startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE); type = "application/pdf"; putExtra(Intent.EXTRA_TITLE, artifact.filename)
+                    }, REQUEST_ARTIFACT_DOWNLOAD)
+                }.onFailure { artifactStatusView.text = "Could not download PDF: ${it.message.orEmpty()}" }
+            }
+        }
+    }
+
+    private fun artifactPanel(padding: Int) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
+        background = carbonPanel(this@MainActivity)
+    }
+
+    private fun artifactHeading(value: String, size: Float) = TextView(this).apply {
+        text = value; textSize = size; typeface = Typeface.create("sans-serif", Typeface.NORMAL); setTextColor(CarbonPalette.white)
     }
 
     private fun renderTasks(tasks: List<VoiceTask>, preserveStatus: Boolean = false) {
@@ -1730,6 +2040,38 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     },
                 )
             }
+        }
+    }
+
+    private fun loadUpdateProposals() {
+        if (!::updateContainer.isInitialized) return
+        updateStatusView.text = "Checking the isolated update queueâ€¦"
+        GatewayClient.getUpdateProposals(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                updateContainer.removeAllViews()
+                result.onSuccess { proposals ->
+                    updateStatusView.text = if (proposals.isEmpty()) "Hermes is current; no candidates are waiting." else "${proposals.size} candidate${if (proposals.size == 1) "" else "s"} discovered. Nothing has changed production."
+                    proposals.forEach { proposal ->
+                        val card = taskPanel(14).apply {
+                            addView(taskHeading(proposal.component, 18f), fullWidthWrap())
+                            addView(TextView(this@MainActivity).apply { text = "${proposal.currentVersion.take(12)}  â†’  ${proposal.proposedVersion.take(12)}\n${proposal.releaseNotes}\n\nSKILLS (QUARANTINED)\n${proposal.skillChanges}\n\nSECURITY\n${proposal.securityChanges}\n\nROLLBACK  ${proposal.rollbackVersion.take(12)}"; textSize = 12f; setTextColor(CarbonPalette.white); setTextIsSelectable(true); setPadding(0, dp(10), 0, 0) }, fullWidthWrap())
+                            if (proposal.status == "discovered") {
+                                val decisions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                                decisions.addView(secondaryButton("REJECT") { decideUpdateProposal(proposal, false) }, weightedButton())
+                                decisions.addView(actionButton("APPROVE REVIEW").apply { setOnClickListener { decideUpdateProposal(proposal, true) } }, weightedButton().apply { marginStart = dp(8) })
+                                addView(decisions, fullWidthWrap().apply { topMargin = dp(12) })
+                            }
+                        }
+                        updateContainer.addView(card, fullWidthWrap().apply { topMargin = dp(8) })
+                    }
+                }.onFailure { updateStatusView.text = "Update proposals unavailable. ${it.message.orEmpty()}"; updateStatusView.setTextColor(CarbonPalette.red) }
+            }
+        }
+    }
+
+    private fun decideUpdateProposal(proposal: UpdateProposal, approve: Boolean) {
+        GatewayClient.decideUpdateProposal(GatewaySettings.baseUrl(this), proposal.id, approve, DeviceCredentials.token(this)) { result ->
+            runOnUiThread { result.fold(onSuccess = { loadUpdateProposals() }, onFailure = { Toast.makeText(this, it.message.orEmpty(), Toast.LENGTH_LONG).show() }) }
         }
     }
 
@@ -2208,6 +2550,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         private const val REQUEST_MICROPHONE = 42
         private const val REQUEST_DOCUMENT = 43
         private const val REQUEST_NOTIFICATIONS = 44
+        private const val REQUEST_ARTIFACT_DOWNLOAD = 45
         private const val RESPONSE_UTTERANCE_ID = "voiceos-response"
         private const val CORRECTION_PROMPT_ID = "voiceos-correction-prompt"
         private const val ERROR_UTTERANCE_ID = "voiceos-error"

@@ -1,7 +1,7 @@
 [Unit]
 Description=VoiceOS Gateway
-After=network-online.target tailscaled.service ollama.service voiceos-model-warm.service voiceos-codex.service voiceos-hermes.service voiceos-hermes-skill-worker.service
-Wants=network-online.target voiceos-model-warm.service voiceos-codex.service voiceos-hermes.service voiceos-hermes-skill-worker.service
+After=network-online.target tailscaled.service ollama.service voiceos-rust.service voiceos-connectors.service voiceos-model-warm.service voiceos-codex.service voiceos-hermes.service voiceos-hermes-skill-worker.service
+Wants=network-online.target voiceos-rust.service voiceos-connectors.service voiceos-model-warm.service voiceos-codex.service voiceos-hermes.service voiceos-hermes-skill-worker.service
 
 [Service]
 Type=simple

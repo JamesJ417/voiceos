@@ -1,6 +1,59 @@
 use std::collections::HashSet;
 
-use crate::{ArgumentKind, CanonicalRequest, Catalog, EntityKind, ValidationIssue};
+use crate::{
+    ArgumentKind, CanonicalRequest, Catalog, EntityKind, ValidationIssue, ValidatorDisposition,
+    ValidatorResult,
+};
+
+pub fn validator_result(request: Option<&CanonicalRequest>, catalog: &Catalog) -> ValidatorResult {
+    let Some(request) = request else {
+        return ValidatorResult {
+            disposition: ValidatorDisposition::AskClarifyingQuestion,
+            reason: "intent_not_recognized".to_owned(),
+            issues: Vec::new(),
+        };
+    };
+    let issues = validate_request(request, catalog);
+    if !issues.is_empty() {
+        let only_missing = issues
+            .iter()
+            .all(|issue| issue.code == "required_argument_missing");
+        return ValidatorResult {
+            disposition: if only_missing {
+                ValidatorDisposition::AskClarifyingQuestion
+            } else {
+                ValidatorDisposition::Reject
+            },
+            reason: if only_missing {
+                "required_information_missing"
+            } else {
+                "ontology_validation_failed"
+            }
+            .to_owned(),
+            issues,
+        };
+    }
+    let definition = catalog
+        .intent(&request.intent)
+        .expect("validated intent must exist in catalog");
+    if definition.approval_required || request.confidence.score < 0.8 {
+        return ValidatorResult {
+            disposition: ValidatorDisposition::AskForConfirmation,
+            reason: if definition.approval_required {
+                "intent_requires_confirmation"
+            } else {
+                "confidence_requires_confirmation"
+            }
+            .to_owned(),
+            issues,
+        };
+    }
+    ValidatorResult {
+        disposition: ValidatorDisposition::Execute,
+        reason: "validated_for_execution".to_owned(),
+        issues,
+    }
+}
 
 pub fn validate_request(request: &CanonicalRequest, catalog: &Catalog) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
@@ -100,6 +153,24 @@ pub fn validate_request(request: &CanonicalRequest, catalog: &Catalog) -> Vec<Va
                         &spec.name,
                         "argument_type_invalid",
                         "The argument must be true or false.",
+                    ));
+                }
+            }
+            ArgumentKind::Object => {
+                if !value.is_object() {
+                    issues.push(issue(
+                        &spec.name,
+                        "argument_type_invalid",
+                        "The argument must be an object.",
+                    ));
+                }
+            }
+            ArgumentKind::Array => {
+                if !value.is_array() {
+                    issues.push(issue(
+                        &spec.name,
+                        "argument_type_invalid",
+                        "The argument must be an array.",
                     ));
                 }
             }

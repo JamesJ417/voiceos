@@ -12,6 +12,8 @@ OPENAPI = REPOSITORY / "contracts" / "openapi.yaml"
 OWNERSHIP = REPOSITORY / "contracts" / "route-ownership.json"
 PYTHON_GATEWAY = REPOSITORY / "services" / "gateway" / "server.py"
 RUST_ROUTES = REPOSITORY / "services" / "voiceos-gateway-rs" / "src" / "api" / "mod.rs"
+RUST_TASKS = REPOSITORY / "services" / "voiceos-gateway-rs" / "src" / "api" / "tasks.rs"
+RUST_ARTIFACTS = REPOSITORY / "services" / "voiceos-gateway-rs" / "src" / "api" / "artifacts.rs"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
 
 
@@ -146,6 +148,62 @@ class OpenApiContractTests(unittest.TestCase):
         for operation_id in ["getHealth", "createEnrollment", "exchangeEnrollment"]:
             block = source.split(f"operationId: {operation_id}", 1)[1].split("responses:", 1)[0]
             self.assertIn("security: []", block)
+
+    def test_task_attachment_uses_the_managed_artifact_tool_only(self) -> None:
+        source = OPENAPI.read_text(encoding="utf-8")
+        task_action = source.split("    TaskAction:\n", 1)[1].split("    VicOutreach:\n", 1)[0]
+        self.assertNotIn("artifact.attach", task_action)
+        self.assertNotIn("uri:", task_action)
+        self.assertNotIn('"artifact.attach" =>', RUST_TASKS.read_text(encoding="utf-8"))
+        self.assertIn('"artifact.attach" =>', RUST_ARTIFACTS.read_text(encoding="utf-8"))
+
+    def test_ontology_contract_is_versioned_and_has_explicit_validator_outcomes(self) -> None:
+        source = OPENAPI.read_text(encoding="utf-8")
+        catalog = source.split("    OntologyCatalog:\n", 1)[1].split("    Artifact:\n", 1)[0]
+        decision = source.split("    InterpretationDecision:\n", 1)[1]
+        self.assertIn("minimum_compatible_version", catalog)
+        for entity_kind in ["artifact", "task", "person", "project", "skill", "email", "location"]:
+            self.assertIn(entity_kind, catalog)
+        for disposition in ["execute", "ask_for_confirmation", "ask_clarifying_question", "reject"]:
+            self.assertIn(disposition, decision)
+
+    def test_automation_contract_exposes_controls_and_off_switch(self) -> None:
+        source = OPENAPI.read_text(encoding="utf-8")
+        rule = source.split("    AutomationRule:\n", 1)[1].split("    CreateAutomationRule:\n", 1)[0]
+        for field in [
+            "owner_id",
+            "enabled",
+            "trigger",
+            "conditions",
+            "permitted_actions",
+            "frequency_limit",
+            "evidence",
+        ]:
+            self.assertIn(field, rule)
+        self.assertIn("/v1/automations/{automation_id}/enabled:", source)
+
+    def test_attention_and_planning_contracts_keep_external_actions_approval_controlled(self) -> None:
+        source = OPENAPI.read_text(encoding="utf-8")
+        inbox = source.split("    AttentionItem:\n", 1)[1].split("    UpsertAttentionItem:\n", 1)[0]
+        for category in ["email", "calendar", "question", "approval", "document", "system", "message", "agent_work"]:
+            self.assertIn(category, inbox)
+        action = source.split("    AttentionAction:\n", 1)[1].split("    CalendarEventInput:\n", 1)[0]
+        self.assertIn("request_send_approval", action)
+        self.assertIn("request_invitation_approval", action)
+        self.assertIn("preparation_minutes", source)
+        self.assertIn("travel_minutes", source)
+        self.assertIn("recurrence_rule", source)
+        self.assertIn("unscheduled_task_ids", source)
+
+    def test_update_and_control_contracts_are_proposal_first(self) -> None:
+        source = OPENAPI.read_text(encoding="utf-8")
+        update = source.split("    UpdateProposal:\n", 1)[1].split("    AttentionItem:\n", 1)[0]
+        for field in ["current_version", "proposed_version", "skill_changes", "security_changes", "affected_components", "rollback_version", "evidence"]:
+            self.assertIn(field, update)
+        self.assertIn("Single-use root-broker approval card", source)
+        self.assertIn("never executes directly", source)
+        self.assertIn("/v1/activity:", source)
+        self.assertIn("/v1/admin/status:", source)
 
 
 if __name__ == "__main__":

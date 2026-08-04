@@ -1,5 +1,6 @@
 # IDE and local tool state
 .gradle/
+.kotlin/
 .idea/
 .vscode/
 *.iml
@@ -12,7 +13,12 @@ local.properties
 **/.next/
 **/node_modules/
 **/__pycache__/
+.pytest_cache/
 *.py[cod]
+
+# Reproducible local test/render artifacts
+/output/
+/tmp/
 
 # Runtime data and local deployment staging
 /.voiceos-deploy-*/

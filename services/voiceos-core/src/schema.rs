@@ -122,6 +122,7 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             title TEXT NOT NULL,
             observable_outcome TEXT NOT NULL,
             estimated_minutes INTEGER NOT NULL CHECK(estimated_minutes BETWEEN 1 AND 1440),
+            due_at TEXT,
             status TEXT NOT NULL CHECK(status IN ('proposed', 'ready', 'active', 'blocked', 'completed', 'cancelled')),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -223,6 +224,12 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             driving_mode INTEGER NOT NULL DEFAULT 0,
             spoken_headphones_only INTEGER NOT NULL DEFAULT 1,
             daily_digest_enabled INTEGER NOT NULL DEFAULT 1,
+            do_not_disturb INTEGER NOT NULL DEFAULT 0,
+            current_location TEXT NOT NULL DEFAULT 'unknown',
+            daily_planning_time TEXT NOT NULL DEFAULT '08:30',
+            morning_digest_time TEXT NOT NULL DEFAULT '08:00',
+            evening_digest_time TEXT NOT NULL DEFAULT '18:00',
+            scan_interval_minutes INTEGER NOT NULL DEFAULT 20,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
         );
@@ -289,16 +296,135 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
             FOREIGN KEY(skill_id) REFERENCES skills(skill_id)
         );
+        CREATE TABLE IF NOT EXISTS automation_rules (
+            automation_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            trigger_json TEXT NOT NULL,
+            conditions_json TEXT NOT NULL,
+            permitted_actions_json TEXT NOT NULL,
+            frequency_max_runs INTEGER NOT NULL,
+            frequency_window_minutes INTEGER NOT NULL,
+            evidence_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            UNIQUE(owner_id, name)
+        );
+        CREATE INDEX IF NOT EXISTS automation_rules_owner_enabled_idx
+            ON automation_rules(owner_id, enabled, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS attention_items (
+            attention_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            category TEXT NOT NULL CHECK(category IN ('email','calendar','question','approval','document','system','message','agent_work')),
+            source_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            urgency TEXT NOT NULL CHECK(urgency IN ('routine','important','urgent')),
+            status TEXT NOT NULL CHECK(status IN ('open','snoozed','resolved','dismissed')),
+            task_id TEXT,
+            occurred_at TEXT NOT NULL,
+            due_at TEXT,
+            approval_required INTEGER NOT NULL DEFAULT 0,
+            available_actions_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+            UNIQUE(owner_id, category, source_id)
+        );
+        CREATE INDEX IF NOT EXISTS attention_items_owner_status_idx
+            ON attention_items(owner_id, status, urgency, occurred_at DESC);
+        CREATE TABLE IF NOT EXISTS task_schedules (
+            task_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            earliest_start_at TEXT,
+            recurrence_rule TEXT,
+            location TEXT,
+            preparation_minutes INTEGER NOT NULL DEFAULT 0 CHECK(preparation_minutes BETWEEN 0 AND 1440),
+            travel_minutes INTEGER NOT NULL DEFAULT 0 CHECK(travel_minutes BETWEEN 0 AND 1440),
+            preferred_time TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS calendar_events (
+            calendar_event_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            start_at TEXT NOT NULL,
+            end_at TEXT NOT NULL,
+            location TEXT,
+            status TEXT NOT NULL CHECK(status IN ('confirmed','tentative','cancelled')),
+            response_status TEXT NOT NULL CHECK(response_status IN ('none','needs_action','accepted','declined','tentative')),
+            task_id TEXT,
+            preparation_minutes INTEGER NOT NULL DEFAULT 0,
+            travel_minutes INTEGER NOT NULL DEFAULT 0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+            UNIQUE(owner_id, source_id)
+        );
+        CREATE INDEX IF NOT EXISTS calendar_events_owner_time_idx
+            ON calendar_events(owner_id, start_at, end_at);
+        CREATE TABLE IF NOT EXISTS update_proposals (
+            update_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            component TEXT NOT NULL,
+            current_version TEXT NOT NULL,
+            proposed_version TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('discovered','approved','rejected','candidate_ready','deploying','deployed','failed','rolled_back')),
+            release_notes TEXT NOT NULL,
+            dependency_changes_json TEXT NOT NULL,
+            api_changes_json TEXT NOT NULL,
+            configuration_changes_json TEXT NOT NULL,
+            skill_changes_json TEXT NOT NULL,
+            security_changes_json TEXT NOT NULL,
+            affected_components_json TEXT NOT NULL,
+            rollback_version TEXT NOT NULL,
+            candidate_path TEXT,
+            evidence_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            UNIQUE(owner_id, component, proposed_version)
+        );
+        CREATE INDEX IF NOT EXISTS update_proposals_owner_status_idx
+            ON update_proposals(owner_id,status,updated_at DESC);
         CREATE TABLE IF NOT EXISTS artifacts (
             artifact_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,
             job_id TEXT,
+            task_id TEXT,
+            parent_artifact_id TEXT,
             kind TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            filename TEXT NOT NULL DEFAULT '',
+            media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+            description TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'ready',
+            progress_percent INTEGER NOT NULL DEFAULT 100,
+            storage_key TEXT,
             uri TEXT NOT NULL,
             sha256 TEXT,
+            byte_size INTEGER,
+            version INTEGER NOT NULL DEFAULT 1,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT,
+            created_by TEXT NOT NULL DEFAULT 'vic',
             created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT '',
+            completed_at TEXT,
             FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
-            FOREIGN KEY(job_id) REFERENCES jobs(job_id)
+            FOREIGN KEY(job_id) REFERENCES jobs(job_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+            FOREIGN KEY(parent_artifact_id) REFERENCES artifacts(artifact_id)
         );
         CREATE TABLE IF NOT EXISTS execution_events (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -362,6 +488,104 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     add_column(connection, "messages", "request_id", "TEXT")?;
     add_column(connection, "memories", "owner_id", "TEXT")?;
     add_column(connection, "documents", "owner_id", "TEXT")?;
+    add_column(connection, "artifacts", "task_id", "TEXT")?;
+    add_column(connection, "artifacts", "parent_artifact_id", "TEXT")?;
+    add_column(connection, "artifacts", "title", "TEXT NOT NULL DEFAULT ''")?;
+    add_column(
+        connection,
+        "artifacts",
+        "filename",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(
+        connection,
+        "artifacts",
+        "media_type",
+        "TEXT NOT NULL DEFAULT 'application/octet-stream'",
+    )?;
+    add_column(
+        connection,
+        "artifacts",
+        "description",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(
+        connection,
+        "artifacts",
+        "status",
+        "TEXT NOT NULL DEFAULT 'ready'",
+    )?;
+    add_column(
+        connection,
+        "artifacts",
+        "progress_percent",
+        "INTEGER NOT NULL DEFAULT 100",
+    )?;
+    add_column(connection, "artifacts", "storage_key", "TEXT")?;
+    add_column(connection, "artifacts", "byte_size", "INTEGER")?;
+    add_column(
+        connection,
+        "artifacts",
+        "version",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_column(
+        connection,
+        "artifacts",
+        "metadata_json",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )?;
+    add_column(connection, "artifacts", "error", "TEXT")?;
+    add_column(
+        connection,
+        "artifacts",
+        "created_by",
+        "TEXT NOT NULL DEFAULT 'vic'",
+    )?;
+    add_column(
+        connection,
+        "artifacts",
+        "updated_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(connection, "artifacts", "completed_at", "TEXT")?;
+    add_column(connection, "tasks", "due_at", "TEXT")?;
+    add_column(
+        connection,
+        "outreach_policies",
+        "do_not_disturb",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "outreach_policies",
+        "current_location",
+        "TEXT NOT NULL DEFAULT 'unknown'",
+    )?;
+    add_column(
+        connection,
+        "outreach_policies",
+        "daily_planning_time",
+        "TEXT NOT NULL DEFAULT '08:30'",
+    )?;
+    add_column(
+        connection,
+        "outreach_policies",
+        "morning_digest_time",
+        "TEXT NOT NULL DEFAULT '08:00'",
+    )?;
+    add_column(
+        connection,
+        "outreach_policies",
+        "evening_digest_time",
+        "TEXT NOT NULL DEFAULT '18:00'",
+    )?;
+    add_column(
+        connection,
+        "outreach_policies",
+        "scan_interval_minutes",
+        "INTEGER NOT NULL DEFAULT 20",
+    )?;
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS owner_devices (
@@ -381,6 +605,9 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             ON messages(conversation_id, request_id) WHERE request_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS memories_owner_idx ON memories(owner_id, updated_at);
         CREATE INDEX IF NOT EXISTS documents_owner_idx ON documents(owner_id, created_at);
+        CREATE INDEX IF NOT EXISTS artifacts_owner_idx ON artifacts(owner_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS artifacts_task_idx ON artifacts(owner_id, task_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS artifacts_parent_idx ON artifacts(owner_id, parent_artifact_id, version);
         "#,
     )?;
     Ok(())

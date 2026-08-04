@@ -73,6 +73,29 @@ data class SkillUsage(
     val usedAt: String,
 )
 
+data class UpdateProposal(
+    val id: String, val component: String, val currentVersion: String, val proposedVersion: String,
+    val status: String, val releaseNotes: String, val rollbackVersion: String,
+    val skillChanges: String, val securityChanges: String,
+)
+
+data class AttentionItem(
+    val id: String, val category: String, val title: String, val summary: String,
+    val urgency: String, val status: String, val approvalRequired: Boolean,
+)
+
+data class ActivityItem(
+    val id: String, val occurredAt: String, val noticed: String, val decision: String,
+    val model: String, val changed: String, val needsYou: Boolean, val rollback: String,
+)
+
+data class EnrolledDevice(
+    val id: String, val displayName: String, val status: String, val lastSeenAt: String,
+    val current: Boolean,
+)
+
+data class AdminStatus(val installationJson: String)
+
 data class VoiceTask(
     val id: String,
     val title: String,
@@ -96,6 +119,12 @@ data class VoiceTask(
 
 data class VoiceTaskStep(val title: String, val owner: String, val status: String)
 data class VoiceTaskArtifact(val kind: String, val uri: String, val description: String)
+
+data class VoiceArtifact(
+    val id: String, val title: String, val filename: String, val description: String,
+    val status: String, val progressPercent: Int, val byteSize: Long, val sha256: String,
+    val version: Int, val error: String,
+)
 
 data class ClientEvent(val id: Long, val type: String, val payload: JSONObject)
 
@@ -132,6 +161,56 @@ class EventSubscription internal constructor(
 }
 
 object GatewayClient {
+    fun getAttention(baseUrl: String, deviceToken: String?, callback: (Result<List<AttentionItem>>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getAttentionBlocking(baseUrl, deviceToken) } }) }, "voiceos-attention").start()
+    }
+
+    fun getActivity(baseUrl: String, deviceToken: String?, callback: (Result<List<ActivityItem>>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getActivityBlocking(baseUrl, deviceToken) } }) }, "voiceos-activity").start()
+    }
+
+    fun getAdminStatus(baseUrl: String, deviceToken: String?, callback: (Result<AdminStatus>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getAdminStatusBlocking(baseUrl, deviceToken) } }) }, "voiceos-admin").start()
+    }
+
+    fun getDevices(baseUrl: String, deviceToken: String?, callback: (Result<List<EnrolledDevice>>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getDevicesBlocking(baseUrl, deviceToken) } }) }, "voiceos-devices").start()
+    }
+
+    fun requestDeviceRevocation(baseUrl: String, deviceId: String, deviceToken: String?, callback: (Result<ApprovalRequest>) -> Unit) {
+        Thread({ callback(runCatching { requestDeviceRevocationBlocking(baseUrl, deviceId, deviceToken) }) }, "voiceos-device-revoke").start()
+    }
+    fun getArtifacts(baseUrl: String, deviceToken: String?, callback: (Result<List<VoiceArtifact>>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getArtifactsBlocking(baseUrl, deviceToken) } }) }, "voiceos-artifacts").start()
+    }
+
+    fun downloadArtifact(baseUrl: String, artifactId: String, deviceToken: String?, callback: (Result<ByteArray>) -> Unit) {
+        Thread({ callback(runCatching { downloadArtifactBlocking(baseUrl, artifactId, deviceToken) }) }, "voiceos-artifact-download").start()
+    }
+
+    fun streamArtifactEvents(
+        baseUrl: String, deviceToken: String, onEvent: () -> Unit, onClosed: (Throwable?) -> Unit,
+    ): EventSubscription {
+        val connection = URL("$baseUrl/v1/artifacts/events").openConnection() as HttpURLConnection
+        val active = AtomicBoolean(true)
+        connection.connectTimeout = 7_000; connection.readTimeout = 0
+        connection.setRequestProperty("Accept", "text/event-stream")
+        connection.setRequestProperty("Authorization", "Bearer $deviceToken")
+        Thread({
+            var failure: Throwable? = null
+            try {
+                if (connection.responseCode !in 200..299) throw IOException("Artifact stream returned HTTP ${connection.responseCode}")
+                connection.inputStream.bufferedReader().use { reader ->
+                    while (active.get()) {
+                        val line = reader.readLine() ?: break
+                        if (line.startsWith("event: artifact.")) onEvent()
+                    }
+                }
+            } catch (error: Throwable) { if (active.get()) failure = error }
+            finally { connection.disconnect(); onClosed(failure) }
+        }, "voiceos-artifact-events").start()
+        return EventSubscription(active, connection)
+    }
     fun changeConversationFloor(
         baseUrl: String,
         action: String,
@@ -384,6 +463,14 @@ object GatewayClient {
         }, "voiceos-skill-proposals").start()
     }
 
+    fun getUpdateProposals(baseUrl: String, deviceToken: String?, callback: (Result<List<UpdateProposal>>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getUpdateProposalsBlocking(baseUrl, deviceToken) } }) }, "voiceos-update-proposals").start()
+    }
+
+    fun decideUpdateProposal(baseUrl: String, updateId: String, approve: Boolean, deviceToken: String?, callback: (Result<UpdateProposal>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { decideUpdateProposalBlocking(baseUrl, updateId, approve, deviceToken) } }) }, "voiceos-update-decision").start()
+    }
+
     fun decideSkillProposal(
         baseUrl: String,
         skillId: String,
@@ -451,6 +538,63 @@ object GatewayClient {
         }
     }
 
+    private fun getAttentionBlocking(baseUrl: String, deviceToken: String?): List<AttentionItem> {
+        val connection = URL("$baseUrl/v1/attention?status=open&limit=100").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val values = responseJson(connection).getJSONArray("items")
+            return buildList { for (index in 0 until values.length()) {
+                val item = values.getJSONObject(index)
+                add(AttentionItem(item.getString("attention_id"), item.optString("category"), item.optString("title"),
+                    item.optString("summary"), item.optString("urgency"), item.optString("status"), item.optBoolean("approval_required")))
+            } }
+        } finally { connection.disconnect() }
+    }
+
+    private fun getActivityBlocking(baseUrl: String, deviceToken: String?): List<ActivityItem> {
+        val connection = URL("$baseUrl/v1/activity?limit=100").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val values = responseJson(connection).getJSONArray("items")
+            return buildList { for (index in 0 until values.length()) {
+                val item = values.getJSONObject(index)
+                add(ActivityItem(item.optString("id"), item.optString("occurred_at"), item.opt("noticed")?.toString().orEmpty(),
+                    item.opt("decision")?.toString().orEmpty(), item.optString("model"), item.opt("changed")?.toString().orEmpty(),
+                    item.optBoolean("needs_you"), item.opt("rollback")?.toString().orEmpty()))
+            } }
+        } finally { connection.disconnect() }
+    }
+
+    private fun getAdminStatusBlocking(baseUrl: String, deviceToken: String?): AdminStatus {
+        val connection = URL("$baseUrl/v1/admin/status").openConnection() as HttpURLConnection
+        try { configure(connection, deviceToken); return AdminStatus(responseJson(connection).getJSONObject("installation").toString(2)) }
+        finally { connection.disconnect() }
+    }
+
+    private fun getDevicesBlocking(baseUrl: String, deviceToken: String?): List<EnrolledDevice> {
+        val connection = URL("$baseUrl/v1/devices").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val values = responseJson(connection).getJSONArray("devices")
+            return buildList { for (index in 0 until values.length()) {
+                val item = values.getJSONObject(index)
+                add(EnrolledDevice(item.getString("device_id"), item.optString("display_name"), item.optString("status"),
+                    item.optString("last_seen_at"), item.optBoolean("current")))
+            } }
+        } finally { connection.disconnect() }
+    }
+
+    private fun requestDeviceRevocationBlocking(baseUrl: String, deviceId: String, deviceToken: String?): ApprovalRequest {
+        val encoded = URLEncoder.encode(deviceId, Charsets.UTF_8.name())
+        val connection = URL("$baseUrl/v1/devices/$encoded/revocation").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, JSONObject().toString().toByteArray())
+            val value = responseJson(connection).getJSONObject("approval")
+            return ApprovalRequest(value.getString("request_id"), value.getString("tool"), value.optLong("expires_at_unix"),
+                value.optJSONObject("arguments") ?: JSONObject())
+        } finally { connection.disconnect() }
+    }
+
     private fun getTasksBlocking(
         baseUrl: String,
         deviceToken: String?,
@@ -479,6 +623,35 @@ object GatewayClient {
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun getArtifactsBlocking(baseUrl: String, deviceToken: String?): List<VoiceArtifact> {
+        val connection = URL("$baseUrl/v1/artifacts?limit=200").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val values = responseJson(connection).getJSONArray("artifacts")
+            return buildList {
+                for (index in 0 until values.length()) {
+                    val item = values.getJSONObject(index)
+                    add(VoiceArtifact(
+                        item.getString("id"), item.optString("title"), item.optString("filename"), item.optString("description"),
+                        item.optString("status"), item.optInt("progress_percent"), item.optLong("byte_size"), item.optString("sha256"),
+                        item.optInt("version", 1), item.optString("error"),
+                    ))
+                }
+            }
+        } finally { connection.disconnect() }
+    }
+
+    private fun downloadArtifactBlocking(baseUrl: String, artifactId: String, deviceToken: String?): ByteArray {
+        val encodedId = URLEncoder.encode(artifactId, Charsets.UTF_8.name())
+        val connection = URL("$baseUrl/v1/artifacts/$encodedId/preview").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val status = connection.responseCode
+            if (status !in 200..299) throw IllegalStateException("Gateway returned HTTP $status")
+            return connection.inputStream.use { it.readBytes() }
+        } finally { connection.disconnect() }
     }
 
     private fun createTaskBlocking(
@@ -768,6 +941,31 @@ object GatewayClient {
             connection.disconnect()
         }
     }
+
+    private fun getUpdateProposalsBlocking(baseUrl: String, deviceToken: String?): List<UpdateProposal> {
+        val connection = URL("$baseUrl/v1/updates?limit=50").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val proposals = responseJson(connection).getJSONArray("proposals")
+            return buildList { for (index in 0 until proposals.length()) add(parseUpdateProposal(proposals.getJSONObject(index))) }
+        } finally { connection.disconnect() }
+    }
+
+    private fun decideUpdateProposalBlocking(baseUrl: String, updateId: String, approve: Boolean, deviceToken: String?): UpdateProposal {
+        val encodedId = URLEncoder.encode(updateId, Charsets.UTF_8.name())
+        val request = JSONObject().put("decision", if (approve) "approve" else "reject").toString().toByteArray()
+        val connection = URL("$baseUrl/v1/updates/$encodedId/decision").openConnection() as HttpURLConnection
+        try { configure(connection, deviceToken, request); return parseUpdateProposal(responseJson(connection).getJSONObject("proposal")) }
+        finally { connection.disconnect() }
+    }
+
+    private fun parseUpdateProposal(payload: JSONObject) = UpdateProposal(
+        id=payload.getString("id"), component=payload.getString("component"),
+        currentVersion=payload.getString("current_version"), proposedVersion=payload.getString("proposed_version"),
+        status=payload.getString("status"), releaseNotes=payload.optString("release_notes"),
+        rollbackVersion=payload.getString("rollback_version"), skillChanges=payload.opt("skill_changes")?.toString().orEmpty(),
+        securityChanges=payload.opt("security_changes")?.toString().orEmpty(),
+    )
 
     private fun getSkillsBlocking(baseUrl: String, deviceToken: String?): List<SkillProposal> {
         val connection = URL("$baseUrl/v1/skills?status=approved&limit=200").openConnection() as HttpURLConnection

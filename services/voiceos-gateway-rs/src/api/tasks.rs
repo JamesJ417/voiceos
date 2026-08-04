@@ -24,6 +24,7 @@ pub(crate) struct CreateTaskRequest {
     estimated_minutes: u32,
     project_id: Option<String>,
     parent_task_id: Option<String>,
+    due_at: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -46,7 +47,6 @@ pub(crate) struct TaskActionRequest {
     kind: Option<String>,
     summary: Option<String>,
     description: Option<String>,
-    uri: Option<String>,
     #[serde(default)]
     evidence: Value,
 }
@@ -118,7 +118,7 @@ pub(crate) async fn create_task(
     Json(request): Json<CreateTaskRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let device_id = authenticate(&state, &headers)?;
-    let task = state
+    let mut task = state
         .store
         .create_task(
             &state.primary_owner_id,
@@ -129,6 +129,13 @@ pub(crate) async fn create_task(
             request.estimated_minutes,
         )
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    if request.due_at.is_some() {
+        task = state
+            .store
+            .set_task_due_at(&state.primary_owner_id, &task.id, request.due_at.as_deref())
+            .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?
+            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "task_not_found"))?;
+    }
     state
         .store
         .append_execution_event(
@@ -223,11 +230,6 @@ fn run_task_action(
             request.to_owner.as_deref().unwrap_or("user"),
             if request.action == "review.request" { "review" } else { request.kind.as_deref().unwrap_or("handoff") },
             required(&request.summary, "summary")?, actor,
-        ).map_err(store_error)?}),
-        "artifact.attach" => json!({"artifact": state.store.attach_task_artifact(
-            owner_id, task_id, request.kind.as_deref().unwrap_or("reference"),
-            required(&request.uri, "uri")?, required(&request.description, "description")?,
-            request.owner.as_deref().unwrap_or("vic"), actor,
         ).map_err(store_error)?}),
         "progress.record" => {
             state

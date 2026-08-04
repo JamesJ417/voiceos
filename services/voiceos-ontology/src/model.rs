@@ -13,13 +13,20 @@ impl From<&str> for IntentId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityKind {
     Device,
     Provider,
     Service,
     Document,
+    Artifact,
+    Task,
+    Person,
+    Project,
+    Skill,
+    Email,
+    Location,
     Memory,
     Decision,
 }
@@ -106,6 +113,8 @@ pub enum ArgumentKind {
     String,
     Number,
     Boolean,
+    Object,
+    Array,
     Entity(EntityKind),
 }
 
@@ -177,20 +186,64 @@ pub enum DecisionStatus {
     Rejected,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidatorDisposition {
+    Execute,
+    AskForConfirmation,
+    AskClarifyingQuestion,
+    Reject,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatorResult {
+    pub disposition: ValidatorDisposition,
+    pub reason: String,
+    #[serde(default)]
+    pub issues: Vec<ValidationIssue>,
+}
+
+impl Default for ValidatorResult {
+    fn default() -> Self {
+        Self {
+            disposition: ValidatorDisposition::AskClarifyingQuestion,
+            reason: "legacy_decision_requires_revalidation".to_owned(),
+            issues: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InterpretationDecision {
     pub id: String,
     pub owner_id: String,
     pub original_phrase: String,
     pub normalized_phrase: String,
+    #[serde(default = "legacy_catalog_version")]
+    pub catalog_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interpretation: Option<CanonicalRequest>,
     pub status: DecisionStatus,
     #[serde(default)]
     pub validation_issues: Vec<ValidationIssue>,
     #[serde(default)]
+    pub validator: ValidatorResult,
+    #[serde(default)]
     pub corrections: Vec<Correction>,
     pub final_decision: DecisionStatus,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn legacy_catalog_version() -> u32 {
+    1
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RegressionCase {
+    pub phrase: String,
+    pub expected_intent: IntentId,
+    pub expected_disposition: ValidatorDisposition,
+    #[serde(default)]
+    pub corrected: bool,
 }

@@ -2,7 +2,7 @@ use chrono::{Duration, Utc};
 use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
-use crate::{ConversationStore, OutreachPolicy, OutreachRecord, StoreError};
+use crate::{ConversationStore, OutreachPolicy, OutreachPolicyUpdate, OutreachRecord, StoreError};
 
 impl ConversationStore {
     #[allow(clippy::too_many_arguments)]
@@ -162,9 +162,90 @@ impl ConversationStore {
             params![owner_id.trim(), now],
         )?;
         connection.query_row(
-            "SELECT owner_id, enabled, quiet_hours_start, quiet_hours_end, timezone, max_checkins_per_day, cooldown_minutes, driving_mode, spoken_headphones_only, daily_digest_enabled, updated_at FROM outreach_policies WHERE owner_id=?1",
+            "SELECT owner_id, enabled, quiet_hours_start, quiet_hours_end, timezone, max_checkins_per_day, cooldown_minutes, driving_mode, spoken_headphones_only, daily_digest_enabled, do_not_disturb, current_location, daily_planning_time, morning_digest_time, evening_digest_time, scan_interval_minutes, updated_at FROM outreach_policies WHERE owner_id=?1",
             params![owner_id.trim()], policy_row,
         ).map_err(StoreError::from)
+    }
+
+    pub fn update_outreach_policy(
+        &self,
+        owner_id: &str,
+        update: OutreachPolicyUpdate,
+    ) -> Result<OutreachPolicy, StoreError> {
+        let current = self.outreach_policy(owner_id)?;
+        let quiet_start = update
+            .quiet_hours_start
+            .unwrap_or(current.quiet_hours_start);
+        let quiet_end = update.quiet_hours_end.unwrap_or(current.quiet_hours_end);
+        let planning = update
+            .daily_planning_time
+            .unwrap_or(current.daily_planning_time);
+        let morning = update
+            .morning_digest_time
+            .unwrap_or(current.morning_digest_time);
+        let evening = update
+            .evening_digest_time
+            .unwrap_or(current.evening_digest_time);
+        for (label, value) in [
+            ("quiet_hours_start", quiet_start.as_str()),
+            ("quiet_hours_end", quiet_end.as_str()),
+            ("daily_planning_time", planning.as_str()),
+            ("morning_digest_time", morning.as_str()),
+            ("evening_digest_time", evening.as_str()),
+        ] {
+            validate_clock(value, label)?;
+        }
+        let timezone = update.timezone.unwrap_or(current.timezone);
+        if timezone.trim().is_empty() || timezone.len() > 80 {
+            return Err(StoreError::InvalidInput(
+                "invalid outreach timezone".to_owned(),
+            ));
+        }
+        let location = update.current_location.unwrap_or(current.current_location);
+        validate_choice(
+            &location,
+            &["unknown", "home", "work", "away", "driving"],
+            "location",
+        )?;
+        let daily_limit = update
+            .max_checkins_per_day
+            .unwrap_or(current.max_checkins_per_day);
+        let cooldown = update.cooldown_minutes.unwrap_or(current.cooldown_minutes);
+        let scan_interval = update
+            .scan_interval_minutes
+            .unwrap_or(current.scan_interval_minutes);
+        if !(1..=48).contains(&daily_limit)
+            || !(5..=1_440).contains(&cooldown)
+            || !(15..=30).contains(&scan_interval)
+        {
+            return Err(StoreError::InvalidInput(
+                "outreach limits are outside allowed ranges".to_owned(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        self.connection()?.execute(
+            "UPDATE outreach_policies SET enabled=?2, quiet_hours_start=?3, quiet_hours_end=?4, timezone=?5, max_checkins_per_day=?6, cooldown_minutes=?7, driving_mode=?8, spoken_headphones_only=?9, daily_digest_enabled=?10, do_not_disturb=?11, current_location=?12, daily_planning_time=?13, morning_digest_time=?14, evening_digest_time=?15, scan_interval_minutes=?16, updated_at=?17 WHERE owner_id=?1",
+            params![
+                owner_id.trim(),
+                update.enabled.unwrap_or(current.enabled),
+                quiet_start,
+                quiet_end,
+                timezone,
+                daily_limit,
+                cooldown,
+                update.driving_mode.unwrap_or(current.driving_mode),
+                update.spoken_headphones_only.unwrap_or(current.spoken_headphones_only),
+                update.daily_digest_enabled.unwrap_or(current.daily_digest_enabled),
+                update.do_not_disturb.unwrap_or(current.do_not_disturb),
+                location,
+                planning,
+                morning,
+                evening,
+                scan_interval,
+                now,
+            ],
+        )?;
+        self.outreach_policy(owner_id)
     }
 }
 
@@ -209,8 +290,28 @@ fn policy_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutreachPolicy> {
         driving_mode: row.get(7)?,
         spoken_headphones_only: row.get(8)?,
         daily_digest_enabled: row.get(9)?,
-        updated_at: row.get(10)?,
+        do_not_disturb: row.get(10)?,
+        current_location: row.get(11)?,
+        daily_planning_time: row.get(12)?,
+        morning_digest_time: row.get(13)?,
+        evening_digest_time: row.get(14)?,
+        scan_interval_minutes: row.get(15)?,
+        updated_at: row.get(16)?,
     })
+}
+
+fn validate_clock(value: &str, label: &str) -> Result<(), StoreError> {
+    let valid = value.len() == 5
+        && value.as_bytes().get(2) == Some(&b':')
+        && value[..2].parse::<u8>().is_ok_and(|hour| hour < 24)
+        && value[3..].parse::<u8>().is_ok_and(|minute| minute < 60);
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::InvalidInput(format!(
+            "invalid outreach {label}"
+        )))
+    }
 }
 
 fn validate_choice(value: &str, allowed: &[&str], label: &str) -> Result<(), StoreError> {

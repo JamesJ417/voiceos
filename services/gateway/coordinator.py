@@ -169,6 +169,7 @@ class TurnCoordinator:
             "name": outcome.name,
             "arguments": outcome.arguments,
             "status": outcome.status,
+            "ontology_decision": outcome.ontology_decision,
         }
         result = outcome.as_dict()
         if outcome.status == "approval_required":
@@ -186,6 +187,7 @@ class TurnCoordinator:
                         "arguments": outcome.arguments,
                         "required": True,
                         "status": "pending",
+                        "ontology_decision": outcome.ontology_decision,
                     }
                 ],
             )
@@ -221,6 +223,17 @@ class TurnCoordinator:
                 f"I updated the task and recorded the progress. Its current responsibility lane is "
                 f"{str(lane).replace('_', ' ') if lane else 'shared'}."
             )
+        elif outcome.name.startswith("artifact.") and evidence is not None:
+            artifact = evidence.get("artifact") if isinstance(evidence, dict) else None
+            if outcome.name == "artifact.find":
+                artifacts = evidence.get("artifacts", []) if isinstance(evidence, dict) else []
+                message = f"I found {len(artifacts) if isinstance(artifacts, list) else 0} matching files."
+            elif outcome.name == "artifact.attach":
+                message = "I attached the PDF to the task and recorded the evidence."
+            elif isinstance(artifact, dict):
+                message = f"I queued {artifact.get('title', 'the PDF')}. Its progress will appear in Files."
+            else:
+                message = "I completed the file operation."
         else:
             message = f"The {outcome.name} tool completed."
         return CoordinatedResponse(

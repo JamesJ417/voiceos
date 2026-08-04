@@ -4,7 +4,7 @@
     android:layout_height="match_parent"
     android:background="@drawable/widget_background"
     android:orientation="vertical"
-    android:padding="14dp">
+    android:padding="13dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -12,48 +12,61 @@
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <TextView
-            android:id="@+id/widget_status"
+        <ImageView
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:contentDescription="VIC"
+            android:src="@drawable/ic_launcher_foreground" />
+
+        <LinearLayout
             android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_marginStart="7dp"
             android:layout_weight="1"
-            android:letterSpacing="0.08"
-            android:text="VOICEOS  •  READY"
-            android:textColor="@color/voice_text"
-            android:textSize="12sp"
-            android:textStyle="bold" />
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/widget_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:letterSpacing="0.11"
+                android:text="VIC  //  READY"
+                android:textColor="@color/voice_text"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/widget_gateway"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="PRIVATE VOICEOS LINK"
+                android:textColor="@color/voice_text_muted"
+                android:textSize="9sp" />
+        </LinearLayout>
 
         <Button
             android:id="@+id/widget_refresh"
             android:layout_width="42dp"
             android:layout_height="36dp"
-            android:backgroundTint="@color/voice_surface_raised"
+            android:background="@drawable/widget_secondary_button"
             android:contentDescription="Refresh VoiceOS tasks"
             android:minHeight="0dp"
             android:minWidth="0dp"
             android:padding="0dp"
-            android:text="↻"
+            android:text="&#8635;"
             android:textColor="@color/voice_primary"
             android:textSize="16sp" />
     </LinearLayout>
 
     <TextView
-        android:id="@+id/widget_gateway"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:ellipsize="end"
-        android:maxLines="1"
-        android:text="Private gateway"
-        android:textColor="@color/voice_text_muted"
-        android:textSize="10sp" />
-
-    <TextView
         android:id="@+id/widget_task_summary"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="9dp"
         android:letterSpacing="0.08"
-        android:text="NEXT TASKS"
+        android:text="MISSION QUEUE"
         android:textColor="@color/voice_primary"
         android:textSize="10sp"
         android:textStyle="bold" />
@@ -67,25 +80,8 @@
         android:orientation="vertical"
         android:paddingHorizontal="10dp"
         android:paddingVertical="7dp">
-
-        <TextView
-            android:id="@+id/widget_task_title_1"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@color/voice_text"
-            android:textSize="12sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_task_meta_1"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@color/voice_text_muted"
-            android:textSize="9sp" />
+        <TextView android:id="@+id/widget_task_title_1" android:layout_width="match_parent" android:layout_height="wrap_content" android:ellipsize="end" android:maxLines="1" android:textColor="@color/voice_text" android:textSize="12sp" android:textStyle="bold" />
+        <TextView android:id="@+id/widget_task_meta_1" android:layout_width="match_parent" android:layout_height="wrap_content" android:ellipsize="end" android:maxLines="1" android:textColor="@color/voice_text_muted" android:textSize="9sp" />
     </LinearLayout>
 
     <LinearLayout
@@ -97,25 +93,8 @@
         android:orientation="vertical"
         android:paddingHorizontal="10dp"
         android:paddingVertical="7dp">
-
-        <TextView
-            android:id="@+id/widget_task_title_2"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@color/voice_text"
-            android:textSize="12sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_task_meta_2"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@color/voice_text_muted"
-            android:textSize="9sp" />
+        <TextView android:id="@+id/widget_task_title_2" android:layout_width="match_parent" android:layout_height="wrap_content" android:ellipsize="end" android:maxLines="1" android:textColor="@color/voice_text" android:textSize="12sp" android:textStyle="bold" />
+        <TextView android:id="@+id/widget_task_meta_2" android:layout_width="match_parent" android:layout_height="wrap_content" android:ellipsize="end" android:maxLines="1" android:textColor="@color/voice_text_muted" android:textSize="9sp" />
     </LinearLayout>
 
     <LinearLayout
@@ -127,25 +106,8 @@
         android:orientation="vertical"
         android:paddingHorizontal="10dp"
         android:paddingVertical="7dp">
-
-        <TextView
-            android:id="@+id/widget_task_title_3"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@color/voice_text"
-            android:textSize="12sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/widget_task_meta_3"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@color/voice_text_muted"
-            android:textSize="9sp" />
+        <TextView android:id="@+id/widget_task_title_3" android:layout_width="match_parent" android:layout_height="wrap_content" android:ellipsize="end" android:maxLines="1" android:textColor="@color/voice_text" android:textSize="12sp" android:textStyle="bold" />
+        <TextView android:id="@+id/widget_task_meta_3" android:layout_width="match_parent" android:layout_height="wrap_content" android:ellipsize="end" android:maxLines="1" android:textColor="@color/voice_text_muted" android:textSize="9sp" />
     </LinearLayout>
 
     <TextView
@@ -155,40 +117,35 @@
         android:layout_weight="1"
         android:gravity="center"
         android:padding="10dp"
-        android:text="No open tasks. Tap + ADD to create one."
+        android:text="Queue clear. Add a task or talk to VIC."
         android:textColor="@color/voice_text_muted"
         android:textSize="11sp" />
 
-    <TextView
-        android:layout_width="1dp"
-        android:layout_height="0dp"
-        android:layout_weight="1" />
+    <TextView android:layout_width="1dp" android:layout_height="0dp" android:layout_weight="1" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="7dp"
         android:orientation="horizontal">
-
         <Button
             android:id="@+id/widget_talk"
             android:layout_width="0dp"
             android:layout_height="46dp"
             android:layout_weight="1.45"
-            android:backgroundTint="@color/voice_primary"
-            android:letterSpacing="0.12"
-            android:text="TALK"
+            android:background="@drawable/widget_primary_button"
+            android:letterSpacing="0.09"
+            android:text="TALK TO VIC"
             android:textColor="#06100E"
             android:textStyle="bold" />
-
         <Button
             android:id="@+id/widget_add_task"
             android:layout_width="0dp"
             android:layout_height="46dp"
             android:layout_marginStart="7dp"
             android:layout_weight="1"
-            android:backgroundTint="@color/voice_primary_dark"
-            android:text="+ ADD"
+            android:background="@drawable/widget_secondary_button"
+            android:text="+ TASK"
             android:textColor="@color/voice_text"
             android:textStyle="bold" />
     </LinearLayout>

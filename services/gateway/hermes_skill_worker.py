@@ -60,6 +60,66 @@ class SkillController:
             self._save_state()
             return proposals
 
+    def scan_candidate(self, candidate_root: Path, run_id: str) -> list[dict[str, object]]:
+        """Quarantine changed bundled skills without placing them on the active path."""
+        managed_root = Path(os.environ.get("VOICEOS_UPDATE_CANDIDATE_ROOT", "/var/lib/voiceos/update-candidates/hermes")).resolve()
+        candidate_root = candidate_root.resolve()
+        if managed_root not in candidate_root.parents:
+            raise SkillControlError("candidate skill root is outside the managed update directory")
+        with self._lock:
+            baseline = cast(dict[str, dict[str, str]], self._state["files"])
+            proposals: list[dict[str, object]] = []
+            for path in sorted(candidate_root.rglob("SKILL.md")):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                content = path.read_bytes()[: MAX_SKILL_BYTES + 1]
+                relative_path = path.relative_to(candidate_root).as_posix()
+                discovered = {"sha256": _sha256(content), "content": content}
+                previous = baseline.get(relative_path)
+                if previous is not None and previous["sha256"] == discovered["sha256"]:
+                    continue
+                proposals.append(self._quarantine_candidate(relative_path, discovered, previous, run_id))
+            self._save_state()
+            return proposals
+
+    def _quarantine_candidate(self, relative_path: str, discovered: dict[str, Any], previous: dict[str, str] | None, run_id: str) -> dict[str, object]:
+        content = cast(bytes, discovered["content"])
+        validation = validate_skill(content)
+        capabilities = infer_capabilities(content.decode("utf-8", errors="replace"))
+        pending_id = f"pending-{uuid.uuid4()}"
+        pending_dir = self.quarantine / pending_id
+        pending_dir.mkdir(mode=0o750)
+        _atomic_write(pending_dir / "SKILL.md", content)
+        evidence = [{
+            "source": "hermes-upstream-candidate", "run_id": run_id,
+            "relative_path": relative_path, "sha256": discovered["sha256"],
+            "previous_sha256": previous["sha256"] if previous else None,
+            "validation": validation, "quarantined_at": _now(),
+            "rollback": "retain_approved_previous_version",
+            "active_path_changed": False,
+        }]
+        imported = self._post_rust("/internal/v1/skills/import", {
+            "name": str(validation.get("name") or Path(relative_path).parent.name)[:120],
+            "content": content.decode("utf-8", errors="replace"),
+            "required_capabilities": capabilities,
+            "evidence": evidence,
+        })
+        proposal = imported.get("proposal")
+        proposal_id = proposal.get("id") if isinstance(proposal, dict) else None
+        if not isinstance(proposal_id, str) or not proposal_id:
+            raise SkillControlError("Rust skill store returned no proposal ID")
+        final_dir = self.quarantine / proposal_id
+        pending_dir.replace(final_dir)
+        metadata: dict[str, object] = {
+            "proposal_id": proposal_id, "status": "quarantined", "relative_path": relative_path,
+            "sha256": discovered["sha256"], "previous_sha256": previous["sha256"] if previous else None,
+            "required_capabilities": capabilities, "validation": validation, "run_id": run_id,
+            "quarantined_at": _now(), "active_path_changed": False,
+        }
+        cast(dict[str, Any], self._state["proposals"])[proposal_id] = metadata
+        (final_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        return metadata
+
     def decide(self, proposal_id: str, approve: bool) -> dict[str, object]:
         with self._lock:
             proposals = cast(dict[str, dict[str, Any]], self._state["proposals"])
@@ -354,6 +414,14 @@ class SkillWorkerHandler(BaseHTTPRequestHandler):
             if self.path == "/v1/scan":
                 run_id = str(payload.get("run_id", "scheduled-scan"))[:160]
                 self._json(HTTPStatus.OK, {"proposals": self.worker.controller.scan(run_id)})
+                return
+            if self.path == "/v1/scan-candidate":
+                run_id = str(payload.get("run_id", "upstream-candidate"))[:160]
+                root = payload.get("candidate_skills_root")
+                if not isinstance(root, str) or not root:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "candidate_skills_root_required"})
+                    return
+                self._json(HTTPStatus.OK, {"proposals": self.worker.controller.scan_candidate(Path(root), run_id)})
                 return
             match = re.fullmatch(r"/v1/proposals/([^/]+)/(decision|rollback)", self.path)
             if match:

@@ -25,10 +25,20 @@ if ! sudo -u voiceos test -x "$repo_root" \
   exit 2
 fi
 sudo install -d -o voiceos -g voiceos -m 0750 /var/lib/voiceos
+sudo install -d -o voiceos -g voiceos -m 0750 /var/lib/voiceos/connectors
 sudo install -d -o root -g voiceos -m 0750 /etc/voiceos
+sudo install -d -o root -g voiceos -m 0750 /etc/voiceos/secrets
 if [[ ! -f /etc/voiceos/voiceos-gateway.env ]]; then
   sudo install -o root -g voiceos -m 0640 \
     "$script_dir/voiceos-gateway.env.example" /etc/voiceos/voiceos-gateway.env
+fi
+if [[ ! -f /etc/voiceos/voiceos-connectors.env ]]; then
+  sudo install -o root -g voiceos -m 0640 \
+    "$script_dir/voiceos-connectors.env.example" /etc/voiceos/voiceos-connectors.env
+fi
+if [[ ! -f /etc/voiceos/secrets/connector-ingest-token ]]; then
+  python3 -c 'import secrets; print(secrets.token_urlsafe(48))' \
+    | sudo install -o root -g voiceos -m 0640 /dev/stdin /etc/voiceos/secrets/connector-ingest-token
 fi
 if [[ ! -f /etc/voiceos/voiceos-admin.env ]]; then
   admin_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
@@ -40,6 +50,8 @@ sed "s|@@REPO_ROOT@@|$repo_root|g" "$script_dir/voiceos-gateway.service.template
   | sudo tee /etc/systemd/system/voiceos-gateway.service >/dev/null
 sed "s|@@REPO_ROOT@@|$repo_root|g" "$script_dir/voiceos-model-warm.service.template" \
   | sudo tee /etc/systemd/system/voiceos-model-warm.service >/dev/null
+sed "s|@@REPO_ROOT@@|$repo_root|g" "$repo_root/ops/systemd/voiceos-connectors.service" \
+  | sudo tee /etc/systemd/system/voiceos-connectors.service >/dev/null
 if id llm >/dev/null 2>&1 && sudo -u llm test -x /home/llm/.local/bin/codex; then
   sed "s|@@REPO_ROOT@@|$repo_root|g" "$script_dir/voiceos-codex.service.template" \
     | sudo tee /etc/systemd/system/voiceos-codex.service >/dev/null
@@ -52,3 +64,4 @@ sudo systemctl daemon-reload
 echo "Gateway service installed but not started."
 echo "Edit /etc/voiceos/voiceos-gateway.env, then run:"
 echo "  sudo systemctl enable --now voiceos-gateway"
+echo "  sudo systemctl enable --now voiceos-connectors"

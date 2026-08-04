@@ -56,6 +56,64 @@ class RootToolTest(unittest.TestCase):
         )
         self.assertEqual("denied", denied.status)
 
+    def test_rust_backed_artifact_tools_are_typed_and_allowlisted(self) -> None:
+        seen: list[dict[str, object]] = []
+        broker = ToolBroker()
+        broker.register_artifact_tools(lambda payload: seen.append(payload) or {"artifact": {"title": "Recipe cards"}})
+        names = {schema["function"]["name"] for schema in broker.model_schemas()}
+        self.assertIn("artifact_pdf_create", names)
+        result = broker.execute("artifact_pdf_create", {"title": "Recipe cards", "template": "recipe-card"})
+        self.assertEqual("completed", result.status)
+        self.assertEqual("artifact.pdf.create", seen[0]["tool"])
+        denied = broker.execute("artifact_pdf_create", {"title": "Recipe cards", "template": "shell-script"})
+        self.assertEqual("denied", denied.status)
+
+    def test_structured_tool_execution_requires_an_executable_ontology_decision(self) -> None:
+        invoked: list[dict[str, object]] = []
+        broker = ToolBroker(
+            ontology_validator=lambda _tool, _arguments: {
+                "catalog_version": 2,
+                "disposition": "ask_clarifying_question",
+                "reason": "missing_task_reference",
+                "issues": [],
+            }
+        )
+        broker.register_artifact_tools(
+            lambda payload: invoked.append(payload) or {"artifact": {"title": "Recipe cards"}}
+        )
+
+        denied = broker.execute("artifact_pdf_create", {"title": "Recipe cards"})
+
+        self.assertEqual("denied", denied.status)
+        self.assertEqual("ontology_ask_clarifying_question", denied.error)
+        self.assertEqual([], invoked)
+        self.assertEqual(2, denied.ontology_decision["catalog_version"])
+
+    def test_ontology_confirmation_is_bound_to_the_existing_approval_path(self) -> None:
+        invoked: list[dict[str, object]] = []
+        broker = ToolBroker(
+            ontology_validator=lambda _tool, _arguments: {
+                "catalog_version": 2,
+                "disposition": "ask_for_confirmation",
+                "reason": "intent_requires_confirmation",
+                "issues": [],
+            }
+        )
+        broker.register_artifact_tools(
+            lambda payload: invoked.append(payload) or {"artifact": {"title": "Recipe cards"}}
+        )
+
+        proposed = broker.execute("artifact_pdf_create", {"title": "Recipe cards"})
+        self.assertEqual("approval_required", proposed.status)
+        self.assertEqual([], invoked)
+
+        completed = broker.execute(
+            "artifact_pdf_create", {"title": "Recipe cards"}, approved=True
+        )
+
+        self.assertEqual("completed", completed.status)
+        self.assertEqual(1, len(invoked))
+
 
 if __name__ == "__main__":
     unittest.main()

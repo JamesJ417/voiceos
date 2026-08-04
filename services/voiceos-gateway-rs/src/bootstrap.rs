@@ -1,5 +1,5 @@
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use voiceos_core::{
@@ -8,6 +8,7 @@ use voiceos_core::{
 };
 use voiceos_ontology::{Interpreter, OntologyStore};
 
+use crate::artifact_worker::{ArtifactStorage, PdfWorker};
 use crate::ontology_fallback::GatewayModelFallback;
 use crate::state::AppState;
 
@@ -20,6 +21,7 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     let primary_owner_id =
         env::var("VOICEOS_PRIMARY_OWNER_ID").unwrap_or_else(|_| "voiceos-primary-owner".to_owned());
     store.migrate_devices_to_owner(&primary_owner_id)?;
+    store.ensure_default_attention_automations(&primary_owner_id)?;
     let legacy_audit_path: std::path::PathBuf = env::var("VOICEOS_LEGACY_AUDIT_PATH")
         .unwrap_or_else(|_| "work/gateway-data/audit.sqlite3".to_owned())
         .into();
@@ -57,6 +59,11 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     } else {
         ontology
     };
+    let artifact_dir = env::var("VOICEOS_ARTIFACT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| Path::new(&data_dir).join("artifacts"));
+    let artifact_storage = ArtifactStorage::new(artifact_dir)?;
+    let pdf_worker = PdfWorker::start(store.clone(), artifact_storage.clone());
     Ok(AppState {
         store,
         engine,
@@ -65,6 +72,8 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         legacy_audit_path,
         require_device_auth: env::var("VOICEOS_REQUIRE_DEVICE_AUTH").as_deref() == Ok("1"),
         primary_owner_id,
+        artifact_storage,
+        pdf_worker,
     })
 }
 

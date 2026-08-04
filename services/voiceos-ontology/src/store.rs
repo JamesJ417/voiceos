@@ -7,7 +7,8 @@ use thiserror::Error;
 
 use crate::{
     Alias, CanonicalRequest, Correction, DecisionStatus, EntityKind, EntityRef,
-    InterpretationDecision, normalize_phrase,
+    InterpretationDecision, RegressionCase, ValidatorDisposition, ValidatorResult,
+    normalize_phrase,
 };
 
 #[derive(Debug, Error)]
@@ -88,7 +89,7 @@ impl OntologyStore {
     ) -> Result<Alias, StoreError> {
         let phrase = normalize_phrase(phrase);
         let now = Utc::now().to_rfc3339();
-        let kind_name = serde_json::to_value(&kind)?
+        let kind_name = serde_json::to_value(kind)?
             .as_str()
             .expect("entity kind serializes as a string")
             .to_owned();
@@ -110,15 +111,17 @@ impl OntologyStore {
 
     pub fn record(&self, decision: &InterpretationDecision) -> Result<(), StoreError> {
         self.connection()?.execute(
-            "INSERT INTO ontology_interpretations(interpretation_id, owner_id, original_phrase, normalized_phrase, interpretation_json, status, validation_json, corrections_json, final_decision, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO ontology_interpretations(interpretation_id, owner_id, original_phrase, normalized_phrase, catalog_version, interpretation_json, status, validation_json, validator_json, corrections_json, final_decision, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 decision.id,
                 decision.owner_id,
                 decision.original_phrase,
                 decision.normalized_phrase,
+                decision.catalog_version,
                 serde_json::to_string(&decision.interpretation)?,
                 status_name(&decision.status),
                 serde_json::to_string(&decision.validation_issues)?,
+                serde_json::to_string(&decision.validator)?,
                 serde_json::to_string(&decision.corrections)?,
                 status_name(&decision.final_decision),
                 decision.created_at,
@@ -134,7 +137,8 @@ impl OntologyStore {
         interpretation_id: &str,
         request: CanonicalRequest,
         note: &str,
-        final_decision: DecisionStatus,
+        catalog_version: u32,
+        validator: ValidatorResult,
     ) -> Result<InterpretationDecision, StoreError> {
         let mut decision = self
             .get(owner_id, interpretation_id)?
@@ -146,14 +150,20 @@ impl OntologyStore {
             created_at: now.clone(),
         });
         decision.interpretation = Some(request);
-        decision.status = final_decision.clone();
-        decision.final_decision = final_decision;
+        decision.status = DecisionStatus::Resolved;
+        decision.final_decision = DecisionStatus::Resolved;
+        decision.catalog_version = catalog_version;
+        decision.validation_issues = validator.issues.clone();
+        decision.validator = validator;
         decision.updated_at = now;
         self.connection()?.execute(
-            "UPDATE ontology_interpretations SET interpretation_json=?1, status=?2, corrections_json=?3, final_decision=?4, updated_at=?5 WHERE interpretation_id=?6 AND owner_id=?7",
+            "UPDATE ontology_interpretations SET catalog_version=?1, interpretation_json=?2, status=?3, validation_json=?4, validator_json=?5, corrections_json=?6, final_decision=?7, updated_at=?8 WHERE interpretation_id=?9 AND owner_id=?10",
             params![
+                decision.catalog_version,
                 serde_json::to_string(&decision.interpretation)?,
                 status_name(&decision.status),
+                serde_json::to_string(&decision.validation_issues)?,
+                serde_json::to_string(&decision.validator)?,
                 serde_json::to_string(&decision.corrections)?,
                 status_name(&decision.final_decision),
                 decision.updated_at,
@@ -172,15 +182,16 @@ impl OntologyStore {
         let connection = self.connection()?;
         let row = connection
             .query_row(
-                "SELECT original_phrase, normalized_phrase, interpretation_json, status, validation_json, corrections_json, final_decision, created_at, updated_at FROM ontology_interpretations WHERE interpretation_id=?1 AND owner_id=?2",
+                "SELECT original_phrase, normalized_phrase, catalog_version, interpretation_json, status, validation_json, validator_json, corrections_json, final_decision, created_at, updated_at FROM ontology_interpretations WHERE interpretation_id=?1 AND owner_id=?2",
                 params![interpretation_id, owner_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+                        row.get::<_, u32>(2)?, row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?, row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?, row.get::<_, String>(7)?,
-                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(8)?, row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
                     ))
                 },
             )
@@ -191,16 +202,43 @@ impl OntologyStore {
                 owner_id: owner_id.to_owned(),
                 original_phrase: row.0,
                 normalized_phrase: row.1,
-                interpretation: serde_json::from_str(&row.2)?,
-                status: parse_status(&row.3),
-                validation_issues: serde_json::from_str(&row.4)?,
-                corrections: serde_json::from_str(&row.5)?,
-                final_decision: parse_status(&row.6),
-                created_at: row.7,
-                updated_at: row.8,
+                catalog_version: row.2,
+                interpretation: serde_json::from_str(&row.3)?,
+                status: parse_status(&row.4),
+                validation_issues: serde_json::from_str(&row.5)?,
+                validator: serde_json::from_str(&row.6)?,
+                corrections: serde_json::from_str(&row.7)?,
+                final_decision: parse_status(&row.8),
+                created_at: row.9,
+                updated_at: row.10,
             })
         })
         .transpose()
+    }
+
+    pub fn correction_regression_corpus(
+        &self,
+        owner_id: &str,
+    ) -> Result<Vec<RegressionCase>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT original_phrase, corrections_json FROM ontology_interpretations WHERE owner_id=?1 AND corrections_json != '[]' ORDER BY created_at",
+        )?;
+        let rows = statement.query_map([owner_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut corpus = Vec::new();
+        for row in rows {
+            let (phrase, corrections_json) = row?;
+            let corrections: Vec<Correction> = serde_json::from_str(&corrections_json)?;
+            corpus.extend(corrections.into_iter().map(|correction| RegressionCase {
+                phrase: phrase.clone(),
+                expected_intent: correction.request.intent,
+                expected_disposition: ValidatorDisposition::Execute,
+                corrected: true,
+            }));
+        }
+        Ok(corpus)
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
@@ -208,7 +246,8 @@ impl OntologyStore {
     }
 
     fn migrate(&self) -> Result<(), StoreError> {
-        self.connection()?.execute_batch(
+        let connection = self.connection()?;
+        connection.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS ontology_aliases (
                 owner_id TEXT NOT NULL,
@@ -223,9 +262,11 @@ impl OntologyStore {
                 owner_id TEXT NOT NULL,
                 original_phrase TEXT NOT NULL,
                 normalized_phrase TEXT NOT NULL,
+                catalog_version INTEGER NOT NULL DEFAULT 1,
                 interpretation_json TEXT NOT NULL,
                 status TEXT NOT NULL,
                 validation_json TEXT NOT NULL,
+                validator_json TEXT NOT NULL DEFAULT '{"disposition":"ask_clarifying_question","reason":"catalog_migration_requires_revalidation","issues":[]}',
                 corrections_json TEXT NOT NULL,
                 final_decision TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -235,8 +276,38 @@ impl OntologyStore {
                 ON ontology_interpretations(owner_id, created_at);
             "#,
         )?;
+        ensure_column(
+            &connection,
+            "ontology_interpretations",
+            "catalog_version",
+            "INTEGER NOT NULL DEFAULT 1",
+        )?;
+        ensure_column(
+            &connection,
+            "ontology_interpretations",
+            "validator_json",
+            "TEXT NOT NULL DEFAULT '{\"disposition\":\"ask_clarifying_question\",\"reason\":\"catalog_migration_requires_revalidation\",\"issues\":[]}'",
+        )?;
         Ok(())
     }
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), StoreError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !names.iter().any(|name| name == column) {
+        connection.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))?;
+    }
+    Ok(())
 }
 
 fn status_name(status: &DecisionStatus) -> &'static str {

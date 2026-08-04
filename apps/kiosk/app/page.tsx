@@ -3,7 +3,7 @@
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type VoiceState = "ready" | "listening" | "processing" | "speaking" | "error";
-type ViewName = "command" | "tasks" | "history" | "system";
+type ViewName = "command" | "inbox" | "tasks" | "files" | "history" | "system";
 
 type Message = {
   id: string;
@@ -69,6 +69,14 @@ type TaskDetail = {
   blockers: Array<{ id: string; description: string; owner: string; status: string }>;
   artifacts: Array<{ id: string; kind: string; uri: string; description: string }>;
 };
+type Artifact = {
+  id: string; task_id: string | null; parent_artifact_id: string | null; title: string; filename: string;
+  media_type: string; description: string; status: string; progress_percent: number; byte_size: number | null;
+  sha256: string | null; version: number; created_by: string; created_at: string; updated_at: string; error: string | null;
+};
+type AttentionItem = { id:string; category:string; title:string; summary:string; urgency:string; approval_required:boolean; available_actions:string[]; occurred_at:string };
+type UpdateProposal = { id:string; component:string; current_version:string; proposed_version:string; status:string; release_notes:string; rollback_version:string; skill_changes:unknown; security_changes:unknown; affected_components:unknown };
+type ActivityItem = { id:number; occurred_at:string; type:string; actor:string; noticed?:unknown; decision?:unknown; model?:unknown; attempted?:unknown; changed?:unknown; evidence?:unknown; files?:unknown; needs_you:boolean; rollback?:unknown };
 
 type RecognitionResultEvent = {
   resultIndex: number;
@@ -144,6 +152,13 @@ export default function Home() {
   const [skills, setSkills] = useState<SkillProposal[]>([]);
   const [skillUsages, setSkillUsages] = useState<SkillUsage[]>([]);
   const [tasks, setTasks] = useState<TaskDetail[]>([]);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [attention, setAttention] = useState<AttentionItem[]>([]);
+  const [updates, setUpdates] = useState<UpdateProposal[]>([]);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [installation, setInstallation] = useState<Record<string, unknown>>({});
+  const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
+  const [previewUrl, setPreviewUrl] = useState("");
   const [taskFilter, setTaskFilter] = useState<"all" | "needs_me" | "vic_working" | "review">("all");
   const [showSettings, setShowSettings] = useState(false);
   const [enrollmentCode, setEnrollmentCode] = useState("");
@@ -180,6 +195,19 @@ export default function Home() {
     setMessages(history);
     const latest = history.filter((message) => message.role === "VIC").at(-1);
     if (latest) setLastResponse(latest.body);
+  }, [request]);
+
+  const loadOperations = useCallback(async () => {
+    const [inbox, updatePayload, timeline, admin] = await Promise.all([
+      request<{items?:AttentionItem[]}>("/v1/attention?status=open&limit=100"),
+      request<{proposals?:UpdateProposal[]}>("/v1/updates?limit=50"),
+      request<{items?:ActivityItem[]}>("/v1/activity?limit=200"),
+      request<{installation?:Record<string,unknown>}>("/v1/admin/status"),
+    ]);
+    setAttention(inbox.items ?? []);
+    setUpdates(updatePayload.proposals ?? []);
+    setActivity(timeline.items ?? []);
+    setInstallation(admin.installation ?? {});
   }, [request]);
 
   const loadFloor = useCallback(async () => {
@@ -220,6 +248,38 @@ export default function Home() {
     setTasks(payload.details ?? []);
   }, [request]);
 
+  const loadArtifacts = useCallback(async () => {
+    const payload = await request<{ artifacts: Artifact[] }>("/v1/artifacts?limit=200");
+    setArtifacts(payload.artifacts);
+    setSelectedArtifact((current) => current ? payload.artifacts.find((item) => item.id === current.id) ?? current : null);
+  }, [request]);
+
+  const artifactBlob = useCallback(async (artifact: Artifact, disposition: "preview" | "download") => {
+    const headers = new Headers();
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const response = await fetch(`${gateway}/v1/artifacts/${encodeURIComponent(artifact.id)}/${disposition}`, { headers, cache: "no-store" });
+    if (!response.ok) throw new Error(`VoiceOS gateway: ${response.status === 409 ? "file is still being created" : `HTTP ${response.status}`}`);
+    return response.blob();
+  }, [gateway, token]);
+
+  const previewArtifact = useCallback(async (artifact: Artifact) => {
+    try {
+      const blob = await artifactBlob(artifact, "preview");
+      const next = URL.createObjectURL(blob);
+      setPreviewUrl((current) => { if (current) URL.revokeObjectURL(current); return next; });
+      setSelectedArtifact(artifact);
+    } catch (error) { setStatusMessage(errorText(error)); }
+  }, [artifactBlob]);
+
+  const downloadArtifact = useCallback(async (artifact: Artifact) => {
+    try {
+      const blob = await artifactBlob(artifact, "download");
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a"); anchor.href = url; anchor.download = artifact.filename; anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { setStatusMessage(errorText(error)); }
+  }, [artifactBlob]);
+
   const refreshStatus = useCallback(async () => {
     if (!gateway) return;
     try {
@@ -236,6 +296,7 @@ export default function Home() {
         loadSkillProposals().catch(() => undefined),
         loadSkills().catch(() => undefined),
         loadTasks().catch(() => undefined),
+        loadArtifacts().catch(() => undefined),
         loadFloor().catch(() => undefined),
       ]);
       setConnected(true);
@@ -246,7 +307,7 @@ export default function Home() {
       setStatusMessage(errorText(error));
       setVoiceState("error");
     }
-  }, [gateway, loadFloor, loadHistory, loadSkillProposals, loadSkills, loadTasks, request]);
+  }, [gateway, loadArtifacts, loadFloor, loadHistory, loadSkillProposals, loadSkills, loadTasks, request]);
 
   useEffect(() => {
     const restore = window.setTimeout(() => {
@@ -357,10 +418,34 @@ export default function Home() {
     };
   }, [gateway, token, loadHistory, loadTasks]);
 
+  useEffect(() => {
+    if (!gateway || !token) return;
+    const controller = new AbortController();
+    let stopped = false;
+    const connect = async () => {
+      try {
+        const response = await fetch(`${gateway}/v1/artifacts/events`, {
+          headers: { Accept: "text/event-stream", Authorization: `Bearer ${token}` }, signal: controller.signal, cache: "no-store",
+        });
+        if (!response.ok || !response.body) return;
+        const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+        while (!stopped) {
+          const { done, value } = await reader.read(); if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n"); buffer = frames.pop() ?? "";
+          for (const frame of frames) if (frame.includes("event: artifact.")) void loadArtifacts();
+        }
+      } catch (error) { if (!stopped && !(error instanceof DOMException && error.name === "AbortError")) window.setTimeout(() => void connect(), 2000); }
+    };
+    void connect();
+    return () => { stopped = true; controller.abort(); };
+  }, [gateway, token, loadArtifacts]);
+
   useEffect(() => () => {
     recognition.current?.abort();
     speechSynthesis.cancel();
-  }, []);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
 
   async function sendText(text: string) {
     const normalized = text.trim();
@@ -606,8 +691,10 @@ export default function Home() {
       <aside className="rail" aria-label="VoiceOS navigation">
         <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>VoiceOS</span></div>
         <nav className="nav-list">
+          <NavButton active={view === "inbox"} label="Inbox" icon="!" onClick={() => { setView("inbox"); void loadOperations(); }} />
           <NavButton active={view === "command"} label="Command" icon="⌂" onClick={() => setView("command")} />
           <NavButton active={view === "tasks"} label="Tasks" icon="✓" onClick={() => { setView("tasks"); void loadTasks(); }} />
+          <NavButton active={view === "files"} label="Files" icon="▤" onClick={() => { setView("files"); void loadArtifacts(); }} />
           <NavButton active={view === "history"} label="History" icon="◷" onClick={() => { setView("history"); void loadHistory(); }} />
           <NavButton active={view === "system"} label="System" icon="⌁" onClick={() => { setView("system"); void refreshStatus(); }} />
         </nav>
@@ -616,7 +703,7 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <div><p className="kicker">Carbon Command · Web</p><h1>{view === "command" ? "Command center" : view === "tasks" ? "Shared task operations" : view === "history" ? "Conversation history" : "System status"}</h1></div>
+          <div><p className="kicker">Carbon Command · Web</p><h1>{view === "command" ? "Command center" : view === "tasks" ? "Shared task operations" : view === "files" ? "VIC file catalog" : view === "history" ? "Conversation history" : "System status"}</h1></div>
           <div className="top-actions">
             <span className={`online-pill ${connected ? "" : "offline-pill"}`}><span className={`status-dot ${connected ? "" : "offline"}`} /> {connected ? "Online" : "Offline"}</span>
             <button className="icon-button" aria-label="Open connection settings" onClick={() => setShowSettings(true)}>⚙</button>
@@ -624,6 +711,8 @@ export default function Home() {
         </header>
 
         <p className={`status-banner ${voiceState === "error" ? "error" : ""}`} role="status">{statusMessage}</p>
+
+        {view === "inbox" && <OperationsPanel attention={attention} updates={updates} activity={activity} installation={installation} onRefresh={() => void loadOperations()} />}
 
         {view === "command" && (
           <div className="dashboard-grid">
@@ -665,6 +754,8 @@ export default function Home() {
 
         {view === "tasks" && <TaskBoard tasks={tasks} filter={taskFilter} onFilter={setTaskFilter} onRefresh={() => void loadTasks()} />}
 
+        {view === "files" && <FilesPanel artifacts={artifacts} selected={selectedArtifact} previewUrl={previewUrl} onPreview={(artifact) => void previewArtifact(artifact)} onDownload={(artifact) => void downloadArtifact(artifact)} onRefresh={() => void loadArtifacts()} />}
+
         {view === "system" && <div className="system-layout"><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its VoiceOS device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside VoiceOS.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
       </section>
 
@@ -694,6 +785,10 @@ function TaskBoard({ tasks, filter, onFilter, onRefresh }: { tasks: TaskDetail[]
   const visible = tasks.filter((task) => filter === "all" || task.progress.lane === filter);
   const count = (lane: TaskDetail["progress"]["lane"]) => tasks.filter((task) => task.progress.lane === lane).length;
   return <section className="task-board panel"><div className="panel-heading"><div><p className="kicker">Human + agent execution</p><h2>Task responsibility board</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><div className="task-rollups"><button className={filter === "needs_me" ? "active" : ""} onClick={() => onFilter("needs_me")}><span>Needs me</span><strong>{count("needs_me")}</strong></button><button className={filter === "vic_working" ? "active" : ""} onClick={() => onFilter("vic_working")}><span>VIC working</span><strong>{count("vic_working")}</strong></button><button className={filter === "review" ? "active" : ""} onClick={() => onFilter("review")}><span>Ready for review</span><strong>{count("review")}</strong></button><button className={filter === "all" ? "active" : ""} onClick={() => onFilter("all")}><span>All open</span><strong>{tasks.length}</strong></button></div><div className="task-grid">{visible.length ? visible.map((detail) => <article className={`task-card lane-${detail.progress.lane}`} key={detail.task.id}><div className="task-card-head"><span>{detail.progress.lane.replaceAll("_", " ")}</span><strong>{detail.progress.total_steps ? `${detail.progress.completed_steps}/${detail.progress.total_steps} steps` : "No steps"}</strong></div><h3>{detail.task.title}</h3><p>{detail.task.observable_outcome}</p><div className="task-handoff"><small>{detail.progress.lane === "vic_working" ? "VIC NEXT ACTION" : detail.progress.lane === "review" ? "READY FOR REVIEW" : "YOUR NEXT ACTION"}</small><strong>{detail.progress.lane === "vic_working" ? detail.progress.next_vic_action || "Continue safe work" : detail.progress.next_user_action || "Review with VIC"}</strong></div><div className="task-steps">{detail.steps.slice(0, 5).map((step) => <div key={step.id}><span>{step.status === "completed" ? "✓" : "○"}</span><p>{step.title}</p><small>{step.owner}</small></div>)}</div><footer><span>VIC {detail.progress.vic_status.replaceAll("_", " ")}</span><span>{detail.progress.open_blockers} blockers</span><span>{detail.artifacts.length} artifacts</span></footer></article>) : <EmptyState text="No tasks are in this responsibility lane." />}</div></section>;
+}
+
+function FilesPanel({ artifacts, selected, previewUrl, onPreview, onDownload, onRefresh }: { artifacts: Artifact[]; selected: Artifact | null; previewUrl: string; onPreview: (artifact: Artifact) => void; onDownload: (artifact: Artifact) => void; onRefresh: () => void }) {
+  return <section className="files-panel panel"><div className="panel-heading"><div><p className="kicker">Managed output storage</p><h2>Files created by VIC</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><div className="files-layout"><div className="artifact-list">{artifacts.length ? artifacts.map((artifact) => <article className={`artifact-card ${selected?.id === artifact.id ? "selected" : ""}`} key={artifact.id}><div className="artifact-title"><span className="artifact-icon">PDF</span><div><h3>{artifact.title}</h3><small>{artifact.filename} · version {artifact.version}</small></div><span className={`artifact-status ${artifact.status}`}>{artifact.status}</span></div><p>{artifact.description || "VIC-generated document"}</p>{artifact.status !== "ready" && <div className="artifact-progress"><i style={{ width: `${artifact.progress_percent}%` }} /></div>}<footer><span>{artifact.byte_size ? formatBytes(artifact.byte_size) : `${artifact.progress_percent}%`}</span><span>{artifact.sha256 ? `SHA ${artifact.sha256.slice(0, 10)}…` : "Checksum pending"}</span></footer><div className="artifact-actions"><button className="secondary-button" disabled={artifact.status !== "ready"} onClick={() => onPreview(artifact)}>Preview</button><button className="secondary-button" disabled={artifact.status !== "ready"} onClick={() => onDownload(artifact)}>Download</button></div>{artifact.error && <p className="artifact-error">{artifact.error}</p>}</article>) : <EmptyState text="Ask VIC to create a PDF and it will appear here with live progress." />}</div><div className="pdf-preview">{selected && previewUrl ? <><div><strong>{selected.title}</strong><small>Checksum validated before delivery</small></div><iframe title={`Preview of ${selected.title}`} src={previewUrl} /></> : <EmptyState text="Choose a ready PDF to preview it securely." />}</div></div></section>;
 }
 
 function SkillProposalPanel({ proposals, onDecision, onRefresh }: { proposals: SkillProposal[]; onDecision: (proposal: SkillProposal, approve: boolean) => void; onRefresh: () => void }) {
@@ -733,6 +828,12 @@ function formatDuration(milliseconds?: number) {
   return milliseconds < 1000 ? `${milliseconds} ms` : `${(milliseconds / 1000).toFixed(1)} sec`;
 }
 
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function formatTime(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
@@ -740,4 +841,8 @@ function formatTime(value: string) {
 
 function percent(value?: number) {
   return typeof value === "number" ? `${value.toFixed(1)}%` : "—";
+}
+
+function OperationsPanel({ attention, updates, activity, installation, onRefresh }: { attention:AttentionItem[]; updates:UpdateProposal[]; activity:ActivityItem[]; installation:Record<string,unknown>; onRefresh:()=>void }) {
+  return <div className="system-layout"><section className="panel wide-panel"><div className="panel-heading"><div><p className="kicker">One attention queue</p><h2>VIC inbox</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><div className="history-list">{attention.length ? attention.map(item => <article className="message assistant" key={item.id}><div className="message-label"><strong>{item.urgency} · {item.category}</strong><span>{formatTime(item.occurred_at)}</span></div><h3>{item.title}</h3><p>{item.summary}</p><small>{item.approval_required ? "Approval-controlled actions available" : item.available_actions.join(" · ")}</small></article>) : <EmptyState text="Nothing currently needs your attention." />}</div></section><section className="panel"><div className="panel-heading"><div><p className="kicker">Safe upstream review</p><h2>Update candidates</h2></div></div>{updates.length ? updates.map(update => <article className="artifact-card" key={update.id}><div className="artifact-title"><div><h3>{update.component}</h3><small>{update.current_version.slice(0,12)} → {update.proposed_version.slice(0,12)}</small></div><span className={`artifact-status ${update.status}`}>{update.status}</span></div><p>{update.release_notes}</p><small>Rollback: {update.rollback_version.slice(0,12)} · bundled skills quarantined</small></article>) : <EmptyState text="No upstream update candidates are waiting." />}</section><section className="panel"><div className="panel-heading"><div><p className="kicker">Installation control</p><h2>Operational status</h2></div></div><pre>{JSON.stringify(installation,null,2)}</pre></section><section className="panel wide-panel"><div className="panel-heading"><div><p className="kicker">Explainable execution</p><h2>Unified activity</h2></div></div><div className="history-list">{activity.length ? activity.map(item => <article className="message assistant" key={item.id}><div className="message-label"><strong>{item.type}</strong><span>{formatTime(item.occurred_at)}</span></div><p>{item.actor}{item.model ? ` · ${String(item.model)}` : ""}</p>{item.needs_you && <small>Needs you</small>}{item.rollback && <small> · Rollback available</small>}<details><summary>Evidence</summary><pre>{JSON.stringify(item.evidence,null,2)}</pre></details></article>) : <EmptyState text="No VIC activity has been recorded yet." />}</div></section></div>;
 }

@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_url="https://github.com/NousResearch/hermes-agent.git"
-commit="a01f979b6e86d24a798968d5341788e008f96caf"
+vendor_lock="${VOICEOS_VENDOR_LOCK:-/opt/voiceos/ops/agents/vendor-lock.json}"
+readarray -t hermes_lock < <(python3 - "$vendor_lock" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    hermes = json.load(source)["dependencies"]["hermes-agent"]
+print(hermes["repository"])
+print(hermes["commit"])
+PY
+)
+repo_url="${hermes_lock[0]}"
+commit="${hermes_lock[1]}"
 install_root="/opt/voiceos/hermes"
 state_root="/var/lib/voiceos/hermes"
 key_file="/etc/voiceos/hermes-api.key"
@@ -12,7 +21,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   echo "Run this installer with sudo." >&2
   exit 1
 fi
-for command in git uv install openssl systemctl; do
+for command in git uv install openssl systemctl python3; do
   command -v "$command" >/dev/null || {
     echo "Missing required command: $command" >&2
     exit 1
@@ -84,12 +93,17 @@ chmod 0640 "$skill_worker_key_file"
 
 install -d -o root -g root -m 0755 /opt/voiceos/bin
 install -o root -g root -m 0755 /opt/voiceos/ops/agents/run-hermes.sh /opt/voiceos/bin/run-hermes
+install -o root -g root -m 0755 /opt/voiceos/ops/agents/stage-hermes-candidate.sh /opt/voiceos/bin/stage-hermes-candidate
+install -o root -g root -m 0755 /opt/voiceos/ops/agents/deploy-hermes-candidate.sh /opt/voiceos/bin/deploy-hermes-candidate
 install -o root -g root -m 0644 /opt/voiceos/ops/systemd/voiceos-hermes.service \
   /etc/systemd/system/voiceos-hermes.service
 install -o root -g root -m 0644 \
   /opt/voiceos/ops/systemd/voiceos-hermes-skill-worker.service \
   /etc/systemd/system/voiceos-hermes-skill-worker.service
+install -o root -g root -m 0644 /opt/voiceos/ops/systemd/voiceos-hermes-update-check.service /etc/systemd/system/voiceos-hermes-update-check.service
+install -o root -g root -m 0644 /opt/voiceos/ops/systemd/voiceos-hermes-update-check.timer /etc/systemd/system/voiceos-hermes-update-check.timer
 systemctl daemon-reload
+systemctl enable --now voiceos-hermes-update-check.timer
 
 echo "Hermes is installed but not started."
 echo "Edit $state_root/config.yaml and set the installed Ollama model, then run:"

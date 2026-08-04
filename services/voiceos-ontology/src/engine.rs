@@ -1,13 +1,16 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::Utc;
+use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
     Alias, AliasInput, CanonicalRequest, Catalog, Confidence, DecisionStatus,
-    DeterministicResolver, InterpretationDecision, ModelCandidate, OntologyStore, ResolutionSource,
-    StoreError, ValidationIssue, normalize_phrase, validate_request,
+    DeterministicResolver, InterpretationDecision, ModelCandidate, OntologyStore, RegressionCase,
+    ResolutionSource, StoreError, ValidationIssue, ValidatorDisposition, ValidatorResult,
+    normalize_phrase, validator_result,
 };
 
 pub trait ModelFallback: Send + Sync {
@@ -111,18 +114,21 @@ impl Interpreter {
             }
         }
 
-        let mut issues = interpretation
-            .as_ref()
-            .map(|request| validate_request(request, &self.catalog))
-            .unwrap_or_default();
-        if let Some(issue) = fallback_issue {
-            issues.push(issue);
+        if let Some(request) = &mut interpretation {
+            self.catalog.migrate_request(request);
         }
-        let status = match &interpretation {
-            None => DecisionStatus::Unrecognized,
-            Some(_) if !issues.is_empty() => DecisionStatus::Rejected,
-            Some(request) if request.confidence.score < 0.8 => DecisionStatus::NeedsConfirmation,
-            Some(_) => DecisionStatus::Resolved,
+
+        let mut validator = validator_result(interpretation.as_ref(), &self.catalog);
+        if let Some(issue) = fallback_issue {
+            validator.issues.push(issue);
+            validator.disposition = ValidatorDisposition::Reject;
+            validator.reason = "model_fallback_validation_failed".to_owned();
+        }
+        let status = match validator.disposition {
+            ValidatorDisposition::Execute => DecisionStatus::Resolved,
+            ValidatorDisposition::AskForConfirmation => DecisionStatus::NeedsConfirmation,
+            ValidatorDisposition::AskClarifyingQuestion => DecisionStatus::Unrecognized,
+            ValidatorDisposition::Reject => DecisionStatus::Rejected,
         };
         let now = Utc::now().to_rfc3339();
         let decision = InterpretationDecision {
@@ -130,9 +136,11 @@ impl Interpreter {
             owner_id: owner_id.to_owned(),
             original_phrase: phrase.to_owned(),
             normalized_phrase: normalize_phrase(phrase),
+            catalog_version: self.catalog.version(),
             interpretation,
             status: status.clone(),
-            validation_issues: issues,
+            validation_issues: validator.issues.clone(),
+            validator,
             corrections: vec![],
             final_decision: status,
             created_at: now.clone(),
@@ -160,13 +168,62 @@ impl Interpreter {
         Ok(self.store.approve_alias(
             owner_id,
             &input.phrase,
-            input.entity_kind.clone(),
+            input.entity_kind,
             &input.entity_id,
         )?)
     }
 
     pub fn aliases(&self, owner_id: &str) -> Result<Vec<Alias>, InterpreterError> {
         Ok(self.store.aliases(owner_id)?)
+    }
+
+    pub fn validate_tool(
+        &self,
+        owner_id: &str,
+        tool: &str,
+        arguments: BTreeMap<String, Value>,
+        confidence: f32,
+        source: ResolutionSource,
+    ) -> Result<InterpretationDecision, InterpreterError> {
+        let interpretation = self
+            .catalog
+            .request_for_tool(tool, arguments, confidence, source);
+        let validator = interpretation.as_ref().map_or_else(
+            || ValidatorResult {
+                disposition: ValidatorDisposition::Reject,
+                reason: "structured_tool_not_in_catalog".to_owned(),
+                issues: vec![ValidationIssue {
+                    field: "tool".to_owned(),
+                    code: "unknown_tool".to_owned(),
+                    message: format!("structured tool `{tool}` has no canonical ontology intent"),
+                }],
+            },
+            |request| validator_result(Some(request), &self.catalog),
+        );
+        let status = match validator.disposition {
+            ValidatorDisposition::Execute => DecisionStatus::Resolved,
+            ValidatorDisposition::AskForConfirmation => DecisionStatus::NeedsConfirmation,
+            ValidatorDisposition::AskClarifyingQuestion => DecisionStatus::Unrecognized,
+            ValidatorDisposition::Reject => DecisionStatus::Rejected,
+        };
+        let now = Utc::now().to_rfc3339();
+        let decision = InterpretationDecision {
+            id: Uuid::new_v4().to_string(),
+            owner_id: owner_id.to_owned(),
+            original_phrase: format!("structured-tool:{tool}"),
+            normalized_phrase: format!("structured-tool:{tool}"),
+            catalog_version: self.catalog.version(),
+            interpretation,
+            status: status.clone(),
+            validation_issues: validator.issues.clone(),
+            validator,
+            corrections: Vec::new(),
+            final_decision: status,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.store.record(&decision)?;
+        Ok(decision)
     }
 
     pub fn correct(
@@ -178,7 +235,9 @@ impl Interpreter {
     ) -> Result<InterpretationDecision, InterpreterError> {
         request.source = ResolutionSource::UserCorrection;
         request.confidence = Confidence::new(1.0);
-        if !validate_request(&request, &self.catalog).is_empty() {
+        self.catalog.migrate_request(&mut request);
+        let validator = validator_result(Some(&request), &self.catalog);
+        if validator.disposition != ValidatorDisposition::Execute {
             return Err(InterpreterError::InvalidCorrection);
         }
         Ok(self.store.add_correction(
@@ -186,7 +245,8 @@ impl Interpreter {
             interpretation_id,
             request,
             note,
-            DecisionStatus::Resolved,
+            self.catalog.version(),
+            validator,
         )?)
     }
 
@@ -195,6 +255,29 @@ impl Interpreter {
         owner_id: &str,
         interpretation_id: &str,
     ) -> Result<Option<InterpretationDecision>, InterpreterError> {
-        Ok(self.store.get(owner_id, interpretation_id)?)
+        let Some(mut decision) = self.store.get(owner_id, interpretation_id)? else {
+            return Ok(None);
+        };
+        if self.catalog.supports_version(decision.catalog_version)
+            && decision.catalog_version < self.catalog.version()
+        {
+            if let Some(request) = &mut decision.interpretation {
+                self.catalog.migrate_request(request);
+            }
+            for correction in &mut decision.corrections {
+                self.catalog.migrate_request(&mut correction.request);
+            }
+            decision.catalog_version = self.catalog.version();
+            decision.validator = validator_result(decision.interpretation.as_ref(), &self.catalog);
+            decision.validation_issues = decision.validator.issues.clone();
+        }
+        Ok(Some(decision))
+    }
+
+    pub fn correction_regression_corpus(
+        &self,
+        owner_id: &str,
+    ) -> Result<Vec<RegressionCase>, InterpreterError> {
+        Ok(self.store.correction_regression_corpus(owner_id)?)
     }
 }

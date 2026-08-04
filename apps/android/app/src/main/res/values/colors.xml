@@ -1,12 +1,10 @@
 <resources>
-    <color name="voice_primary">#35E0C1</color>
-    <color name="voice_primary_dark">#1B7567</color>
-    <color name="voice_accent">#35E0C1</color>
-    <color name="voice_surface">#060809</color>
-    <color name="voice_surface_raised">#12171A</color>
+    <color name="voice_primary">#43E6C9</color>
+    <color name="voice_primary_dark">#176D61</color>
+    <color name="voice_accent">#43E6C9</color>
+    <color name="voice_surface">#050708</color>
+    <color name="voice_surface_raised">#151D20</color>
     <color name="voice_text">#F1F6F5</color>
-    <color name="voice_text_muted">#8D9B9D</color>
-    <color name="voice_line">#2A3438</color>
-    <color name="voice_healthy">#4ADE80</color>
-    <color name="launcher_background">#060809</color>
+    <color name="voice_text_muted">#91A4A5</color>
+    <color name="launcher_background">#050708</color>
 </resources>

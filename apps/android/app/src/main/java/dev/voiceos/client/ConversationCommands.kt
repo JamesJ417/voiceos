@@ -24,6 +24,9 @@ object ConversationCommands {
         "vic end the conversation",
         "that s all",
         "goodbye vic",
+        "good bye vic",
+        "okay goodbye vic",
+        "ok goodbye vic",
     )
     private val PAUSE_COMMANDS = setOf(
         "pause",

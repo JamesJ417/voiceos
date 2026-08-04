@@ -1,0 +1,12 @@
+[
+  {"phrase":"How much disk space is free?","expected_intent":"system.disk.check","expected_disposition":"execute"},
+  {"phrase":"How can you help me with my task list?","expected_intent":"task.assist","expected_disposition":"execute"},
+  {"phrase":"What is a list of tasks that we need to work on?","expected_intent":"task.review","expected_disposition":"execute"},
+  {"phrase":"Remind me that we need to work on printing all the recipe cards and laminating them as a task.","expected_intent":"task.create","expected_disposition":"execute"},
+  {"phrase":"Show my files","expected_intent":"artifact.search","expected_disposition":"execute"},
+  {"phrase":"Show my uploaded documents","expected_intent":"knowledge.document.list","expected_disposition":"execute"},
+  {"phrase":"Create a PDF for the recipe cards","expected_intent":"artifact.pdf.create","expected_disposition":"execute"},
+  {"phrase":"Revise the PDF","expected_intent":"artifact.pdf.revise","expected_disposition":"ask_clarifying_question"},
+  {"phrase":"Attach the PDF to the recipe card task","expected_intent":"artifact.attach","expected_disposition":"ask_clarifying_question"},
+  {"phrase":"Record task progress","expected_intent":"task.progress.record","expected_disposition":"ask_clarifying_question"}
+]

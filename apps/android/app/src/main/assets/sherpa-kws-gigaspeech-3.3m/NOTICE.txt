@@ -1,0 +1,9 @@
+Wake-word runtime: sherpa-onnx 1.13.4
+Source: https://github.com/k2-fsa/sherpa-onnx
+License: Apache-2.0
+
+Keyword model: sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile
+Source: https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models
+License: Apache-2.0
+
+The VoiceOS keyword list contains the locally configured phrase "HEY VIC".

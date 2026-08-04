@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    ArtifactRecord, AutomationProposal, ConversationStore, ExecutionEvent, GoalRecord, JobRecord,
-    ProjectRecord, ProviderRunMetric, SkillProposal, SkillUsage, StoreError, TaskRecord,
+    AutomationProposal, ConversationStore, ExecutionEvent, GoalRecord, JobRecord, ProjectRecord,
+    ProviderRunMetric, SkillProposal, SkillUsage, StoreError, TaskRecord,
 };
 
 impl ConversationStore {
@@ -28,7 +28,7 @@ impl ConversationStore {
             params![id, owner_id.trim(), title.trim(), desired_outcome.trim(), now],
         )?;
         Ok(GoalRecord {
-            id,
+            id: id.clone(),
             owner_id: owner_id.trim().to_owned(),
             title: title.trim().to_owned(),
             desired_outcome: desired_outcome.trim().to_owned(),
@@ -107,6 +107,7 @@ impl ConversationStore {
             title: title.trim().to_owned(),
             observable_outcome: observable_outcome.trim().to_owned(),
             estimated_minutes,
+            due_at: None,
             status: "ready".to_owned(),
             created_at: now.clone(),
             updated_at: now,
@@ -122,7 +123,7 @@ impl ConversationStore {
         require_text("owner_id", owner_id)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, status, created_at, updated_at
+            "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, due_at, status, created_at, updated_at
              FROM tasks
              WHERE owner_id=?1 AND (?2 OR status NOT IN ('completed', 'cancelled'))
              ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'ready' THEN 1 WHEN 'blocked' THEN 2 WHEN 'proposed' THEN 3 ELSE 4 END,
@@ -141,7 +142,7 @@ impl ConversationStore {
         require_text("task_id", task_id)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, status, created_at, updated_at
+            "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, due_at, status, created_at, updated_at
              FROM tasks WHERE owner_id=?1 AND task_id=?2",
         )?;
         let mut rows = statement.query(params![owner_id.trim(), task_id.trim()])?;
@@ -192,6 +193,28 @@ impl ConversationStore {
         )?;
         transaction.commit()?;
         drop(connection);
+        self.task(owner_id, task_id)
+    }
+
+    pub fn set_task_due_at(
+        &self,
+        owner_id: &str,
+        task_id: &str,
+        due_at: Option<&str>,
+    ) -> Result<Option<TaskRecord>, StoreError> {
+        if let Some(value) = due_at {
+            chrono::DateTime::parse_from_rfc3339(value).map_err(|_| {
+                StoreError::InvalidInput("task due_at must be an RFC3339 timestamp".to_owned())
+            })?;
+        }
+        let now = Utc::now().to_rfc3339();
+        let changed = self.connection()?.execute(
+            "UPDATE tasks SET due_at=?3, updated_at=?4 WHERE owner_id=?1 AND task_id=?2",
+            params![owner_id.trim(), task_id.trim(), due_at, now],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
         self.task(owner_id, task_id)
     }
 
@@ -357,6 +380,40 @@ impl ConversationStore {
             })
         })
         .collect()
+    }
+
+    pub fn activity_events(
+        &self,
+        owner_id: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<ExecutionEvent>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT event_id,owner_id,stream_id,event_type,actor,payload_json,occurred_at FROM execution_events WHERE owner_id=?1 AND event_id>?2 ORDER BY event_id DESC LIMIT ?3")?;
+        statement
+            .query_map(
+                params![owner_id.trim(), after, limit.clamp(1, 1_000)],
+                |row| {
+                    let payload: String = row.get(5)?;
+                    Ok(ExecutionEvent {
+                        id: row.get(0)?,
+                        owner_id: row.get(1)?,
+                        stream_id: row.get(2)?,
+                        event_type: row.get(3)?,
+                        actor: row.get(4)?,
+                        payload: serde_json::from_str(&payload).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                payload.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        occurred_at: row.get(6)?,
+                    })
+                },
+            )?
+            .map(|row| row.map_err(StoreError::from))
+            .collect()
     }
 
     pub fn propose_skill(
@@ -737,38 +794,6 @@ impl ConversationStore {
         })
     }
 
-    pub fn record_artifact(
-        &self,
-        owner_id: &str,
-        job_id: Option<&str>,
-        kind: &str,
-        uri: &str,
-        sha256: Option<&str>,
-    ) -> Result<ArtifactRecord, StoreError> {
-        require_text("artifact kind", kind)?;
-        require_text("artifact uri", uri)?;
-        let now = Utc::now().to_rfc3339();
-        let id = Uuid::new_v4().to_string();
-        let connection = self.connection()?;
-        ensure_owner(&connection, owner_id, &now)?;
-        if let Some(job_id) = job_id {
-            require_owned(&connection, "jobs", "job_id", job_id, owner_id)?;
-        }
-        connection.execute(
-            "INSERT INTO artifacts(artifact_id, owner_id, job_id, kind, uri, sha256, created_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, owner_id, job_id, kind.trim(), uri.trim(), sha256, now],
-        )?;
-        Ok(ArtifactRecord {
-            id,
-            owner_id: owner_id.to_owned(),
-            job_id: job_id.map(str::to_owned),
-            kind: kind.trim().to_owned(),
-            uri: uri.trim().to_owned(),
-            sha256: sha256.map(str::to_owned),
-            created_at: now,
-        })
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn record_provider_run(
         &self,
@@ -929,9 +954,10 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         title: row.get(4)?,
         observable_outcome: row.get(5)?,
         estimated_minutes: row.get(6)?,
-        status: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        due_at: row.get(7)?,
+        status: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
