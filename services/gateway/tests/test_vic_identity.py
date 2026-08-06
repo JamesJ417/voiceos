@@ -17,6 +17,8 @@ class VicIdentityTest(unittest.TestCase):
         self.assertIn("Voice Interface Controller", prompt)
         self.assertIn("inside VoiceOS", prompt)
         self.assertIn("Model output is reasoning, not authority", prompt)
+        self.assertIn("Never say you will get back to the user", prompt)
+        self.assertIn("durable tracked job", prompt)
 
     def test_soul_is_identity_focused_and_names_runtime_boundary(self) -> None:
         soul = (ROOT / "contracts" / "VIC-SOUL.md").read_text(encoding="utf-8")

@@ -96,6 +96,16 @@ data class EnrolledDevice(
 
 data class AdminStatus(val installationJson: String)
 
+data class SleepMemoryStatus(
+    val enabled: Boolean, val cycleId: String, val status: String, val phase: String, val mode: String,
+)
+
+data class SleepMorningReport(
+    val cycleId: String, val selectedEvents: Int, val committedMemories: Int,
+    val contradictions: Int, val quarantinedDreams: Int, val skillCandidates: Int,
+    val protectedProposals: Int, val rejectedProposals: Int, val retrievalPassed: Boolean,
+)
+
 data class VoiceTask(
     val id: String,
     val title: String,
@@ -167,6 +177,22 @@ object GatewayClient {
 
     fun getActivity(baseUrl: String, deviceToken: String?, callback: (Result<List<ActivityItem>>) -> Unit) {
         Thread({ callback(runCatching { retryConnection { getActivityBlocking(baseUrl, deviceToken) } }) }, "voiceos-activity").start()
+    }
+
+    fun getSleepMemoryStatus(baseUrl: String, deviceToken: String?, callback: (Result<SleepMemoryStatus>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getSleepMemoryStatusBlocking(baseUrl, deviceToken) } }) }, "voiceos-sleep-status").start()
+    }
+
+    fun getMorningReport(baseUrl: String, deviceToken: String?, callback: (Result<SleepMorningReport?>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getMorningReportBlocking(baseUrl, deviceToken) } }) }, "voiceos-memory-report").start()
+    }
+
+    fun runSleepCycle(baseUrl: String, mode: String, deviceToken: String?, callback: (Result<SleepMorningReport>) -> Unit) {
+        Thread({ callback(runCatching { runSleepCycleBlocking(baseUrl, mode, deviceToken) }) }, "voiceos-sleep-run").start()
+    }
+
+    fun actOnSleepCycle(baseUrl: String, cycleId: String, action: String, deviceToken: String?, callback: (Result<JSONObject>) -> Unit) {
+        Thread({ callback(runCatching { actOnSleepCycleBlocking(baseUrl, cycleId, action, deviceToken) }) }, "voiceos-sleep-action").start()
     }
 
     fun getAdminStatus(baseUrl: String, deviceToken: String?, callback: (Result<AdminStatus>) -> Unit) {
@@ -563,6 +589,53 @@ object GatewayClient {
                     item.optBoolean("needs_you"), item.opt("rollback")?.toString().orEmpty()))
             } }
         } finally { connection.disconnect() }
+    }
+
+    private fun getSleepMemoryStatusBlocking(baseUrl: String, deviceToken: String?): SleepMemoryStatus {
+        val connection = URL("$baseUrl/v1/memory/sleep/cycles/current").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val payload = responseJson(connection)
+            val cycle = payload.optJSONObject("cycle")
+            return SleepMemoryStatus(
+                payload.optBoolean("enabled"), cycle?.optString("id").orEmpty(),
+                cycle?.optString("status", "never run") ?: "never run",
+                cycle?.optString("phase", "idle") ?: "idle",
+                cycle?.optString("mode", "none") ?: "none",
+            )
+        } finally { connection.disconnect() }
+    }
+
+    private fun getMorningReportBlocking(baseUrl: String, deviceToken: String?): SleepMorningReport? {
+        val connection = URL("$baseUrl/v1/memory/morning-report").openConnection() as HttpURLConnection
+        try { configure(connection, deviceToken); return parseMorningReport(responseJson(connection).optJSONObject("report")) }
+        finally { connection.disconnect() }
+    }
+
+    private fun runSleepCycleBlocking(baseUrl: String, mode: String, deviceToken: String?): SleepMorningReport {
+        val payload = JSONObject().put("mode", mode).put("trigger_kind", "manual").put("config", JSONObject()).toString().toByteArray()
+        val connection = URL("$baseUrl/v1/memory/sleep/cycles").openConnection() as HttpURLConnection
+        try { configure(connection, deviceToken, payload); return parseMorningReport(responseJson(connection).getJSONObject("report"))!! }
+        finally { connection.disconnect() }
+    }
+
+    private fun actOnSleepCycleBlocking(baseUrl: String, cycleId: String, action: String, deviceToken: String?): JSONObject {
+        val encoded = URLEncoder.encode(cycleId, Charsets.UTF_8.name())
+        val payload = JSONObject().put("action", action).apply {
+            if (action == "rollback") put("reason", "operator requested rollback from Android")
+        }.toString().toByteArray()
+        val connection = URL("$baseUrl/v1/memory/sleep/cycles/$encoded/actions").openConnection() as HttpURLConnection
+        try { configure(connection, deviceToken, payload); return responseJson(connection) }
+        finally { connection.disconnect() }
+    }
+
+    private fun parseMorningReport(value: JSONObject?): SleepMorningReport? {
+        if (value == null) return null
+        return SleepMorningReport(
+            value.optString("cycle_id"), value.optInt("events_selected"), value.optInt("memories_committed"),
+            value.optInt("contradictions_detected"), value.optInt("dream_associations"), value.optInt("skill_candidates"),
+            value.optInt("protected_changes_awaiting_approval"), value.optInt("proposals_rejected"), value.optBoolean("retrieval_quality_passed"),
+        )
     }
 
     private fun getAdminStatusBlocking(baseUrl: String, deviceToken: String?): AdminStatus {

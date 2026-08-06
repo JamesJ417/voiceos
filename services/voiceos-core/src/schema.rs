@@ -608,6 +608,222 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS artifacts_owner_idx ON artifacts(owner_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS artifacts_task_idx ON artifacts(owner_id, task_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS artifacts_parent_idx ON artifacts(owner_id, parent_artifact_id, version);
+
+        CREATE TABLE IF NOT EXISTS raw_memory_events (
+            event_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            source_kind TEXT NOT NULL,
+            source_ref TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            UNIQUE(owner_id, source_kind, source_ref)
+        );
+        CREATE INDEX IF NOT EXISTS raw_memory_events_owner_time_idx
+            ON raw_memory_events(owner_id, occurred_at, event_id);
+        CREATE TRIGGER IF NOT EXISTS raw_memory_events_no_update
+            BEFORE UPDATE ON raw_memory_events BEGIN
+                SELECT RAISE(ABORT, 'raw memory events are immutable');
+            END;
+        CREATE TRIGGER IF NOT EXISTS raw_memory_events_no_delete
+            BEFORE DELETE ON raw_memory_events BEGIN
+                SELECT RAISE(ABORT, 'raw memory events are immutable');
+            END;
+
+        CREATE TABLE IF NOT EXISTS sleep_cycles (
+            cycle_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('running','staged','paused','completed','failed','cancelled','rolled_back')),
+            phase TEXT NOT NULL CHECK(phase IN ('preparing','snapshotting','selecting_events','replaying','extracting_memories','forming_connections','detecting_contradictions','dreaming','validating','staging','committing','reporting','completed','failed','rolled_back')),
+            mode TEXT NOT NULL CHECK(mode IN ('dry_run','commit')),
+            trigger_kind TEXT NOT NULL CHECK(trigger_kind IN ('manual','scheduled','resume','test')),
+            config_json TEXT NOT NULL,
+            snapshot_sha256 TEXT,
+            model_budget_used INTEGER NOT NULL DEFAULT 0,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT,
+            rolled_back_at TEXT,
+            rollback_reason TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
+        );
+        CREATE INDEX IF NOT EXISTS sleep_cycles_owner_idx
+            ON sleep_cycles(owner_id, started_at DESC);
+        CREATE TABLE IF NOT EXISTS sleep_cycle_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            cycle_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            status TEXT NOT NULL,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            occurred_at TEXT NOT NULL,
+            FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id)
+        );
+        CREATE INDEX IF NOT EXISTS sleep_cycle_events_cycle_idx
+            ON sleep_cycle_events(cycle_id, sequence);
+        CREATE TRIGGER IF NOT EXISTS sleep_cycle_events_no_update
+            BEFORE UPDATE ON sleep_cycle_events BEGIN
+                SELECT RAISE(ABORT, 'sleep cycle events are append-only');
+            END;
+        CREATE TRIGGER IF NOT EXISTS sleep_cycle_events_no_delete
+            BEFORE DELETE ON sleep_cycle_events BEGIN
+                SELECT RAISE(ABORT, 'sleep cycle events are append-only');
+            END;
+
+        CREATE TABLE IF NOT EXISTS sleep_event_selection (
+            cycle_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            selected INTEGER NOT NULL CHECK(selected IN (0,1)),
+            salience_score REAL NOT NULL,
+            score_components_json TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            PRIMARY KEY(cycle_id, event_id),
+            FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id),
+            FOREIGN KEY(event_id) REFERENCES raw_memory_events(event_id)
+        );
+        CREATE TABLE IF NOT EXISTS sleep_snapshots (
+            cycle_id TEXT PRIMARY KEY,
+            active_memory_ids_json TEXT NOT NULL,
+            active_view_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_proposals (
+            proposal_id TEXT PRIMARY KEY,
+            cycle_id TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            proposal_kind TEXT NOT NULL CHECK(proposal_kind IN ('memory','connection','contradiction','skill')),
+            memory_kind TEXT,
+            cognitive_status TEXT NOT NULL CHECK(cognitive_status IN ('verified_fact','supported_inference','working_hypothesis','dream_association','disputed','superseded','rejected')),
+            content TEXT NOT NULL,
+            normalized_content TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model_version TEXT,
+            operation_version TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0.0 AND 1.0),
+            protected INTEGER NOT NULL DEFAULT 0 CHECK(protected IN (0,1)),
+            approval_required INTEGER NOT NULL DEFAULT 0 CHECK(approval_required IN (0,1)),
+            approval_status TEXT NOT NULL CHECK(approval_status IN ('not_required','pending','approved','rejected')),
+            validation_status TEXT NOT NULL CHECK(validation_status IN ('pending','valid','invalid')),
+            validation_errors_json TEXT NOT NULL DEFAULT '[]',
+            dedupe_key TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id),
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            UNIQUE(cycle_id, dedupe_key)
+        );
+        CREATE INDEX IF NOT EXISTS memory_proposals_cycle_idx
+            ON memory_proposals(cycle_id, validation_status, approval_status);
+
+        CREATE TABLE IF NOT EXISTS cognitive_memories (
+            memory_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            cycle_id TEXT NOT NULL,
+            proposal_id TEXT NOT NULL UNIQUE,
+            memory_kind TEXT NOT NULL CHECK(memory_kind IN ('working','episodic','semantic','procedural','identity_doctrine','dream_association')),
+            cognitive_status TEXT NOT NULL CHECK(cognitive_status IN ('verified_fact','supported_inference','working_hypothesis','dream_association','disputed','superseded','rejected')),
+            content TEXT NOT NULL,
+            normalized_content TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0.0 AND 1.0),
+            active INTEGER NOT NULL CHECK(active IN (0,1)),
+            quarantined INTEGER NOT NULL CHECK(quarantined IN (0,1)),
+            protected INTEGER NOT NULL CHECK(protected IN (0,1)),
+            provider TEXT NOT NULL,
+            model_version TEXT,
+            operation_version TEXT NOT NULL,
+            revision_of TEXT,
+            expires_at TEXT,
+            invalidation_conditions_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            committed_at TEXT,
+            deactivated_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id),
+            FOREIGN KEY(proposal_id) REFERENCES memory_proposals(proposal_id),
+            FOREIGN KEY(revision_of) REFERENCES cognitive_memories(memory_id)
+        );
+        CREATE INDEX IF NOT EXISTS cognitive_memories_retrieval_idx
+            ON cognitive_memories(owner_id, active, quarantined, created_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS cognitive_memories_active_dedupe_idx
+            ON cognitive_memories(owner_id, normalized_content, memory_kind)
+            WHERE active=1;
+
+        CREATE TABLE IF NOT EXISTS memory_provenance (
+            memory_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            evidence_role TEXT NOT NULL CHECK(evidence_role IN ('supports','contradicts','derived_from')),
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0.0 AND 1.0),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(memory_id, event_id, evidence_role),
+            FOREIGN KEY(memory_id) REFERENCES cognitive_memories(memory_id),
+            FOREIGN KEY(event_id) REFERENCES raw_memory_events(event_id)
+        );
+        CREATE TABLE IF NOT EXISTS memory_links (
+            link_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            cycle_id TEXT NOT NULL,
+            source_memory_id TEXT NOT NULL,
+            target_memory_id TEXT NOT NULL,
+            relation TEXT NOT NULL CHECK(relation IN ('supports','contradicts','caused','preceded','follows','related_to','part_of','derived_from','applies_to','exception_to','supersedes','duplicates','unresolved_with','predicts','outcome_of')),
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0.0 AND 1.0),
+            evidence_json TEXT NOT NULL,
+            cognitive_status TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+            created_at TEXT NOT NULL,
+            deactivated_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id),
+            FOREIGN KEY(source_memory_id) REFERENCES cognitive_memories(memory_id),
+            FOREIGN KEY(target_memory_id) REFERENCES cognitive_memories(memory_id)
+        );
+        CREATE TABLE IF NOT EXISTS memory_contradictions (
+            contradiction_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            cycle_id TEXT NOT NULL,
+            existing_memory_id TEXT,
+            proposal_id TEXT NOT NULL,
+            conflict_kind TEXT NOT NULL CHECK(conflict_kind IN ('factual','temporal','preference','interpretive','correction','unknown')),
+            summary TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('open','resolved','dismissed')),
+            resolution TEXT,
+            requires_human_review INTEGER NOT NULL CHECK(requires_human_review IN (0,1)),
+            created_at TEXT NOT NULL,
+            resolved_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id),
+            FOREIGN KEY(existing_memory_id) REFERENCES cognitive_memories(memory_id),
+            FOREIGN KEY(proposal_id) REFERENCES memory_proposals(proposal_id)
+        );
+        CREATE INDEX IF NOT EXISTS memory_contradictions_owner_idx
+            ON memory_contradictions(owner_id, status, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS retrieval_quality_results (
+            result_id TEXT PRIMARY KEY,
+            cycle_id TEXT NOT NULL,
+            query TEXT NOT NULL,
+            baseline_ids_json TEXT NOT NULL,
+            staged_ids_json TEXT NOT NULL,
+            passed INTEGER NOT NULL CHECK(passed IN (0,1)),
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id)
+        );
+        CREATE TABLE IF NOT EXISTS morning_reports (
+            report_id TEXT PRIMARY KEY,
+            cycle_id TEXT NOT NULL UNIQUE,
+            owner_id TEXT NOT NULL,
+            report_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id),
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
+        );
         "#,
     )?;
     Ok(())

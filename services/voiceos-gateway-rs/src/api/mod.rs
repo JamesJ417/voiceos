@@ -12,6 +12,7 @@ mod ontology;
 mod outreach;
 mod planning;
 mod skills;
+mod sleep_memory;
 mod tasks;
 mod turns;
 mod updates;
@@ -25,6 +26,24 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health::health))
         .route("/v1/activity", get(activity::list))
+        .route(
+            "/v1/memory/sleep/cycles/current",
+            get(sleep_memory::current_cycle),
+        )
+        .route("/v1/memory/sleep/cycles", post(sleep_memory::start_cycle))
+        .route(
+            "/v1/memory/sleep/cycles/{cycle_id}",
+            get(sleep_memory::get_cycle),
+        )
+        .route(
+            "/v1/memory/sleep/cycles/{cycle_id}/actions",
+            post(sleep_memory::cycle_action),
+        )
+        .route(
+            "/v1/memory/morning-report",
+            get(sleep_memory::morning_report),
+        )
+        .route("/v1/memory/search", get(sleep_memory::search))
         .route("/v1/updates", get(updates::list))
         .route("/v1/updates/{update_id}/decision", post(updates::decide))
         .route("/v1/updates/{update_id}/actions", post(updates::action))
@@ -160,5 +179,9 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/internal/v1/skills/import", post(skills::import_proposal))
         .route("/internal/v1/skills/usages", post(skills::record_usage))
         .route("/internal/v1/updates/discover", post(updates::discover))
+        .route(
+            "/internal/v1/memory/sleep/run",
+            post(sleep_memory::internal_run),
+        )
         .with_state(state)
 }

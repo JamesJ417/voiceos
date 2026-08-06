@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: VoiceOS Gateway
-  version: 0.10.0
+  version: 0.11.0
 servers:
   - url: http://127.0.0.1:8787
 security:
@@ -27,6 +27,68 @@ paths:
         - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 1000 } }
       responses:
         "200": { description: "Unified VIC notices, decisions, models, attempts, changes, evidence, files, needs-you state, and rollback availability" }
+  /v1/memory/sleep/cycles/current:
+    get:
+      operationId: getCurrentSleepCycle
+      responses:
+        "200": { description: Current or most recent bounded VIC sleep-memory cycle }
+  /v1/memory/sleep/cycles:
+    post:
+      operationId: startSleepCycle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode: { type: string, enum: [dry_run, commit], default: dry_run }
+                trigger_kind: { type: string, enum: [manual, test], default: manual }
+                config: { type: object }
+      responses:
+        "201": { description: Completed bounded cycle and morning report }
+        "503": { description: Feature flag is disabled }
+  /v1/memory/sleep/cycles/{cycle_id}:
+    get:
+      operationId: getSleepCycle
+      parameters:
+        - { in: path, name: cycle_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "Cycle state, evidence, metrics, and report" }
+        "404": { description: Cycle does not exist }
+  /v1/memory/sleep/cycles/{cycle_id}/actions:
+    post:
+      operationId: actOnSleepCycle
+      parameters:
+        - { in: path, name: cycle_id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [commit, rollback, pause, resume, cancel, approve_proposal, reject_proposal, promote_dream] }
+                proposal_id: { type: [string, "null"], format: uuid }
+                memory_id: { type: [string, "null"], format: uuid }
+                reason: { type: [string, "null"] }
+      responses:
+        "200": { description: Audited cycle action result }
+  /v1/memory/morning-report:
+    get:
+      operationId: getMemoryMorningReport
+      responses:
+        "200": { description: "Latest concise consolidation, contradiction, dream, and skill summary" }
+  /v1/memory/search:
+    get:
+      operationId: searchReconstructiveMemory
+      parameters:
+        - { in: query, name: q, required: true, schema: { type: string, minLength: 1 } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { in: query, name: include_dreams, schema: { type: boolean, default: false } }
+      responses:
+        "200": { description: Provenance-bearing active memories; dreams excluded unless explicitly requested }
   /v1/admin/status:
     get:
       operationId: getInstallationStatus

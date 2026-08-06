@@ -43,7 +43,7 @@ import java.io.File
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private enum class VoiceState { READY, STARTING, LISTENING, PROCESSING, SPEAKING, ERROR }
-    private enum class AppPage { COMMAND, TASKS, FILES, HISTORY, SYSTEM }
+    private enum class AppPage { HOME, TASKS, FILES, HISTORY, SYSTEM }
     private enum class TaskFilter { ALL, NEEDS_ME, VIC_WORKING, REVIEW }
 
     private lateinit var statusView: TextView
@@ -64,6 +64,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var attentionContainer: LinearLayout
     private lateinit var activityContainer: LinearLayout
     private lateinit var adminStatusView: TextView
+    private lateinit var sleepStatusView: TextView
+    private lateinit var sleepReportView: TextView
     private lateinit var deviceContainer: LinearLayout
     private lateinit var historyView: TextView
     private lateinit var taskStatusView: TextView
@@ -90,7 +92,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private val navViews = mutableMapOf<AppPage, TextView>()
 
     private var voiceState = VoiceState.READY
-    private var currentPage = AppPage.COMMAND
+    private var currentPage = AppPage.HOME
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var textToSpeechReady = false
@@ -175,7 +177,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 VICConversationService.STATE_PAUSED -> {
                     renderState(VoiceState.READY, "Conversation paused")
                     voiceTitleView.text = "Conversation paused"
-                    statusView.text = "VOICE CHANNEL PAUSED"
+                    statusView.text = "PAUSED"
                 }
                 VICConversationService.STATE_ERROR -> renderState(VoiceState.ERROR, detail.ifBlank { "Conversation error" })
                 VICConversationService.STATE_STOPPED -> renderState(VoiceState.READY, "Conversation ended")
@@ -193,7 +195,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         override fun onBeginningOfSpeech() {
-            statusView.text = "VOICE CHANNEL LISTENING"
+            statusView.text = "LISTENING"
         }
 
         override fun onRmsChanged(rmsdB: Float) = Unit
@@ -460,15 +462,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         fun navChip(label: String, active: Boolean) = TextView(this).apply {
             text = label
-            textSize = 11f
+            textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
+            maxLines = 1
+            isSingleLine = true
             setTextColor(if (active) CarbonPalette.teal else CarbonPalette.muted)
             background = carbonControl(
                 this@MainActivity,
                 if (active) CarbonPalette.teal else CarbonPalette.line,
             )
-            setPadding(dp(12), dp(11), dp(12), dp(11))
+            setPadding(dp(3), dp(12), dp(3), dp(12))
             alpha = if (active) 1f else 0.72f
         }
 
@@ -506,7 +510,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             gravity = Gravity.CENTER_VERTICAL
         }
         brandRow.addView(HexMarkView(this), LinearLayout.LayoutParams(dp(42), dp(38)))
-        brandRow.addView(heading("VoiceOS", 25f).apply {
+        brandRow.addView(heading("VIC", 25f).apply {
             setPadding(dp(9), 0, 0, 0)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         gatewayView = TextView(this).apply {
@@ -526,37 +530,35 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val commandNav = navChip("⌂  COMMAND", true)
-        val tasksNav = navChip("✓  TASKS", false)
-        val filesNav = navChip("▤  FILES", false)
-        val historyNav = navChip("◷  HISTORY", false)
-        val systemNav = navChip("⌁  SYSTEM", false)
+        val homeNav = navChip("HOME", true)
+        val tasksNav = navChip("TASKS", false)
+        val filesNav = navChip("FILES", false)
+        val historyNav = navChip("HISTORY", false)
+        val systemNav = navChip("SYSTEM", false)
         navViews.clear()
-        navViews[AppPage.COMMAND] = commandNav
+        navViews[AppPage.HOME] = homeNav
         navViews[AppPage.TASKS] = tasksNav
         navViews[AppPage.FILES] = filesNav
         navViews[AppPage.HISTORY] = historyNav
         navViews[AppPage.SYSTEM] = systemNav
-        navigation.addView(commandNav, weightedButton())
-        navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(7) })
-        navigation.addView(filesNav, weightedButton().apply { marginStart = dp(7) })
-        navigation.addView(historyNav, weightedButton().apply { marginStart = dp(7) })
-        navigation.addView(systemNav, weightedButton().apply { marginStart = dp(7) })
+        navigation.addView(homeNav, weightedButton())
+        navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(4) })
+        navigation.addView(filesNav, weightedButton().apply { marginStart = dp(4) })
+        navigation.addView(historyNav, weightedButton().apply { marginStart = dp(4) })
+        navigation.addView(systemNav, weightedButton().apply { marginStart = dp(4) })
         content.addView(navigation, fullWidthWrap().apply { topMargin = dp(18) })
 
-        val commandPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        commandPage.addView(kicker("Carbon Command"), fullWidthWrap().apply { topMargin = dp(24) })
-        commandPage.addView(heading("Command center", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+        val homePage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val voicePanel = panel(20)
-        statusView = kicker("Voice channel ready")
+        statusView = kicker("Ready")
         voicePanel.addView(statusView, fullWidthWrap())
         voiceTitleView = heading("What can I help with?", 29f).apply {
             setPadding(0, dp(7), 0, 0)
         }
         voicePanel.addView(voiceTitleView, fullWidthWrap())
         voicePanel.addView(TextView(this).apply {
-            text = "Tap the control and speak. VoiceOS keeps the conversation across your enrolled devices."
+            text = "Tap the control and speak. VIC keeps the conversation across your enrolled devices."
             textSize = 14f
             setTextColor(CarbonPalette.muted)
             setLineSpacing(0f, 1.18f)
@@ -590,7 +592,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         voicePanel.addView(stateTrack, fullWidthWrap())
         cancelButton = actionButton("CANCEL").apply { setOnClickListener { cancelCurrentAction() } }
         voicePanel.addView(cancelButton, fullWidthWrap().apply { topMargin = dp(9) })
-        commandPage.addView(voicePanel, fullWidthWrap().apply { topMargin = dp(18) })
+        homePage.addView(voicePanel, fullWidthWrap().apply { topMargin = dp(20) })
 
         val conversationPanel = panel(18)
         val conversationHeader = LinearLayout(this).apply {
@@ -636,7 +638,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         conversationActions.addView(correctButton, weightedButton().apply { marginStart = dp(6) })
         conversationActions.addView(retryButton, weightedButton().apply { marginStart = dp(6) })
         conversationPanel.addView(conversationActions, fullWidthWrap().apply { topMargin = dp(12) })
-        commandPage.addView(conversationPanel, fullWidthWrap().apply { topMargin = dp(14) })
+        homePage.addView(conversationPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
         val approvals = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -651,7 +653,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         approvals.addView(approveButton, weightedButton())
         approvals.addView(denyButton, weightedButton().apply { marginStart = dp(8) })
-        commandPage.addView(approvals, fullWidthWrap().apply { topMargin = dp(12) })
+        homePage.addView(approvals, fullWidthWrap().apply { topMargin = dp(12) })
 
         val utilityPanel = panel(16)
         utilityPanel.addView(kicker("Voice controls"), fullWidthWrap())
@@ -663,7 +665,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             contentDescription = "Add a private knowledge file"
         }
         utilityPanel.addView(utilityRow("PRIVATE KNOWLEDGE", uploadButton), fullWidthWrap().apply { topMargin = dp(6) })
-        commandPage.addView(utilityPanel, fullWidthWrap().apply { topMargin = dp(14) })
+        homePage.addView(utilityPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
         val providerPanel = panel(17)
         providerPanel.addView(kicker("Reasoning fabric"), fullWidthWrap())
@@ -677,7 +679,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             background = carbonControl(this@MainActivity, CarbonPalette.green)
         }
         providerPanel.addView(providerStatusView, fullWidthWrap().apply { topMargin = dp(14) })
-        commandPage.addView(providerPanel, fullWidthWrap().apply { topMargin = dp(14) })
+        homePage.addView(providerPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
         val healthPanel = panel(17)
         healthPanel.addView(kicker("Live infrastructure"), fullWidthWrap())
@@ -691,9 +693,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             background = carbonControl(this@MainActivity, CarbonPalette.line)
         }
         healthPanel.addView(systemStatusView, fullWidthWrap().apply { topMargin = dp(14) })
-        commandPage.addView(healthPanel, fullWidthWrap().apply { topMargin = dp(14) })
+        homePage.addView(healthPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
-        commandPage.addView(TextView(this).apply {
+        homePage.addView(TextView(this).apply {
             text = "PRIVATE  •  TAILSCALE  •  MEMORY ACTIVE"
             textSize = 9f
             letterSpacing = 0.11f
@@ -831,6 +833,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 addView(secondaryButton("REFRESH UPDATES") { loadUpdateProposals() }, fullWidthWrap().apply { topMargin = dp(14) })
             }, fullWidthWrap().apply { topMargin = dp(18) })
             addView(panel(17).apply {
+                addView(kicker("Reconstructive memory"), fullWidthWrap())
+                addView(heading("VIC sleep cycle", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                sleepStatusView = operationText("Loading sleep-memory status...", CarbonPalette.line)
+                addView(sleepStatusView, fullWidthWrap().apply { topMargin = dp(12) })
+                sleepReportView = operationText("No morning report yet.", CarbonPalette.line)
+                addView(sleepReportView, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("DRY RUN") { runSleepMemory("dry_run") }, fullWidthWrap().apply { topMargin = dp(12) })
+                addView(secondaryButton("RUN & COMMIT") { runSleepMemory("commit") }, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("ROLL BACK LAST CYCLE") { actOnLastSleepCycle("rollback") }, fullWidthWrap().apply { topMargin = dp(8) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            addView(panel(17).apply {
                 addView(kicker("Hands-free access"), fullWidthWrap())
                 addView(heading("Wake word", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
                 addView(TextView(this@MainActivity).apply {
@@ -908,18 +921,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         pageViews.clear()
-        pageViews[AppPage.COMMAND] = commandPage
+        pageViews[AppPage.HOME] = homePage
         pageViews[AppPage.TASKS] = tasksPage
         pageViews[AppPage.FILES] = filesPage
         pageViews[AppPage.HISTORY] = historyPage
         pageViews[AppPage.SYSTEM] = systemPage
-        content.addView(commandPage, fullWidthWrap())
+        content.addView(homePage, fullWidthWrap())
         content.addView(tasksPage, fullWidthWrap())
         content.addView(filesPage, fullWidthWrap())
         content.addView(historyPage, fullWidthWrap())
         content.addView(systemPage, fullWidthWrap())
 
-        commandNav.setOnClickListener { showPage(AppPage.COMMAND) }
+        homeNav.setOnClickListener { showPage(AppPage.HOME) }
         tasksNav.setOnClickListener { showPage(AppPage.TASKS) }
         filesNav.setOnClickListener { showPage(AppPage.FILES) }
         historyNav.setOnClickListener { showPage(AppPage.HISTORY) }
@@ -1016,7 +1029,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         if (intent?.action == ACTION_VIC_TALK) {
             intent.action = null
-            showPage(AppPage.COMMAND)
+            showPage(AppPage.HOME)
             intent.getStringExtra(VicOutreachNotifications.EXTRA_BODY)?.takeIf { it.isNotBlank() }?.let {
                 transcriptView.text = "VIC reached out:\n\n$it"
             }
@@ -1245,6 +1258,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         }
                         "approval.decided" -> pendingApproval = null
                         "status.changed" -> checkGatewayHealth(justEnrolled = false)
+                        "memory.sleep.completed", "memory.sleep.action" -> if (currentPage == AppPage.SYSTEM) loadSleepMemory()
                     }
                 }
             },
@@ -1634,7 +1648,53 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             loadSkillProposals()
             loadUpdateProposals()
             loadOperations()
+            loadSleepMemory()
         }
+    }
+
+    private var latestSleepCycleId: String = ""
+
+    private fun loadSleepMemory() {
+        val baseUrl = GatewaySettings.baseUrl(this)
+        val token = DeviceCredentials.token(this)
+        if (::sleepStatusView.isInitialized) GatewayClient.getSleepMemoryStatus(baseUrl, token) { result -> runOnUiThread {
+            result.fold(onSuccess = { status ->
+                latestSleepCycleId = status.cycleId
+                sleepStatusView.text = "${if (status.enabled) "ENABLED" else "DISABLED"}  •  ${status.status.uppercase(Locale.US)}\nPhase: ${status.phase}  •  Mode: ${status.mode}"
+                sleepStatusView.setTextColor(if (status.enabled) CarbonPalette.white else CarbonPalette.amber)
+            }, onFailure = { sleepStatusView.text = "Sleep-memory status unavailable: ${it.message.orEmpty()}" })
+        } }
+        if (::sleepReportView.isInitialized) GatewayClient.getMorningReport(baseUrl, token) { result -> runOnUiThread {
+            result.fold(onSuccess = { report -> renderMorningReport(report) },
+                onFailure = { sleepReportView.text = "Morning report unavailable: ${it.message.orEmpty()}" })
+        } }
+    }
+
+    private fun renderMorningReport(report: SleepMorningReport?) {
+        sleepReportView.text = if (report == null) "No morning report yet." else
+            "Selected ${report.selectedEvents} events  •  Committed ${report.committedMemories}\n" +
+                "Contradictions ${report.contradictions}  •  Dreams quarantined ${report.quarantinedDreams}\n" +
+                "Skill candidates ${report.skillCandidates}  •  Protected ${report.protectedProposals}\n" +
+                "Rejected ${report.rejectedProposals}  •  Retrieval ${if (report.retrievalPassed) "PASSED" else "FAILED"}"
+    }
+
+    private fun runSleepMemory(mode: String) {
+        sleepStatusView.text = "VIC is running a bounded ${mode.replace('_', ' ')} cycle..."
+        GatewayClient.runSleepCycle(GatewaySettings.baseUrl(this), mode, DeviceCredentials.token(this)) { result -> runOnUiThread {
+            result.fold(onSuccess = { report -> renderMorningReport(report); loadSleepMemory() },
+                onFailure = { sleepStatusView.text = "Cycle failed: ${it.message.orEmpty()}" })
+        } }
+    }
+
+    private fun actOnLastSleepCycle(action: String) {
+        if (latestSleepCycleId.isBlank()) {
+            Toast.makeText(this, "No completed cycle is available.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        GatewayClient.actOnSleepCycle(GatewaySettings.baseUrl(this), latestSleepCycleId, action, DeviceCredentials.token(this)) { result -> runOnUiThread {
+            result.fold(onSuccess = { loadSleepMemory() },
+                onFailure = { sleepStatusView.text = "Action failed: ${it.message.orEmpty()}" })
+        } }
     }
 
     private fun loadOperations() {
@@ -1681,7 +1741,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun requestDeviceRevocation(device: EnrolledDevice) {
         GatewayClient.requestDeviceRevocation(GatewaySettings.baseUrl(this), device.id, DeviceCredentials.token(this)) { result -> runOnUiThread {
-            result.fold(onSuccess = { approval -> pendingApproval = approval; Toast.makeText(this, "Review the approval card to revoke ${device.displayName}.", Toast.LENGTH_LONG).show(); showPage(AppPage.COMMAND) },
+            result.fold(onSuccess = { approval -> pendingApproval = approval; Toast.makeText(this, "Review the approval card to revoke ${device.displayName}.", Toast.LENGTH_LONG).show(); showPage(AppPage.HOME) },
                 onFailure = { Toast.makeText(this, "Revocation request failed: ${it.message.orEmpty()}", Toast.LENGTH_LONG).show() })
         } }
     }
@@ -2429,12 +2489,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun renderState(state: VoiceState, label: String) {
         voiceState = state
         statusView.text = when (state) {
-            VoiceState.READY -> "VOICE CHANNEL READY"
-            VoiceState.STARTING -> "VOICE CHANNEL STARTING"
-            VoiceState.LISTENING -> "VOICE CHANNEL LISTENING"
-            VoiceState.PROCESSING -> "VOICE CHANNEL PROCESSING"
-            VoiceState.SPEAKING -> "VOICE CHANNEL SPEAKING"
-            VoiceState.ERROR -> "VOICE CHANNEL NEEDS ATTENTION"
+            VoiceState.READY -> "READY"
+            VoiceState.STARTING -> "STARTING"
+            VoiceState.LISTENING -> "LISTENING"
+            VoiceState.PROCESSING -> "THINKING"
+            VoiceState.SPEAKING -> "SPEAKING"
+            VoiceState.ERROR -> "NEEDS ATTENTION"
         }
         voiceTitleView.text = when (state) {
             VoiceState.READY -> "What can I help with?"

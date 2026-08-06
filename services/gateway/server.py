@@ -85,6 +85,7 @@ class VoiceOSServer(ThreadingHTTPServer):
                 calendar_signals_url=os.environ.get("VOICEOS_CALENDAR_SIGNALS_URL", "").strip() or None,
                 communication_signals_url=os.environ.get("VOICEOS_COMMUNICATION_SIGNALS_URL", "").strip() or None,
                 interpret_signal=_review_signal_interpreter(self.coordinator),
+                sleep_memory_enabled=os.environ.get("VOICEOS_SLEEP_SCHEDULER_ENABLED", "0") == "1",
             )
             self.review_scheduler.start()
 
@@ -317,6 +318,17 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             suffix = f"?{parsed.query}" if parsed.query else ""
             self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
             return
+        if parsed.path in {"/v1/memory/sleep/cycles/current", "/v1/memory/morning-report", "/v1/memory/search"}:
+            if not self._require_device():
+                return
+            suffix = f"?{parsed.query}" if parsed.query else ""
+            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
+            return
+        if parsed.path.startswith("/v1/memory/sleep/cycles/"):
+            if not self._require_device():
+                return
+            self._proxy_memory_request("GET", parsed.path)
+            return
         if parsed.path in {"/v1/attention", "/v1/calendar/events"}:
             if not self._require_device():
                 return
@@ -538,6 +550,13 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         if path == "/v1/tasks" or (
             path.startswith("/v1/tasks/")
             and (path.endswith("/status") or path.endswith("/actions") or path.endswith("/schedule"))
+        ):
+            if not self._require_device():
+                return
+            self._proxy_json_memory_request(path)
+            return
+        if path == "/v1/memory/sleep/cycles" or (
+            path.startswith("/v1/memory/sleep/cycles/") and path.endswith("/actions")
         ):
             if not self._require_device():
                 return

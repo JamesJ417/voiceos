@@ -77,6 +77,8 @@ type Artifact = {
 type AttentionItem = { id:string; category:string; title:string; summary:string; urgency:string; approval_required:boolean; available_actions:string[]; occurred_at:string };
 type UpdateProposal = { id:string; component:string; current_version:string; proposed_version:string; status:string; release_notes:string; rollback_version:string; skill_changes:unknown; security_changes:unknown; affected_components:unknown };
 type ActivityItem = { id:number; occurred_at:string; type:string; actor:string; noticed?:unknown; decision?:unknown; model?:unknown; attempted?:unknown; changed?:unknown; evidence?:unknown; files?:unknown; needs_you:boolean; rollback?:unknown };
+type SleepCycle = { id:string; status:string; phase:string; mode:string };
+type MorningReport = { cycle_id:string; events_selected:number; memories_committed:number; contradictions_detected:number; dream_associations:number; skill_candidates:number; protected_changes_awaiting_approval:number; proposals_rejected:number; retrieval_quality_passed:boolean };
 
 type RecognitionResultEvent = {
   resultIndex: number;
@@ -157,6 +159,9 @@ export default function Home() {
   const [updates, setUpdates] = useState<UpdateProposal[]>([]);
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [installation, setInstallation] = useState<Record<string, unknown>>({});
+  const [sleepEnabled, setSleepEnabled] = useState(false);
+  const [sleepCycle, setSleepCycle] = useState<SleepCycle | null>(null);
+  const [morningReport, setMorningReport] = useState<MorningReport | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [taskFilter, setTaskFilter] = useState<"all" | "needs_me" | "vic_working" | "review">("all");
@@ -209,6 +214,26 @@ export default function Home() {
     setActivity(timeline.items ?? []);
     setInstallation(admin.installation ?? {});
   }, [request]);
+
+  const loadSleepMemory = useCallback(async () => {
+    const [current, report] = await Promise.all([
+      request<{enabled:boolean;cycle:SleepCycle|null}>("/v1/memory/sleep/cycles/current"),
+      request<{report:MorningReport|null}>("/v1/memory/morning-report"),
+    ]);
+    setSleepEnabled(current.enabled); setSleepCycle(current.cycle); setMorningReport(report.report);
+  }, [request]);
+
+  const runSleepMemory = useCallback(async (mode:"dry_run"|"commit") => {
+    setStatusMessage(`Running bounded memory ${mode.replace("_", " ")}...`);
+    await request("/v1/memory/sleep/cycles", { method:"POST", body:JSON.stringify({mode,trigger_kind:"manual",config:{}}) });
+    await loadSleepMemory(); setStatusMessage("VIC memory cycle completed.");
+  }, [loadSleepMemory, request]);
+
+  const rollbackSleepMemory = useCallback(async () => {
+    if (!sleepCycle) return;
+    await request(`/v1/memory/sleep/cycles/${encodeURIComponent(sleepCycle.id)}/actions`, { method:"POST", body:JSON.stringify({action:"rollback",reason:"operator requested rollback from kiosk"}) });
+    await loadSleepMemory();
+  }, [loadSleepMemory, request, sleepCycle]);
 
   const loadFloor = useCallback(async () => {
     const payload = await request<{ floor: ConversationFloor | null }>("/v1/conversations/active/floor");
@@ -298,6 +323,7 @@ export default function Home() {
         loadTasks().catch(() => undefined),
         loadArtifacts().catch(() => undefined),
         loadFloor().catch(() => undefined),
+        loadSleepMemory().catch(() => undefined),
       ]);
       setConnected(true);
       setStatusMessage(`Connected · ${gatewayHealth.language_model ?? "provider ready"}`);
@@ -307,7 +333,7 @@ export default function Home() {
       setStatusMessage(errorText(error));
       setVoiceState("error");
     }
-  }, [gateway, loadArtifacts, loadFloor, loadHistory, loadSkillProposals, loadSkills, loadTasks, request]);
+  }, [gateway, loadArtifacts, loadFloor, loadHistory, loadSkillProposals, loadSkills, loadSleepMemory, loadTasks, request]);
 
   useEffect(() => {
     const restore = window.setTimeout(() => {
@@ -756,7 +782,7 @@ export default function Home() {
 
         {view === "files" && <FilesPanel artifacts={artifacts} selected={selectedArtifact} previewUrl={previewUrl} onPreview={(artifact) => void previewArtifact(artifact)} onDownload={(artifact) => void downloadArtifact(artifact)} onRefresh={() => void loadArtifacts()} />}
 
-        {view === "system" && <div className="system-layout"><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its VoiceOS device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside VoiceOS.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
+        {view === "system" && <div className="system-layout"><SleepMemoryPanel enabled={sleepEnabled} cycle={sleepCycle} report={morningReport} onRun={(mode)=>void runSleepMemory(mode)} onRollback={()=>void rollbackSleepMemory()} /><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its VoiceOS device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside VoiceOS.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
       </section>
 
       {showSettings && <SettingsDialog gateway={gateway} enrollmentCode={enrollmentCode} setEnrollmentCode={setEnrollmentCode} onSaveGateway={saveGateway} onEnroll={enroll} onClose={() => setShowSettings(false)} hasToken={Boolean(token)} onForget={() => { localStorage.removeItem(STORAGE.token); localStorage.removeItem(STORAGE.deviceId); setToken(""); setConnected(false); setStatusMessage("Browser enrollment removed."); }} />}
@@ -806,6 +832,10 @@ function ProviderPanel({ providers, active, wide = false }: { providers: Provide
     { name: "codex-sol", role: "Highest confidence" },
   ];
   return <section className={`provider-panel panel ${wide ? "wide" : ""}`}><div className="panel-heading"><div><p className="kicker">Reasoning fabric</p><h2>Model providers</h2></div></div><div className="provider-list">{displayProviders.slice(0, 5).map((provider) => { const selected = provider.name === active; return <div className="provider-row" key={provider.name}><span className={`provider-glyph ${selected ? "green" : "cyan"}`} aria-hidden="true">{selected ? "✦" : "◎"}</span><div><strong>{providerLabel(provider.name)}</strong><small>{provider.role ?? "VoiceOS provider"}</small></div><span className={`provider-state ${selected ? "green" : provider.configured === false ? "amber" : "cyan"}`}>{selected ? "Active" : provider.configured === false ? "Offline" : "Ready"}</span></div>; })}</div></section>;
+}
+
+function SleepMemoryPanel({ enabled, cycle, report, onRun, onRollback }: { enabled:boolean; cycle:SleepCycle|null; report:MorningReport|null; onRun:(mode:"dry_run"|"commit")=>void; onRollback:()=>void }) {
+  return <section className="panel wide-panel"><div className="panel-heading"><div><p className="kicker">Reconstructive memory</p><h2>VIC sleep cycle</h2></div><span className={enabled ? "healthy-label" : "online-pill"}>{enabled ? "Enabled" : "Disabled"}</span></div><div className="metric-grid"><Metric label="Status" value={cycle?.status ?? "Never run"} /><Metric label="Phase" value={cycle?.phase ?? "Idle"} /><Metric label="Mode" value={cycle?.mode ?? "—"} /><Metric label="Retrieval" value={report ? (report.retrieval_quality_passed ? "Passed" : "Failed") : "—"} /><Metric label="Committed" value={String(report?.memories_committed ?? 0)} /><Metric label="Dreams quarantined" value={String(report?.dream_associations ?? 0)} /><Metric label="Contradictions" value={String(report?.contradictions_detected ?? 0)} /><Metric label="Protected" value={String(report?.protected_changes_awaiting_approval ?? 0)} /></div><div className="approval-actions"><button className="secondary-button" disabled={!enabled} onClick={()=>onRun("dry_run")}>Dry run</button><button className="secondary-button" disabled={!enabled} onClick={()=>onRun("commit")}>Run & commit</button><button className="secondary-button" disabled={!cycle} onClick={onRollback}>Roll back</button></div></section>;
 }
 
 function HealthPanel({ gatewayHealth, hostHealth, connected, wide = false }: { gatewayHealth: GatewayHealth; hostHealth: HostHealth; connected: boolean; wide?: boolean }) {

@@ -52,6 +52,7 @@ class ReviewScheduler:
         post_json: PostJson | None = None,
         health_probe: Callable[[], JsonObject] | None = None,
         now: Callable[[], datetime] | None = None,
+        sleep_memory_enabled: bool = False,
     ) -> None:
         self.memory_url = memory_url.rstrip("/")
         self.audit = audit_store
@@ -64,6 +65,7 @@ class ReviewScheduler:
         self._post_json = post_json or self._safe_post
         self._health_probe = health_probe or collect_system_health
         self._now = now or (lambda: datetime.now(UTC))
+        self.sleep_memory_enabled = sleep_memory_enabled
         self._stop = threading.Event()
         self._scan_lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -200,6 +202,7 @@ class ReviewScheduler:
 
         delivered += self._maybe_daily_planning(policy, local_now)
         delivered += self._maybe_digest(policy, local_now)
+        sleep_cycle = self._maybe_sleep_cycle(policy, local_now, snapshots.get("system"))
         report: JsonObject = {
             "checked_at": self._now().isoformat(),
             "changed_sources": changed_sources,
@@ -207,11 +210,47 @@ class ReviewScheduler:
             "delivered": delivered,
             "held_by_policy": held,
             "next_scan_minutes": int(policy.get("scan_interval_minutes", 20)),
+            "sleep_cycle": sleep_cycle,
         }
         self.audit.set_review_state("last_report", report)
         self._record_automation(scan_rule, "review.scan", _fingerprint(report))
         self.audit.publish_client_event("vic.review.completed", report)
         return report
+
+    def _maybe_sleep_cycle(
+        self,
+        policy: JsonObject,
+        local_now: datetime,
+        system_snapshot: object,
+    ) -> JsonObject | None:
+        """Run at most one bounded cycle per local day, only during quiet hours."""
+        if not self.sleep_memory_enabled or bool(policy.get("do_not_disturb", False)):
+            return None
+        if not _inside_window(
+            local_now.strftime("%H:%M"),
+            str(policy.get("quiet_hours_start", "22:00")),
+            str(policy.get("quiet_hours_end", "08:00")),
+        ):
+            return None
+        if not isinstance(system_snapshot, dict) or system_snapshot.get("status") != "healthy":
+            return {"status": "skipped", "reason": "system_not_healthy"}
+        state_key = f"sleep-memory:{local_now.date().isoformat()}"
+        if self.audit.review_state(state_key):
+            return {"status": "already_ran"}
+        result = self._post_json(
+            "/internal/v1/memory/sleep/run",
+            {
+                "mode": "commit",
+                "trigger_kind": "scheduled",
+                "config": {"max_events": 96, "model_call_budget": 2},
+            },
+        )
+        if not isinstance(result, dict):
+            return {"status": "failed"}
+        cycle = result.get("cycle")
+        cycle_id = cycle.get("id") if isinstance(cycle, dict) else None
+        self.audit.set_review_state(state_key, {"cycle_id": cycle_id, "completed_at": self._now().isoformat()})
+        return {"status": "completed", "cycle_id": cycle_id}
 
     def _run(self) -> None:
         if self._stop.wait(5):

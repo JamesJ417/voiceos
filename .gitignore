@@ -19,6 +19,7 @@ local.properties
 # Reproducible local test/render artifacts
 /output/
 /tmp/
+/.diagnostics/
 
 # Runtime data and local deployment staging
 /.voiceos-deploy-*/

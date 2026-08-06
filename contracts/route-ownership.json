@@ -1,11 +1,17 @@
 {
-  "version": 1,
+  "version": 2,
   "public_ingress": "python-gateway",
   "target_public_owner": "rust-control-plane",
   "routes": [
     { "method": "GET", "path": "/v1/devices", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "POST", "path": "/v1/devices/{device_id}/revocation", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/activity", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
+    { "method": "GET", "path": "/v1/memory/sleep/cycles/current", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
+    { "method": "POST", "path": "/v1/memory/sleep/cycles", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
+    { "method": "GET", "path": "/v1/memory/sleep/cycles/{cycle_id}", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
+    { "method": "POST", "path": "/v1/memory/sleep/cycles/{cycle_id}/actions", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
+    { "method": "GET", "path": "/v1/memory/morning-report", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
+    { "method": "GET", "path": "/v1/memory/search", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/admin/status", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "POST", "path": "/v1/admin/actions", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/updates", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },

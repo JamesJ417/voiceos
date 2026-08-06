@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use voiceos_core::{
     CodexBridgeProvider, ConversationEngine, ConversationStore, MockProvider, OllamaProvider,
-    ProviderRouter, RoutingPolicy,
+    ProviderRouter, RoutingPolicy, SleepMemoryAuthority,
 };
 use voiceos_ontology::{Interpreter, OntologyStore};
 
@@ -47,6 +47,7 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
 
     let engine = Arc::new(ConversationEngine::new(store.clone()));
     let router = Arc::new(build_provider_router()?);
+    let sleep_memory = Arc::new(SleepMemoryAuthority::new(store.clone()));
     let ontology_store = Arc::new(OntologyStore::open(
         Path::new(&data_dir).join("ontology.sqlite3"),
     )?);
@@ -68,6 +69,10 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         store,
         engine,
         router,
+        sleep_memory,
+        sleep_memory_enabled: env::var("VOICEOS_SLEEP_MEMORY_ENABLED").as_deref() == Ok("1"),
+        sleep_model_mode: env::var("VOICEOS_SLEEP_MODEL_MODE")
+            .unwrap_or_else(|_| "routed".to_owned()),
         ontology: Arc::new(ontology),
         legacy_audit_path,
         require_device_auth: env::var("VOICEOS_REQUIRE_DEVICE_AUTH").as_deref() == Ok("1"),
