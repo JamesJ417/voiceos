@@ -23,6 +23,7 @@ from services.gateway.audit import AuditStore
 from services.gateway.admin_control import action_proposal, collect as collect_admin_status
 from services.gateway.coordinator import CoordinatedResponse, TurnCoordinator
 from services.gateway.enrollment_qr import build_enrollment_uri
+from services.gateway.proxy_routes import ProxyTransport, match_proxy_route
 from services.gateway.review_scheduler import ReviewScheduler
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
@@ -86,6 +87,8 @@ class VoiceOSServer(ThreadingHTTPServer):
                 communication_signals_url=os.environ.get("VOICEOS_COMMUNICATION_SIGNALS_URL", "").strip() or None,
                 interpret_signal=_review_signal_interpreter(self.coordinator),
                 sleep_memory_enabled=os.environ.get("VOICEOS_SLEEP_SCHEDULER_ENABLED", "0") == "1",
+                sleep_internal_token=os.environ.get("VOICEOS_INTERNAL_TOKEN", "").strip() or None,
+                sleep_automatic_commits=os.environ.get("VOICEOS_SLEEP_AUTOMATIC_COMMITS", "0") == "1",
             )
             self.review_scheduler.start()
 
@@ -242,6 +245,23 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
     def gateway(self) -> VoiceOSServer:
         return cast(VoiceOSServer, self.server)
 
+    def _dispatch_registered_proxy(self, method: str, path: str, query: str = "") -> bool:
+        route = match_proxy_route(method, path)
+        if route is None:
+            return False
+        if not self._require_device():
+            return True
+        target = f"{path}?{query}" if query else path
+        if route.transport == ProxyTransport.SSE:
+            self._proxy_memory_sse(target)
+        elif route.transport == ProxyTransport.BINARY:
+            self._proxy_memory_binary(path)
+        elif method == "POST":
+            self._proxy_json_memory_request(path)
+        else:
+            self._proxy_memory_request(method, target)
+        return True
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlsplit(self.path)
         if parsed.path == "/v1/health":
@@ -275,11 +295,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 return
             self._json(HTTPStatus.OK, {"installation": collect_admin_status()})
             return
-        if parsed.path == "/v1/activity":
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
+        if self._dispatch_registered_proxy("GET", parsed.path, parsed.query):
             return
         if parsed.path == "/v1/events":
             if not self._require_device():
@@ -306,58 +322,6 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 return
             self._proxy_capability_request(self.gateway.crawl4ai_url, "GET", "/v1/health", "crawl4ai_unavailable")
             return
-        if parsed.path in {"/v1/skills", "/v1/skills/usages", "/v1/skills/proposals"}:
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
-            return
-        if parsed.path == "/v1/tasks":
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
-            return
-        if parsed.path in {"/v1/memory/sleep/cycles/current", "/v1/memory/morning-report", "/v1/memory/search"}:
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
-            return
-        if parsed.path.startswith("/v1/memory/sleep/cycles/"):
-            if not self._require_device():
-                return
-            self._proxy_memory_request("GET", parsed.path)
-            return
-        if parsed.path in {"/v1/attention", "/v1/calendar/events"}:
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
-            return
-        if parsed.path.startswith("/v1/tasks/"):
-            if not self._require_device():
-                return
-            self._proxy_memory_request("GET", parsed.path)
-            return
-        if parsed.path in {"/v1/outreach", "/v1/outreach/policy"}:
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
-            return
-        if parsed.path == "/v1/automations":
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
-            return
-        if parsed.path == "/v1/updates":
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
-            return
         if parsed.path == "/v1/checkins/daily":
             if not self._require_device():
                 return
@@ -376,49 +340,6 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK if plan is not None else HTTPStatus.NOT_FOUND,
                 {"plan": plan} if plan is not None else {"error": "daily_plan_not_ready"},
             )
-            return
-        if parsed.path == "/v1/files":
-            if not self._require_device():
-                return
-            self._proxy_memory_request("GET", "/v1/files")
-            return
-        if parsed.path in {"/v1/artifacts", "/v1/artifacts/events"}:
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            if parsed.path.endswith("/events"):
-                self._proxy_memory_sse(f"{parsed.path}{suffix}")
-            else:
-                self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
-            return
-        if parsed.path.startswith("/v1/artifacts/"):
-            if not self._require_device():
-                return
-            if parsed.path.endswith(("/preview", "/download")):
-                self._proxy_memory_binary(parsed.path)
-            else:
-                self._proxy_memory_request("GET", parsed.path)
-            return
-        if parsed.path in {
-            "/v1/conversations/active",
-            "/v1/conversations/active/messages",
-            "/v1/conversations/active/floor",
-        }:
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
-            return
-        if parsed.path == "/v1/conversations/active/events":
-            if not self._require_device():
-                return
-            suffix = f"?{parsed.query}" if parsed.query else ""
-            self._proxy_memory_sse(f"{parsed.path}{suffix}")
-            return
-        if parsed.path in {"/v1/ontology/catalog", "/v1/ontology/aliases"}:
-            if not self._require_device():
-                return
-            self._proxy_memory_request("GET", parsed.path)
             return
         if parsed.path == "/v1/tools":
             if not self._require_device():
@@ -505,11 +426,6 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 return
             self._handle_text_turn()
             return
-        if path == "/v1/conversations/active/floor":
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
-            return
         if path == "/v1/speech/sessions":
             if not self._require_device():
                 return
@@ -520,17 +436,12 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 return
             self._proxy_json_capability_request(self.gateway.crawl4ai_url, "/v1/retrieve", "crawl4ai_unavailable")
             return
+        if self._dispatch_registered_proxy("POST", path):
+            return
         if path == "/v1/files":
             if not self._require_device():
                 return
             self._handle_file_upload()
-            return
-        if path == "/v1/artifacts/pdfs" or (
-            path.startswith("/v1/artifacts/") and path.endswith("/revisions")
-        ):
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
             return
         if path.startswith("/v1/skills/proposals/") and path.endswith("/decision"):
             if not self._require_device():
@@ -541,60 +452,6 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             if not self._require_device():
                 return
             self._handle_skill_status(path)
-            return
-        if path.startswith("/v1/skills/usages/") and path.endswith("/feedback"):
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
-            return
-        if path == "/v1/tasks" or (
-            path.startswith("/v1/tasks/")
-            and (path.endswith("/status") or path.endswith("/actions") or path.endswith("/schedule"))
-        ):
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
-            return
-        if path == "/v1/memory/sleep/cycles" or (
-            path.startswith("/v1/memory/sleep/cycles/") and path.endswith("/actions")
-        ):
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
-            return
-        if path in {"/v1/attention", "/v1/calendar/events", "/v1/plans/daily/work"} or (
-            path.startswith("/v1/attention/") and path.endswith("/actions")
-        ):
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
-            return
-        if path in {"/v1/outreach", "/v1/outreach/policy"} or (
-            path.startswith("/v1/outreach/") and path.endswith("/actions")
-        ):
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
-            return
-        if path == "/v1/automations" or (
-            path.startswith("/v1/automations/") and path.endswith("/enabled")
-        ):
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
-            return
-        if path.startswith("/v1/updates/") and path.endswith(("/decision", "/actions")):
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
-            return
-        if path in {"/v1/ontology/interpret", "/v1/ontology/aliases"} or (
-            path.startswith("/v1/ontology/interpretations/")
-            and path.endswith("/correct")
-        ):
-            if not self._require_device():
-                return
-            self._proxy_json_memory_request(path)
             return
         if path == "/v1/tools/execute":
             if not self._require_device():
@@ -678,10 +535,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlsplit(self.path).path
-        if path.startswith("/v1/files/"):
-            if not self._require_device():
-                return
-            self._proxy_memory_request("DELETE", path)
+        if self._dispatch_registered_proxy("DELETE", path):
             return
         self._not_found()
 
@@ -1533,6 +1387,14 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             )
             if self.gateway.review_scheduler:
                 self.gateway.review_scheduler.trigger()
+        if (
+            path.startswith("/v1/agents/runs")
+            and method == "POST"
+            and status < HTTPStatus.BAD_REQUEST
+        ):
+            self.gateway.audit_store.publish_client_event(
+                "agent.run.updated", {"path": path, "response": payload}
+            )
         if path == "/v1/conversations/active/floor" and status < HTTPStatus.BAD_REQUEST:
             floor = payload.get("floor")
             if isinstance(floor, dict):

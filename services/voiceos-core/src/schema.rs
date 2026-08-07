@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
+pub(crate) fn apply_current_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS devices (
@@ -653,6 +653,9 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS sleep_cycles_owner_idx
             ON sleep_cycles(owner_id, started_at DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS sleep_cycles_one_active_owner_idx
+            ON sleep_cycles(owner_id)
+            WHERE status IN ('running','staged','paused');
         CREATE TABLE IF NOT EXISTS sleep_cycle_events (
             sequence INTEGER PRIMARY KEY AUTOINCREMENT,
             cycle_id TEXT NOT NULL,
@@ -753,6 +756,33 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS cognitive_memories_active_dedupe_idx
             ON cognitive_memories(owner_id, normalized_content, memory_kind)
             WHERE active=1;
+        CREATE TRIGGER IF NOT EXISTS cognitive_memories_dream_transition_guard
+            BEFORE UPDATE OF cognitive_status ON cognitive_memories
+            WHEN OLD.cognitive_status='dream_association'
+                 AND NEW.cognitive_status NOT IN ('dream_association','working_hypothesis')
+            BEGIN
+                SELECT RAISE(ABORT, 'dream associations may only promote to working hypotheses');
+            END;
+        CREATE TRIGGER IF NOT EXISTS cognitive_memories_dream_promotion_shape_guard
+            BEFORE UPDATE ON cognitive_memories
+            WHEN OLD.cognitive_status='dream_association'
+                 AND NEW.cognitive_status='working_hypothesis'
+                 AND (NEW.memory_kind<>'semantic' OR NEW.active<>1 OR NEW.quarantined<>0)
+            BEGIN
+                SELECT RAISE(ABORT, 'dream promotion must produce an active semantic working hypothesis');
+            END;
+        CREATE TRIGGER IF NOT EXISTS cognitive_memories_dream_origin_advancement_guard
+            BEFORE UPDATE OF cognitive_status ON cognitive_memories
+            WHEN OLD.cognitive_status='working_hypothesis'
+                 AND NEW.cognitive_status IN ('supported_inference','verified_fact')
+                 AND EXISTS(
+                     SELECT 1 FROM memory_proposals p
+                     WHERE p.proposal_id=OLD.proposal_id
+                       AND p.memory_kind='dream_association'
+                 )
+            BEGIN
+                SELECT RAISE(ABORT, 'dream-origin hypotheses require a separate evidence-validation workflow');
+            END;
 
         CREATE TABLE IF NOT EXISTS memory_provenance (
             memory_id TEXT NOT NULL,
@@ -824,6 +854,181 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(cycle_id) REFERENCES sleep_cycles(cycle_id),
             FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
         );
+
+        CREATE TABLE IF NOT EXISTS doctrine_source_profiles (
+            profile_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            internal_name TEXT NOT NULL,
+            visible_to_conversation INTEGER NOT NULL DEFAULT 0 CHECK(visible_to_conversation=0),
+            approved INTEGER NOT NULL CHECK(approved IN (0,1)),
+            allow_direct_quotes INTEGER NOT NULL DEFAULT 0 CHECK(allow_direct_quotes=0),
+            allow_voice_imitation INTEGER NOT NULL DEFAULT 0 CHECK(allow_voice_imitation=0),
+            allow_style_imitation INTEGER NOT NULL DEFAULT 0 CHECK(allow_style_imitation=0),
+            allow_identity_simulation INTEGER NOT NULL DEFAULT 0 CHECK(allow_identity_simulation=0),
+            permitted_uses_json TEXT NOT NULL,
+            prohibited_uses_json TEXT NOT NULL,
+            domains_json TEXT NOT NULL,
+            corpus_locations_json TEXT NOT NULL DEFAULT '[]',
+            authorization_status TEXT NOT NULL CHECK(authorization_status IN ('approved','pending','revoked')),
+            authorization_basis TEXT NOT NULL,
+            ingestion_status TEXT NOT NULL DEFAULT 'empty' CHECK(ingestion_status IN ('empty','pending','processing','processed','blocked','revoked')),
+            extraction_version TEXT NOT NULL,
+            last_processed_at TEXT,
+            source_count INTEGER NOT NULL DEFAULT 0,
+            source_types_json TEXT NOT NULL DEFAULT '[]',
+            review_status TEXT NOT NULL DEFAULT 'approved' CHECK(review_status IN ('pending','approved','rejected')),
+            notes TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            UNIQUE(owner_id, internal_name)
+        );
+        CREATE INDEX IF NOT EXISTS doctrine_profiles_owner_idx ON doctrine_source_profiles(owner_id, approved, review_status);
+
+        CREATE TABLE IF NOT EXISTS doctrine_source_records (
+            record_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            profile_id TEXT NOT NULL,
+            source_type TEXT NOT NULL CHECK(source_type IN ('user_note','licensed_excerpt','public_domain','authorized_transcript','authorized_document')),
+            title TEXT NOT NULL,
+            private_origin TEXT NOT NULL,
+            publication_date TEXT,
+            ingested_at TEXT NOT NULL,
+            authorization_status TEXT NOT NULL CHECK(authorization_status IN ('approved','pending','revoked')),
+            authorization_basis TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            storage_location TEXT NOT NULL,
+            source_content BLOB NOT NULL,
+            extraction_status TEXT NOT NULL CHECK(extraction_status IN ('pending','processing','processed','failed','revoked')),
+            source_quality REAL NOT NULL CHECK(source_quality BETWEEN 0.0 AND 1.0),
+            duplicate_of TEXT,
+            active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+            revoked_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(profile_id) REFERENCES doctrine_source_profiles(profile_id),
+            FOREIGN KEY(duplicate_of) REFERENCES doctrine_source_records(record_id),
+            UNIQUE(owner_id, content_sha256)
+        );
+        CREATE INDEX IF NOT EXISTS doctrine_records_owner_idx ON doctrine_source_records(owner_id, extraction_status, active);
+        CREATE TABLE IF NOT EXISTS doctrine_source_passages (
+            passage_id TEXT PRIMARY KEY,
+            record_id TEXT NOT NULL,
+            passage_index INTEGER NOT NULL,
+            byte_start INTEGER NOT NULL,
+            byte_end INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            content_sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(record_id) REFERENCES doctrine_source_records(record_id),
+            UNIQUE(record_id, passage_index)
+        );
+        CREATE TRIGGER IF NOT EXISTS doctrine_passages_no_update BEFORE UPDATE ON doctrine_source_passages
+        BEGIN SELECT RAISE(ABORT, 'doctrine source passages are immutable'); END;
+        CREATE TRIGGER IF NOT EXISTS doctrine_passages_no_delete BEFORE DELETE ON doctrine_source_passages
+        BEGIN SELECT RAISE(ABORT, 'doctrine source passages are immutable'); END;
+
+        CREATE TABLE IF NOT EXISTS doctrine_candidates (
+            candidate_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            normalized_proposition TEXT NOT NULL,
+            normalized_key TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            principle_type TEXT NOT NULL,
+            decision_rule TEXT NOT NULL,
+            rationale TEXT NOT NULL,
+            applicable_conditions_json TEXT NOT NULL,
+            exceptions_json TEXT NOT NULL,
+            counterexamples_json TEXT NOT NULL,
+            risk_posture TEXT NOT NULL,
+            time_horizon TEXT NOT NULL,
+            ethical_constraints_json TEXT NOT NULL,
+            source_profile_diversity INTEGER NOT NULL DEFAULT 0,
+            extraction_model TEXT NOT NULL,
+            extraction_prompt_version TEXT NOT NULL,
+            confidence REAL NOT NULL CHECK(confidence BETWEEN 0.0 AND 1.0),
+            abstraction_score REAL NOT NULL CHECK(abstraction_score BETWEEN 0.0 AND 1.0),
+            style_contamination_score REAL NOT NULL CHECK(style_contamination_score BETWEEN 0.0 AND 1.0),
+            identity_contamination_score REAL NOT NULL CHECK(identity_contamination_score BETWEEN 0.0 AND 1.0),
+            status TEXT NOT NULL CHECK(status IN ('extracted','decontamination_failed','normalized','disputed','awaiting_review','approved','active','superseded','rejected','archived')),
+            review_requirement TEXT NOT NULL CHECK(review_requirement IN ('explicit','protected')),
+            protected INTEGER NOT NULL DEFAULT 1 CHECK(protected=1),
+            created_cycle_id TEXT,
+            revision_of TEXT,
+            version INTEGER NOT NULL DEFAULT 1,
+            validation_errors_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            activated_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(created_cycle_id) REFERENCES sleep_cycles(cycle_id),
+            FOREIGN KEY(revision_of) REFERENCES doctrine_candidates(candidate_id),
+            UNIQUE(owner_id, normalized_key, version)
+        );
+        CREATE INDEX IF NOT EXISTS doctrine_candidates_owner_idx ON doctrine_candidates(owner_id, status, domain, updated_at DESC);
+        CREATE TABLE IF NOT EXISTS doctrine_candidate_sources (
+            candidate_id TEXT NOT NULL,
+            passage_id TEXT NOT NULL,
+            evidence_role TEXT NOT NULL CHECK(evidence_role IN ('supports','contradicts')),
+            directness REAL NOT NULL CHECK(directness BETWEEN 0.0 AND 1.0),
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(candidate_id, passage_id, evidence_role),
+            FOREIGN KEY(candidate_id) REFERENCES doctrine_candidates(candidate_id),
+            FOREIGN KEY(passage_id) REFERENCES doctrine_source_passages(passage_id)
+        );
+        CREATE TABLE IF NOT EXISTS doctrine_contradictions (
+            contradiction_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            left_candidate_id TEXT NOT NULL,
+            right_candidate_id TEXT NOT NULL,
+            tension_kind TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            conditions_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL CHECK(status IN ('open','resolved','dismissed')),
+            resolution TEXT,
+            created_at TEXT NOT NULL,
+            resolved_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(left_candidate_id) REFERENCES doctrine_candidates(candidate_id),
+            FOREIGN KEY(right_candidate_id) REFERENCES doctrine_candidates(candidate_id)
+        );
+        CREATE TABLE IF NOT EXISTS doctrine_lenses (
+            lens_id TEXT PRIMARY KEY,
+            public_name TEXT NOT NULL UNIQUE,
+            domains_json TEXT NOT NULL,
+            description TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1))
+        );
+        CREATE TABLE IF NOT EXISTS doctrine_runs (
+            run_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            record_id TEXT,
+            status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
+            extraction_model TEXT,
+            critique_model TEXT,
+            metrics_json TEXT NOT NULL DEFAULT '{}',
+            error TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(record_id) REFERENCES doctrine_source_records(record_id)
+        );
+        CREATE TABLE IF NOT EXISTS doctrine_evaluations (
+            evaluation_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            evaluation_kind TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('passed','failed','needs_review')),
+            input_fingerprint TEXT NOT NULL,
+            evidence_json TEXT NOT NULL,
+            model TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
+        );
+        CREATE TRIGGER IF NOT EXISTS doctrine_no_automatic_activation
+            BEFORE UPDATE OF status ON doctrine_candidates
+            WHEN NEW.status='active' AND OLD.status<>'approved'
+            BEGIN SELECT RAISE(ABORT, 'doctrine activation requires prior approval'); END;
         "#,
     )?;
     Ok(())

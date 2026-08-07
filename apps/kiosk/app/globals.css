@@ -316,6 +316,18 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
 .skill-proposal-card details { margin-top: 12px; border: 1px solid var(--line-soft); border-radius: 11px; overflow: hidden; }
 .skill-proposal-card summary { padding: 11px 13px; color: var(--muted); cursor: pointer; font-size: 12px; }
 .skill-proposal-card pre { max-height: 280px; overflow: auto; margin: 0; padding: 14px; border-top: 1px solid var(--line-soft); color: #dce5e4; background: rgba(0,0,0,0.2); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; font-size: 11px; line-height: 1.55; }
+.agent-runs-panel { grid-column: 1 / -1; }
+.agent-run-list { display: grid; gap: 14px; margin-top: 18px; }
+.agent-run-card { border: 1px solid var(--line-soft); border-radius: 14px; padding: 16px; background: rgba(5, 12, 13, .52); }
+.agent-run-card header, .agent-run-card footer { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.agent-run-card h3 { margin: 7px 0 0; font-size: 17px; }
+.agent-run-card footer { justify-content: flex-start; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
+.agent-status { display: inline-block; padding: 4px 8px; border-radius: 999px; color: var(--cyan); background: rgba(69,207,228,.12); text-transform: uppercase; font-size: 9px; letter-spacing: .08em; }
+.status-completed { color: var(--green); } .status-failed, .status-cancelled { color: var(--red); }
+.agent-children { margin-top: 14px; padding-left: 14px; border-left: 2px solid rgba(67,230,201,.28); display: grid; gap: 9px; }
+.agent-children div { padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,.025); }
+.agent-children strong { margin-left: 8px; font-size: 12px; text-transform: capitalize; }
+.agent-children p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .proposal-actions { display: grid; grid-template-columns: 1fr 1.25fr; gap: 9px; margin-top: 15px; }
 .proposal-actions button { min-height: 47px; border-radius: 12px; cursor: pointer; font-weight: 720; }
 .proposal-actions .deny { color: #ff9ca4; border: 1px solid rgba(239,107,115,0.35); background: rgba(239,107,115,0.08); }

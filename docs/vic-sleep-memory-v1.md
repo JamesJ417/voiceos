@@ -59,6 +59,6 @@ To disable immediately, set both flags to `0` and restart the corresponding serv
 
 - Retrieval uses deterministic lexical matching; embeddings and graph traversal are future work.
 - Contradictions are surfaced for review but are not automatically resolved.
-- Dream promotion is explicit and currently promotes into a working semantic hypothesis.
+- Dream promotion is explicit and can only produce a working semantic hypothesis. It can never directly produce a supported inference or verified fact. Dream-origin hypotheses are currently prevented from advancing further because the separate evidence-validation workflow has not been implemented; once implemented, additional evidence and a separate validation decision are required for every later epistemic transition.
 - The scheduler uses the existing quiet-hours window rather than a separate sleep window.
 - The fixture generator exists only for tests and local development. Production defaults to routed Gemma/GPT-OSS when enabled.

@@ -14,6 +14,10 @@ import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import java.util.Locale
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -32,6 +36,33 @@ object CarbonPalette {
     val white = Color.rgb(241, 246, 245)
     val muted = Color.rgb(141, 155, 157)
 }
+
+fun Context.carbonPanelLayout(padding: Int = 20): LinearLayout = LinearLayout(this).apply {
+    orientation = LinearLayout.VERTICAL
+    val pixels = (padding * resources.displayMetrics.density).toInt()
+    setPadding(pixels, pixels, pixels, pixels)
+    background = carbonPanel(this@carbonPanelLayout)
+}
+
+fun Context.carbonKicker(value: String): TextView = TextView(this).apply {
+    text = value.uppercase(Locale.US)
+    textSize = 10f
+    typeface = Typeface.DEFAULT_BOLD
+    letterSpacing = 0.17f
+    setTextColor(CarbonPalette.teal)
+}
+
+fun Context.carbonHeading(value: String, size: Float = 24f): TextView = TextView(this).apply {
+    text = value
+    textSize = size
+    typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+    setTextColor(CarbonPalette.white)
+}
+
+fun fullWidthWrapLayout(): LinearLayout.LayoutParams = LinearLayout.LayoutParams(
+    ViewGroup.LayoutParams.MATCH_PARENT,
+    ViewGroup.LayoutParams.WRAP_CONTENT,
+)
 
 class CarbonBackgroundDrawable(context: Context) : Drawable() {
     private val density = context.resources.displayMetrics.density

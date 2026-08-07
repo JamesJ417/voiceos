@@ -1,9 +1,11 @@
 mod activity;
+mod agents;
 mod artifacts;
 mod attention;
 mod auth;
 mod automations;
 mod conversations;
+mod doctrine;
 mod documents;
 mod error;
 mod floor;
@@ -26,6 +28,9 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health::health))
         .route("/v1/activity", get(activity::list))
+        .route("/v1/agents/runs", get(agents::list).post(agents::create))
+        .route("/v1/agents/runs/{run_id}", get(agents::get))
+        .route("/v1/agents/runs/{run_id}/cancel", post(agents::cancel))
         .route(
             "/v1/memory/sleep/cycles/current",
             get(sleep_memory::current_cycle),
@@ -44,6 +49,37 @@ pub(crate) fn router(state: AppState) -> Router {
             get(sleep_memory::morning_report),
         )
         .route("/v1/memory/search", get(sleep_memory::search))
+        .route("/v1/doctrine/status", get(doctrine::status))
+        .route("/v1/doctrine/sources", get(doctrine::sources))
+        .route(
+            "/v1/doctrine/sources/records",
+            get(doctrine::source_records).post(doctrine::register_source),
+        )
+        .route(
+            "/v1/doctrine/sources/records/{record_id}/process",
+            post(doctrine::process_record),
+        )
+        .route(
+            "/v1/doctrine/sources/records/{record_id}/revoke",
+            post(doctrine::revoke_source),
+        )
+        .route("/v1/doctrine/candidates", get(doctrine::candidates))
+        .route(
+            "/v1/doctrine/candidates/{candidate_id}/decision",
+            post(doctrine::decide),
+        )
+        .route(
+            "/v1/doctrine/candidates/{candidate_id}/status",
+            post(doctrine::set_status),
+        )
+        .route(
+            "/v1/doctrine/candidates/{candidate_id}/provenance",
+            get(doctrine::provenance),
+        )
+        .route("/v1/doctrine/active", get(doctrine::active))
+        .route("/v1/doctrine/lenses", get(doctrine::lenses))
+        .route("/v1/doctrine/contradictions", get(doctrine::contradictions))
+        .route("/v1/doctrine/evaluations", post(doctrine::evaluate))
         .route("/v1/updates", get(updates::list))
         .route("/v1/updates/{update_id}/decision", post(updates::decide))
         .route("/v1/updates/{update_id}/actions", post(updates::action))
@@ -142,6 +178,19 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(
             "/internal/v1/documents/context",
             post(documents::document_context),
+        )
+        .route("/internal/v1/agents/runs/claim", post(agents::claim))
+        .route(
+            "/internal/v1/agents/runs/{run_id}/progress",
+            post(agents::progress),
+        )
+        .route(
+            "/internal/v1/agents/runs/{run_id}/result",
+            post(agents::result),
+        )
+        .route(
+            "/internal/v1/agents/runs/{run_id}/children",
+            post(agents::create_child),
         )
         .route(
             "/internal/v1/artifacts/tools",

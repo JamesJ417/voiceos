@@ -121,6 +121,10 @@ default. The cycle declines or pauses when deterministic health/resource input
 marks the rig busy. Manual run, dry run, cancel, resume, commit, dream promotion,
 and rollback remain public authenticated actions.
 
+Dream promotion is narrowly defined as `dream_association -> working_hypothesis`.
+The database rejects direct promotion to `supported_inference` or `verified_fact`.
+Those later states require additional evidence and separate validation decisions.
+
 ## Application and widget impact
 
 Add one compact “Sleep memory” section to the existing System page and kiosk:

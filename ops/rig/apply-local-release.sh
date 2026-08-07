@@ -95,6 +95,8 @@ if [[ ! -f /etc/voiceos/rust.env ]]; then
 fi
 sed "s|@@REPO_ROOT@@|$repo_root|g" "$repo_root/ops/rig/voiceos-rust.service.template" \
   | sudo tee /etc/systemd/system/voiceos-rust.service >/dev/null
+sed "s|@@REPO_ROOT@@|$repo_root|g" "$repo_root/ops/rig/voiceos-codex-supervisor.service.template" \
+  | sudo tee /etc/systemd/system/voiceos-codex-supervisor.service >/dev/null
 
 # Refresh only the safe upstream-monitor executables and units. This does not
 # update the live Hermes runtime or activate any changed upstream skill.
@@ -105,6 +107,7 @@ sudo install -o root -g root -m 0644 "$repo_root/ops/systemd/voiceos-hermes-upda
 sudo install -o root -g root -m 0644 "$repo_root/ops/systemd/voiceos-hermes-update-check.timer" /etc/systemd/system/
 
 sudo systemctl daemon-reload
+sudo systemctl enable voiceos-codex-supervisor.service
 sudo systemctl enable --now voiceos-rust.service voiceos-connectors.service voiceos-hermes-update-check.timer
 sudo systemctl restart voiceos-rust.service voiceos-connectors.service voiceos-gateway.service
 

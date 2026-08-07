@@ -89,6 +89,145 @@ paths:
         - { in: query, name: include_dreams, schema: { type: boolean, default: false } }
       responses:
         "200": { description: Provenance-bearing active memories; dreams excluded unless explicitly requested }
+  /v1/doctrine/status:
+    get:
+      operationId: getVicDoctrineStatus
+      responses:
+        "200": { description: Feature flags and identity-safe doctrine counts }
+  /v1/doctrine/sources:
+    get:
+      operationId: listPrivateDoctrineSourceProfiles
+      responses:
+        "200": { description: Private source profiles; requires source-audit mode }
+        "403": { description: Private source audit is disabled }
+  /v1/doctrine/sources/records:
+    get:
+      operationId: listPrivateDoctrineSourceRecords
+      responses:
+        "200": { description: Private authorized source records without source content }
+    post:
+      operationId: registerAuthorizedDoctrineSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [profile_id, source_type, title, private_origin, authorization_status, authorization_basis, source_quality, content]
+              properties:
+                profile_id: { type: string }
+                source_type: { type: string, enum: [user_note, licensed_excerpt, public_domain, authorized_transcript, authorized_document] }
+                title: { type: string, minLength: 1 }
+                private_origin: { type: string, minLength: 1 }
+                publication_date: { type: [string, "null"] }
+                authorization_status: { type: string, const: approved }
+                authorization_basis: { type: string, minLength: 1 }
+                source_quality: { type: number, minimum: 0, maximum: 1 }
+                content: { type: string, minLength: 1, maxLength: 1048576 }
+      responses:
+        "201": { description: Immutable hashed private source record }
+  /v1/doctrine/sources/records/{record_id}/process:
+    post:
+      operationId: processAuthorizedDoctrineSource
+      parameters:
+        - { in: path, name: record_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Protected structured candidates; never approved or active }
+        "503": { description: Doctrine extraction is disabled }
+  /v1/doctrine/sources/records/{record_id}/revoke:
+    post:
+      operationId: revokeDoctrineSource
+      parameters:
+        - { in: path, name: record_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Source revoked and materially dependent active doctrine returned to review }
+  /v1/doctrine/candidates:
+    get:
+      operationId: listDoctrineCandidates
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 200 } }
+      responses:
+        "200": { description: Structured protected doctrine candidates without private provenance }
+  /v1/doctrine/candidates/{candidate_id}/decision:
+    post:
+      operationId: decideDoctrineCandidate
+      parameters:
+        - { in: path, name: candidate_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [approve, reject, request_revision] }
+      responses:
+        "200": { description: Audited explicit candidate review; does not activate doctrine }
+  /v1/doctrine/candidates/{candidate_id}/status:
+    post:
+      operationId: setDoctrineCandidateActive
+      parameters:
+        - { in: path, name: candidate_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [active]
+              properties:
+                active: { type: boolean }
+      responses:
+        "200": { description: Separate audited activation or deactivation of previously approved doctrine }
+  /v1/doctrine/candidates/{candidate_id}/provenance:
+    get:
+      operationId: getPrivateDoctrineProvenance
+      parameters:
+        - { in: path, name: candidate_id, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Private source identity and evidence; source-audit mode required }
+        "403": { description: Private source audit is disabled }
+  /v1/doctrine/active:
+    get:
+      operationId: retrieveActiveVicDoctrine
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 50 } }
+      responses:
+        "200": { description: Active identity-safe doctrine only; runtime flag required }
+  /v1/doctrine/lenses:
+    get:
+      operationId: retrieveVicReasoningLenses
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+      responses:
+        "200": { description: Abstract relevance lenses with no private source names }
+  /v1/doctrine/contradictions:
+    get:
+      operationId: listDoctrineContradictions
+      responses:
+        "200": { description: Unresolved candidate tensions retained without false consensus }
+  /v1/doctrine/evaluations:
+    post:
+      operationId: runDoctrineEvaluation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kind, input]
+              properties:
+                kind: { type: string, enum: [identity_leakage, prompt_injection, sycophancy, doctrine_fidelity, contradiction_handling, evidence_revision, style_independence, source_removal] }
+                input: { type: string, minLength: 1 }
+      responses:
+        "200": { description: Stored deterministic doctrine evaluation evidence }
   /v1/admin/status:
     get:
       operationId: getInstallationStatus
@@ -663,6 +802,75 @@ paths:
       operationId: listAuditEvents
       responses:
         "200": { description: Recent enrollment and tool-decision events }
+  /v1/agents/runs:
+    get:
+      operationId: listAgentRuns
+      summary: List durable Codex coordinator and subagent runs
+      parameters:
+        - in: query
+          name: task_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Owner-scoped Codex run tree
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs: { type: array, items: { $ref: "#/components/schemas/AgentRun" } }
+        "401": { description: Device authentication required }
+    post:
+      operationId: createAgentRun
+      summary: Queue a bounded top-level Codex run for VIC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAgentRun" }
+      responses:
+        "202":
+          description: Codex run queued; execution begins only when the supervisor claims it
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run]
+                properties:
+                  run: { $ref: "#/components/schemas/AgentRun" }
+        "400": { description: Invalid or over-broad run request }
+        "401": { description: Device authentication required }
+  /v1/agents/runs/{run_id}:
+    get:
+      operationId: getAgentRun
+      summary: Inspect one Codex run, its direct children, and durable progress events
+      parameters:
+        - in: path
+          name: run_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Agent run detail and evidence }
+        "401": { description: Device authentication required }
+        "404": { description: Agent run not found }
+  /v1/agents/runs/{run_id}/cancel:
+    post:
+      operationId: cancelAgentRun
+      summary: Request cancellation of a non-terminal Codex run
+      parameters:
+        - in: path
+          name: run_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Agent run marked cancelled }
+        "401": { description: Device authentication required }
+        "404": { description: Agent run not found }
+        "409": { description: Agent run changed or is already terminal }
   /v1/tasks:
     get:
       operationId: listTasks
@@ -1494,7 +1702,7 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, conversation.floor.changed, task.changed, task.initiative.updated, task.progress.updated, task.schedule.changed, approval.proposed, approval.decided, attention.changed, attention.actioned, calendar.changed, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated, vic.review.completed, automation.executed]
+          enum: [conversation.turn, conversation.floor.changed, task.changed, task.initiative.updated, task.progress.updated, task.schedule.changed, approval.proposed, approval.decided, attention.changed, attention.actioned, calendar.changed, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated, vic.review.completed, automation.executed, agent.run.updated, agent.run.queued, agent.run.starting, agent.run.running, agent.run.waiting_approval, agent.run.waiting_input, agent.run.completed, agent.run.failed, agent.run.cancelled, agent.plan.updated, agent.command.started, agent.command.completed, agent.file.changed, agent.subagent.started, agent.subagent.completed]
         payload: { type: object }
         created_at: { type: string, format: date-time }
     Task:
@@ -1633,6 +1841,42 @@ components:
               reason: { type: string }
         unscheduled_task_ids: { type: array, items: { type: string, format: uuid } }
         warnings: { type: array, items: { type: string } }
+    AgentRun:
+      type: object
+      required: [id, owner_id, idempotency_key, role, objective, status, provider, model, reasoning_effort, sandbox, capability_scope, requested_by, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        task_id: { type: [string, "null"], format: uuid }
+        parent_run_id: { type: [string, "null"], format: uuid }
+        idempotency_key: { type: string }
+        role: { type: string, enum: [coordinator, implementer, researcher, reviewer, tester, security] }
+        objective: { type: string, minLength: 1, maxLength: 16384 }
+        status: { type: string, enum: [queued, starting, running, waiting_approval, waiting_input, completed, failed, cancelled] }
+        provider: { type: string, const: codex }
+        model: { type: string }
+        reasoning_effort: { type: string, enum: [low, medium, high, xhigh, max, ultra] }
+        sandbox: { type: string, enum: [read-only, workspace-write] }
+        capability_scope: { type: array, maxItems: 64, items: { type: string } }
+        codex_thread_id: { type: [string, "null"] }
+        current_activity: { type: [string, "null"] }
+        result_summary: { type: [string, "null"] }
+        error: { type: [string, "null"] }
+        requested_by: { type: string }
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+    CreateAgentRun:
+      type: object
+      additionalProperties: false
+      required: [objective]
+      properties:
+        task_id: { type: [string, "null"], format: uuid }
+        objective: { type: string, minLength: 1, maxLength: 16384 }
+        role: { type: string, enum: [coordinator, implementer, researcher, reviewer, tester, security], default: coordinator }
+        sandbox: { type: string, enum: [read-only, workspace-write], default: read-only }
+        idempotency_key: { type: string, minLength: 1, maxLength: 200 }
     TaskInitiative:
       type: object
       required: [task_id, job_id, status, summary, capabilities, started_actions, next_actions, approval_boundary]

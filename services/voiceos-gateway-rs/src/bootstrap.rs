@@ -3,16 +3,28 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use voiceos_core::{
-    CodexBridgeProvider, ConversationEngine, ConversationStore, MockProvider, OllamaProvider,
-    ProviderRouter, RoutingPolicy, SleepMemoryAuthority,
+    CodexBridgeProvider, ConversationEngine, ConversationStore, DoctrineAuthority, MockProvider,
+    OllamaProvider, ProviderRouter, RoutingPolicy, SleepMemoryAuthority,
 };
 use voiceos_ontology::{Interpreter, OntologyStore};
 
 use crate::artifact_worker::{ArtifactStorage, PdfWorker};
 use crate::ontology_fallback::GatewayModelFallback;
-use crate::state::AppState;
+use crate::state::{AppState, DoctrineFlags};
 
 pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
+    if env::var("VOICEOS_SLEEP_MEMORY_ENABLED").as_deref() == Ok("1")
+        && env::var("VOICEOS_SLEEP_MODEL_MODE")
+            .as_deref()
+            .unwrap_or("routed")
+            == "routed"
+    {
+        let url =
+            env::var("VOICEOS_OLLAMA_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_owned());
+        if !is_loopback_http_url(&url) {
+            return Err("sleep-memory routed models must use a loopback Ollama URL".into());
+        }
+    }
     let data_dir =
         env::var("VOICEOS_RUST_DATA_DIR").unwrap_or_else(|_| "work/voiceos-core".to_owned());
     let store = Arc::new(ConversationStore::open(
@@ -48,6 +60,8 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     let engine = Arc::new(ConversationEngine::new(store.clone()));
     let router = Arc::new(build_provider_router()?);
     let sleep_memory = Arc::new(SleepMemoryAuthority::new(store.clone()));
+    let doctrine = Arc::new(DoctrineAuthority::new(store.clone()));
+    doctrine.seed_registry(&primary_owner_id)?;
     let ontology_store = Arc::new(OntologyStore::open(
         Path::new(&data_dir).join("ontology.sqlite3"),
     )?);
@@ -73,6 +87,20 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         sleep_memory_enabled: env::var("VOICEOS_SLEEP_MEMORY_ENABLED").as_deref() == Ok("1"),
         sleep_model_mode: env::var("VOICEOS_SLEEP_MODEL_MODE")
             .unwrap_or_else(|_| "routed".to_owned()),
+        doctrine,
+        doctrine_flags: DoctrineFlags {
+            enabled: env::var("VOICEOS_VIC_DOCTRINE_ENABLED").as_deref() == Ok("1"),
+            extraction: env::var("VOICEOS_VIC_DOCTRINE_EXTRACTION_ENABLED").as_deref() == Ok("1"),
+            sleep_integration: env::var("VOICEOS_VIC_DOCTRINE_SLEEP_INTEGRATION_ENABLED")
+                .as_deref()
+                == Ok("1"),
+            runtime: env::var("VOICEOS_VIC_DOCTRINE_RUNTIME_ENABLED").as_deref() == Ok("1"),
+            source_audit: env::var("VOICEOS_VIC_DOCTRINE_SOURCE_AUDIT_ENABLED").as_deref()
+                == Ok("1"),
+        },
+        internal_token: env::var("VOICEOS_INTERNAL_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
         ontology: Arc::new(ontology),
         legacy_audit_path,
         require_device_auth: env::var("VOICEOS_REQUIRE_DEVICE_AUTH").as_deref() == Ok("1"),
@@ -80,6 +108,12 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         artifact_storage,
         pdf_worker,
     })
+}
+
+fn is_loopback_http_url(value: &str) -> bool {
+    ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
 }
 
 fn build_provider_router() -> Result<ProviderRouter, Box<dyn std::error::Error>> {

@@ -79,6 +79,9 @@ type UpdateProposal = { id:string; component:string; current_version:string; pro
 type ActivityItem = { id:number; occurred_at:string; type:string; actor:string; noticed?:unknown; decision?:unknown; model?:unknown; attempted?:unknown; changed?:unknown; evidence?:unknown; files?:unknown; needs_you:boolean; rollback?:unknown };
 type SleepCycle = { id:string; status:string; phase:string; mode:string };
 type MorningReport = { cycle_id:string; events_selected:number; memories_committed:number; contradictions_detected:number; dream_associations:number; skill_candidates:number; protected_changes_awaiting_approval:number; proposals_rejected:number; retrieval_quality_passed:boolean };
+type DoctrineSummary = { source_profiles:number; source_records:number; processed_records:number; authorization_warnings:number; candidates_awaiting_review:number; active_doctrine:number; contamination_failures:number; open_contradictions:number; last_run_at?:string|null; latest_evaluation_status?:string|null };
+type DoctrineCandidate = { id:string; normalized_proposition:string; domain:string; principle_type:string; decision_rule:string; rationale:string; exceptions:string[]; confidence:number; style_contamination_score:number; identity_contamination_score:number; status:string };
+type AgentRun = { id:string; task_id:string|null; parent_run_id:string|null; role:string; objective:string; status:string; model:string; sandbox:string; current_activity:string|null; result_summary:string|null; error:string|null; updated_at:string };
 
 type RecognitionResultEvent = {
   resultIndex: number;
@@ -162,6 +165,10 @@ export default function Home() {
   const [sleepEnabled, setSleepEnabled] = useState(false);
   const [sleepCycle, setSleepCycle] = useState<SleepCycle | null>(null);
   const [morningReport, setMorningReport] = useState<MorningReport | null>(null);
+  const [doctrineEnabled, setDoctrineEnabled] = useState(false);
+  const [doctrineSummary, setDoctrineSummary] = useState<DoctrineSummary | null>(null);
+  const [doctrineCandidates, setDoctrineCandidates] = useState<DoctrineCandidate[]>([]);
+  const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [taskFilter, setTaskFilter] = useState<"all" | "needs_me" | "vic_working" | "review">("all");
@@ -215,6 +222,11 @@ export default function Home() {
     setInstallation(admin.installation ?? {});
   }, [request]);
 
+  const loadAgentRuns = useCallback(async () => {
+    const payload = await request<{runs:AgentRun[]}>("/v1/agents/runs?limit=100");
+    setAgentRuns(payload.runs);
+  }, [request]);
+
   const loadSleepMemory = useCallback(async () => {
     const [current, report] = await Promise.all([
       request<{enabled:boolean;cycle:SleepCycle|null}>("/v1/memory/sleep/cycles/current"),
@@ -222,6 +234,20 @@ export default function Home() {
     ]);
     setSleepEnabled(current.enabled); setSleepCycle(current.cycle); setMorningReport(report.report);
   }, [request]);
+
+  const loadDoctrine = useCallback(async () => {
+    const status = await request<{enabled:boolean;status:DoctrineSummary}>("/v1/doctrine/status");
+    setDoctrineEnabled(status.enabled); setDoctrineSummary(status.status);
+    if (status.enabled) {
+      const candidates = await request<{candidates:DoctrineCandidate[]}>("/v1/doctrine/candidates?status=awaiting_review&limit=20");
+      setDoctrineCandidates(candidates.candidates ?? []);
+    } else setDoctrineCandidates([]);
+  }, [request]);
+
+  const decideDoctrine = useCallback(async (candidate:DoctrineCandidate, decision:"approve"|"reject"|"request_revision") => {
+    await request(`/v1/doctrine/candidates/${encodeURIComponent(candidate.id)}/decision`, {method:"POST",body:JSON.stringify({decision})});
+    await loadDoctrine();
+  }, [loadDoctrine, request]);
 
   const runSleepMemory = useCallback(async (mode:"dry_run"|"commit") => {
     setStatusMessage(`Running bounded memory ${mode.replace("_", " ")}...`);
@@ -324,6 +350,8 @@ export default function Home() {
         loadArtifacts().catch(() => undefined),
         loadFloor().catch(() => undefined),
         loadSleepMemory().catch(() => undefined),
+        loadDoctrine().catch(() => undefined),
+        loadAgentRuns().catch(() => undefined),
       ]);
       setConnected(true);
       setStatusMessage(`Connected · ${gatewayHealth.language_model ?? "provider ready"}`);
@@ -333,7 +361,7 @@ export default function Home() {
       setStatusMessage(errorText(error));
       setVoiceState("error");
     }
-  }, [gateway, loadArtifacts, loadFloor, loadHistory, loadSkillProposals, loadSkills, loadSleepMemory, loadTasks, request]);
+  }, [gateway, loadAgentRuns, loadArtifacts, loadDoctrine, loadFloor, loadHistory, loadSkillProposals, loadSkills, loadSleepMemory, loadTasks, request]);
 
   useEffect(() => {
     const restore = window.setTimeout(() => {
@@ -782,12 +810,21 @@ export default function Home() {
 
         {view === "files" && <FilesPanel artifacts={artifacts} selected={selectedArtifact} previewUrl={previewUrl} onPreview={(artifact) => void previewArtifact(artifact)} onDownload={(artifact) => void downloadArtifact(artifact)} onRefresh={() => void loadArtifacts()} />}
 
+        {view === "system" && <DoctrinePanel enabled={doctrineEnabled} summary={doctrineSummary} candidates={doctrineCandidates} onDecision={(candidate,decision)=>void decideDoctrine(candidate,decision)} />}
+        {view === "system" && <AgentActivityPanel runs={agentRuns} onRefresh={()=>void loadAgentRuns()} onCancel={(run)=>void request(`/v1/agents/runs/${encodeURIComponent(run.id)}/cancel`,{method:"POST",body:"{}"}).then(loadAgentRuns)} />}
+
         {view === "system" && <div className="system-layout"><SleepMemoryPanel enabled={sleepEnabled} cycle={sleepCycle} report={morningReport} onRun={(mode)=>void runSleepMemory(mode)} onRollback={()=>void rollbackSleepMemory()} /><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its VoiceOS device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside VoiceOS.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
       </section>
 
       {showSettings && <SettingsDialog gateway={gateway} enrollmentCode={enrollmentCode} setEnrollmentCode={setEnrollmentCode} onSaveGateway={saveGateway} onEnroll={enroll} onClose={() => setShowSettings(false)} hasToken={Boolean(token)} onForget={() => { localStorage.removeItem(STORAGE.token); localStorage.removeItem(STORAGE.deviceId); setToken(""); setConnected(false); setStatusMessage("Browser enrollment removed."); }} />}
     </main>
   );
+}
+
+function AgentActivityPanel({ runs, onRefresh, onCancel }: { runs:AgentRun[]; onRefresh:()=>void; onCancel:(run:AgentRun)=>void }) {
+  const roots = runs.filter(run=>!run.parent_run_id);
+  const active = runs.filter(run=>!["completed","failed","cancelled"].includes(run.status)).length;
+  return <section className="agent-runs-panel panel wide-panel"><div className="panel-heading"><div><p className="kicker">Codex execution fabric</p><h2>VIC agent work</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><p className="proposal-intro">{active ? `${active} agent run${active===1?" is":"s are"} active.` : "No agents are working right now."} Every coordinator and subagent remains attached to its task and evidence trail.</p><div className="agent-run-list">{roots.length ? roots.map(root=>{const children=runs.filter(run=>run.parent_run_id===root.id); const cancellable=!["completed","failed","cancelled"].includes(root.status); return <article className="agent-run-card" key={root.id}><header><div><span className={`agent-status status-${root.status}`}>{root.status.replaceAll("_"," ")}</span><h3>{root.objective}</h3></div>{cancellable&&<button className="deny" onClick={()=>onCancel(root)}>Stop</button>}</header><p>{root.current_activity||root.result_summary||root.error||"Waiting for Codex supervisor"}</p><footer><span>{root.role}</span><span>{root.model}</span><span>{root.sandbox}</span><span>{children.length} subagent{children.length===1?"":"s"}</span></footer>{children.length>0&&<div className="agent-children">{children.map(child=><div key={child.id}><span className={`agent-status status-${child.status}`}>{child.status}</span><strong>{child.role}</strong><p>{child.current_activity||child.result_summary||child.objective}</p></div>)}</div>}</article>}) : <EmptyState text="Ask VIC to delegate a bounded task to Codex and its work will appear here." />}</div></section>;
 }
 
 function SettingsDialog({ gateway, enrollmentCode, setEnrollmentCode, onSaveGateway, onEnroll, onClose, hasToken, onForget }: { gateway: string; enrollmentCode: string; setEnrollmentCode: (value: string) => void; onSaveGateway: (value: string) => void; onEnroll: (event: FormEvent) => void; onClose: () => void; hasToken: boolean; onForget: () => void }) {
@@ -832,6 +869,10 @@ function ProviderPanel({ providers, active, wide = false }: { providers: Provide
     { name: "codex-sol", role: "Highest confidence" },
   ];
   return <section className={`provider-panel panel ${wide ? "wide" : ""}`}><div className="panel-heading"><div><p className="kicker">Reasoning fabric</p><h2>Model providers</h2></div></div><div className="provider-list">{displayProviders.slice(0, 5).map((provider) => { const selected = provider.name === active; return <div className="provider-row" key={provider.name}><span className={`provider-glyph ${selected ? "green" : "cyan"}`} aria-hidden="true">{selected ? "✦" : "◎"}</span><div><strong>{providerLabel(provider.name)}</strong><small>{provider.role ?? "VoiceOS provider"}</small></div><span className={`provider-state ${selected ? "green" : provider.configured === false ? "amber" : "cyan"}`}>{selected ? "Active" : provider.configured === false ? "Offline" : "Ready"}</span></div>; })}</div></section>;
+}
+
+function DoctrinePanel({ enabled, summary, candidates, onDecision }: { enabled:boolean; summary:DoctrineSummary|null; candidates:DoctrineCandidate[]; onDecision:(candidate:DoctrineCandidate,decision:"approve"|"reject"|"request_revision")=>void }) {
+  return <section className="panel wide-panel"><div className="panel-heading"><div><p className="kicker">Protected reasoning architecture</p><h2>VIC doctrine</h2></div><span className={enabled ? "healthy-label" : "online-pill"}>{enabled ? "Review enabled" : "Disabled"}</span></div><div className="metric-grid"><Metric label="Active" value={String(summary?.active_doctrine ?? 0)} /><Metric label="Awaiting review" value={String(summary?.candidates_awaiting_review ?? 0)} /><Metric label="Contamination failures" value={String(summary?.contamination_failures ?? 0)} /><Metric label="Open contradictions" value={String(summary?.open_contradictions ?? 0)} /><Metric label="Processed sources" value={String(summary?.processed_records ?? 0)} /><Metric label="Authorization warnings" value={String(summary?.authorization_warnings ?? 0)} /></div><div className="skill-proposal-list">{candidates.map(candidate=><article className="skill-proposal-card" key={candidate.id}><div className="skill-proposal-title"><div><span className="proposal-version">{candidate.domain.replaceAll("_"," ")} · {candidate.principle_type.replaceAll("_"," ")}</span><h3>{candidate.normalized_proposition}</h3></div><span className="proposal-status">Protected review</span></div><p>{candidate.decision_rule}</p><details><summary>Rationale, exceptions, and contamination</summary><p>{candidate.rationale}</p><pre>{JSON.stringify({exceptions:candidate.exceptions,confidence:candidate.confidence,style_contamination:candidate.style_contamination_score,identity_contamination:candidate.identity_contamination_score},null,2)}</pre></details><div className="proposal-actions"><button className="deny" onClick={()=>onDecision(candidate,"reject")}>Reject</button><button className="secondary-button" onClick={()=>onDecision(candidate,"request_revision")}>Revise</button><button className="approve" onClick={()=>onDecision(candidate,"approve")}>Approve</button></div><p className="proposal-safety">Approval does not activate doctrine. Private source identity remains hidden.</p></article>)}</div></section>;
 }
 
 function SleepMemoryPanel({ enabled, cycle, report, onRun, onRollback }: { enabled:boolean; cycle:SleepCycle|null; report:MorningReport|null; onRun:(mode:"dry_run"|"commit")=>void; onRollback:()=>void }) {

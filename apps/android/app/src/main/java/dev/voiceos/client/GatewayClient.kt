@@ -96,6 +96,12 @@ data class EnrolledDevice(
 
 data class AdminStatus(val installationJson: String)
 
+data class AgentRun(
+    val id: String, val parentRunId: String?, val role: String, val objective: String,
+    val status: String, val model: String, val sandbox: String, val currentActivity: String,
+    val resultSummary: String, val error: String,
+)
+
 data class SleepMemoryStatus(
     val enabled: Boolean, val cycleId: String, val status: String, val phase: String, val mode: String,
 )
@@ -104,6 +110,16 @@ data class SleepMorningReport(
     val cycleId: String, val selectedEvents: Int, val committedMemories: Int,
     val contradictions: Int, val quarantinedDreams: Int, val skillCandidates: Int,
     val protectedProposals: Int, val rejectedProposals: Int, val retrievalPassed: Boolean,
+)
+data class DoctrineSummary(
+    val enabled: Boolean, val active: Int, val awaitingReview: Int, val contaminationFailures: Int,
+    val openContradictions: Int, val processedRecords: Int, val authorizationWarnings: Int,
+    val lastRunAt: String, val evaluationStatus: String,
+)
+data class DoctrineCandidate(
+    val id: String, val proposition: String, val domain: String, val principleType: String,
+    val decisionRule: String, val rationale: String, val exceptions: List<String>,
+    val confidence: Double, val styleContamination: Double, val identityContamination: Double,
 )
 
 data class VoiceTask(
@@ -171,6 +187,14 @@ class EventSubscription internal constructor(
 }
 
 object GatewayClient {
+    fun getAgentRuns(baseUrl: String, deviceToken: String?, callback: (Result<List<AgentRun>>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getAgentRunsBlocking(baseUrl, deviceToken) } }) }, "voiceos-agent-runs").start()
+    }
+
+    fun cancelAgentRun(baseUrl: String, runId: String, deviceToken: String?, callback: (Result<AgentRun>) -> Unit) {
+        Thread({ callback(runCatching { cancelAgentRunBlocking(baseUrl, runId, deviceToken) }) }, "voiceos-agent-cancel").start()
+    }
+
     fun getAttention(baseUrl: String, deviceToken: String?, callback: (Result<List<AttentionItem>>) -> Unit) {
         Thread({ callback(runCatching { retryConnection { getAttentionBlocking(baseUrl, deviceToken) } }) }, "voiceos-attention").start()
     }
@@ -185,6 +209,18 @@ object GatewayClient {
 
     fun getMorningReport(baseUrl: String, deviceToken: String?, callback: (Result<SleepMorningReport?>) -> Unit) {
         Thread({ callback(runCatching { retryConnection { getMorningReportBlocking(baseUrl, deviceToken) } }) }, "voiceos-memory-report").start()
+    }
+
+    fun getDoctrineStatus(baseUrl: String, deviceToken: String?, callback: (Result<DoctrineSummary>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getDoctrineStatusBlocking(baseUrl, deviceToken) } }) }, "voiceos-doctrine-status").start()
+    }
+
+    fun getDoctrineCandidates(baseUrl: String, deviceToken: String?, callback: (Result<List<DoctrineCandidate>>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { getDoctrineCandidatesBlocking(baseUrl, deviceToken) } }) }, "voiceos-doctrine-candidates").start()
+    }
+
+    fun decideDoctrineCandidate(baseUrl: String, candidateId: String, decision: String, deviceToken: String?, callback: (Result<DoctrineCandidate>) -> Unit) {
+        Thread({ callback(runCatching { retryConnection { decideDoctrineCandidateBlocking(baseUrl, candidateId, decision, deviceToken) } }) }, "voiceos-doctrine-decision").start()
     }
 
     fun runSleepCycle(baseUrl: String, mode: String, deviceToken: String?, callback: (Result<SleepMorningReport>) -> Unit) {
@@ -592,31 +628,66 @@ object GatewayClient {
     }
 
     private fun getSleepMemoryStatusBlocking(baseUrl: String, deviceToken: String?): SleepMemoryStatus {
-        val connection = URL("$baseUrl/v1/memory/sleep/cycles/current").openConnection() as HttpURLConnection
-        try {
-            configure(connection, deviceToken)
-            val payload = responseJson(connection)
+        return GatewayHttpTransport.json("$baseUrl/v1/memory/sleep/cycles/current", deviceToken) { payload ->
             val cycle = payload.optJSONObject("cycle")
-            return SleepMemoryStatus(
+            SleepMemoryStatus(
                 payload.optBoolean("enabled"), cycle?.optString("id").orEmpty(),
                 cycle?.optString("status", "never run") ?: "never run",
                 cycle?.optString("phase", "idle") ?: "idle",
                 cycle?.optString("mode", "none") ?: "none",
             )
-        } finally { connection.disconnect() }
+        }
     }
 
     private fun getMorningReportBlocking(baseUrl: String, deviceToken: String?): SleepMorningReport? {
-        val connection = URL("$baseUrl/v1/memory/morning-report").openConnection() as HttpURLConnection
-        try { configure(connection, deviceToken); return parseMorningReport(responseJson(connection).optJSONObject("report")) }
-        finally { connection.disconnect() }
+        return GatewayHttpTransport.json("$baseUrl/v1/memory/morning-report", deviceToken) {
+            parseMorningReport(it.optJSONObject("report"))
+        }
+    }
+
+    private fun getDoctrineStatusBlocking(baseUrl: String, deviceToken: String?): DoctrineSummary {
+        return GatewayHttpTransport.json("$baseUrl/v1/doctrine/status", deviceToken) { payload ->
+            val status = payload.getJSONObject("status")
+            DoctrineSummary(
+                payload.optBoolean("enabled"), status.optInt("active_doctrine"),
+                status.optInt("candidates_awaiting_review"), status.optInt("contamination_failures"),
+                status.optInt("open_contradictions"), status.optInt("processed_records"),
+                status.optInt("authorization_warnings"), status.optString("last_run_at"),
+                status.optString("latest_evaluation_status"),
+            )
+        }
+    }
+
+    private fun getDoctrineCandidatesBlocking(baseUrl: String, deviceToken: String?): List<DoctrineCandidate> {
+        return GatewayHttpTransport.json("$baseUrl/v1/doctrine/candidates?status=awaiting_review&limit=20", deviceToken) { payload ->
+            val values = payload.getJSONArray("candidates")
+            buildList { for (index in 0 until values.length()) add(parseDoctrineCandidate(values.getJSONObject(index))) }
+        }
+    }
+
+    private fun decideDoctrineCandidateBlocking(baseUrl: String, candidateId: String, decision: String, deviceToken: String?): DoctrineCandidate {
+        val encoded = URLEncoder.encode(candidateId, Charsets.UTF_8.name())
+        val payload = JSONObject().put("decision", decision).toString().toByteArray()
+        return GatewayHttpTransport.json("$baseUrl/v1/doctrine/candidates/$encoded/decision", deviceToken, payload) {
+            parseDoctrineCandidate(it.getJSONObject("candidate"))
+        }
+    }
+
+    private fun parseDoctrineCandidate(value: JSONObject): DoctrineCandidate {
+        val exceptions = value.optJSONArray("exceptions")
+        return DoctrineCandidate(
+            value.getString("id"), value.optString("normalized_proposition"), value.optString("domain"),
+            value.optString("principle_type"), value.optString("decision_rule"), value.optString("rationale"),
+            buildList { if (exceptions != null) for (index in 0 until exceptions.length()) add(exceptions.optString(index)) },
+            value.optDouble("confidence"), value.optDouble("style_contamination_score"), value.optDouble("identity_contamination_score"),
+        )
     }
 
     private fun runSleepCycleBlocking(baseUrl: String, mode: String, deviceToken: String?): SleepMorningReport {
         val payload = JSONObject().put("mode", mode).put("trigger_kind", "manual").put("config", JSONObject()).toString().toByteArray()
-        val connection = URL("$baseUrl/v1/memory/sleep/cycles").openConnection() as HttpURLConnection
-        try { configure(connection, deviceToken, payload); return parseMorningReport(responseJson(connection).getJSONObject("report"))!! }
-        finally { connection.disconnect() }
+        return GatewayHttpTransport.json("$baseUrl/v1/memory/sleep/cycles", deviceToken, payload) {
+            parseMorningReport(it.getJSONObject("report"))!!
+        }
     }
 
     private fun actOnSleepCycleBlocking(baseUrl: String, cycleId: String, action: String, deviceToken: String?): JSONObject {
@@ -624,9 +695,7 @@ object GatewayClient {
         val payload = JSONObject().put("action", action).apply {
             if (action == "rollback") put("reason", "operator requested rollback from Android")
         }.toString().toByteArray()
-        val connection = URL("$baseUrl/v1/memory/sleep/cycles/$encoded/actions").openConnection() as HttpURLConnection
-        try { configure(connection, deviceToken, payload); return responseJson(connection) }
-        finally { connection.disconnect() }
+        return GatewayHttpTransport.json("$baseUrl/v1/memory/sleep/cycles/$encoded/actions", deviceToken, payload) { it }
     }
 
     private fun parseMorningReport(value: JSONObject?): SleepMorningReport? {
@@ -1024,6 +1093,31 @@ object GatewayClient {
         } finally { connection.disconnect() }
     }
 
+    private fun getAgentRunsBlocking(baseUrl: String, deviceToken: String?): List<AgentRun> {
+        val connection = URL("$baseUrl/v1/agents/runs?limit=100").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val runs = responseJson(connection).getJSONArray("runs")
+            return buildList { for (index in 0 until runs.length()) add(parseAgentRun(runs.getJSONObject(index))) }
+        } finally { connection.disconnect() }
+    }
+
+    private fun cancelAgentRunBlocking(baseUrl: String, runId: String, deviceToken: String?): AgentRun {
+        val encodedId = URLEncoder.encode(runId, Charsets.UTF_8.name())
+        val connection = URL("$baseUrl/v1/agents/runs/$encodedId/cancel").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, "{}".toByteArray())
+            return parseAgentRun(responseJson(connection).getJSONObject("run"))
+        } finally { connection.disconnect() }
+    }
+
+    private fun parseAgentRun(payload: JSONObject) = AgentRun(
+        id=payload.getString("id"), parentRunId=payload.optString("parent_run_id").takeIf { it.isNotBlank() && it != "null" },
+        role=payload.optString("role"), objective=payload.optString("objective"), status=payload.optString("status"),
+        model=payload.optString("model"), sandbox=payload.optString("sandbox"), currentActivity=payload.optString("current_activity"),
+        resultSummary=payload.optString("result_summary"), error=payload.optString("error"),
+    )
+
     private fun decideUpdateProposalBlocking(baseUrl: String, updateId: String, approve: Boolean, deviceToken: String?): UpdateProposal {
         val encodedId = URLEncoder.encode(updateId, Charsets.UTF_8.name())
         val request = JSONObject().put("decision", if (approve) "approve" else "reject").toString().toByteArray()
@@ -1222,29 +1316,11 @@ object GatewayClient {
         request: ByteArray? = null,
         contentType: String = "application/json; charset=utf-8",
     ) {
-        connection.connectTimeout = 7_000
-        connection.readTimeout = 90_000
-        connection.setRequestProperty("Accept", "application/json")
-        if (!deviceToken.isNullOrBlank()) {
-            connection.setRequestProperty("Authorization", "Bearer $deviceToken")
-        }
-        if (request != null) {
-            connection.requestMethod = "POST"
-            connection.doOutput = true
-            connection.setFixedLengthStreamingMode(request.size)
-            connection.setRequestProperty("Content-Type", contentType)
-            connection.outputStream.use { it.write(request) }
-        }
+        GatewayHttpTransport.configure(connection, deviceToken, request, contentType)
     }
 
     private fun responseJson(connection: HttpURLConnection): JSONObject {
-        val status = connection.responseCode
-        val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        if (status !in 200..299) {
-            throw IllegalStateException("Gateway returned HTTP $status: $body")
-        }
-        return JSONObject(body)
+        return GatewayHttpTransport.responseJson(connection)
     }
 
     private fun <T> retryConnection(action: () -> T): T {

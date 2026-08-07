@@ -6,6 +6,8 @@ import re
 import unittest
 from pathlib import Path
 
+from services.gateway.proxy_routes import PROXY_ROUTES
+
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 OPENAPI = REPOSITORY / "contracts" / "openapi.yaml"
@@ -64,12 +66,14 @@ def handler_route_literals(method: str) -> set[str]:
         and node.name == function_name
     )
     route_conditions = [node.test for node in ast.walk(handler) if isinstance(node, ast.If)]
-    return {
+    native = {
         node.value
         for condition in route_conditions
         for node in ast.walk(condition)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     }
+    proxied = {route.template for route in PROXY_ROUTES if route.method == method}
+    return native | proxied
 
 
 def route_is_covered(path: str, literals: set[str]) -> bool:

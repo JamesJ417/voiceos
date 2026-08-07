@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import threading
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -21,6 +22,18 @@ FetchJson = Callable[[str], JsonObject | None]
 CreateOutreach = Callable[[JsonObject], JsonObject | None]
 InterpretSignal = Callable[[JsonObject], JsonObject | None]
 PostJson = Callable[[str, JsonObject], JsonObject | None]
+
+
+def _gpu_is_busy() -> bool:
+    """Fail closed only on measured utilization; unavailable telemetry is handled by other gates."""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2, check=True,
+        )
+        return any(int(value.strip()) >= 20 for value in result.stdout.splitlines() if value.strip())
+    except (FileNotFoundError, ValueError, subprocess.SubprocessError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,9 @@ class ReviewScheduler:
         health_probe: Callable[[], JsonObject] | None = None,
         now: Callable[[], datetime] | None = None,
         sleep_memory_enabled: bool = False,
+        sleep_internal_token: str | None = None,
+        sleep_automatic_commits: bool = False,
+        gpu_busy_probe: Callable[[], bool] | None = None,
     ) -> None:
         self.memory_url = memory_url.rstrip("/")
         self.audit = audit_store
@@ -66,6 +82,9 @@ class ReviewScheduler:
         self._health_probe = health_probe or collect_system_health
         self._now = now or (lambda: datetime.now(UTC))
         self.sleep_memory_enabled = sleep_memory_enabled
+        self.sleep_internal_token = sleep_internal_token
+        self.sleep_automatic_commits = sleep_automatic_commits
+        self._gpu_busy_probe = gpu_busy_probe or _gpu_is_busy
         self._stop = threading.Event()
         self._scan_lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -234,13 +253,15 @@ class ReviewScheduler:
             return None
         if not isinstance(system_snapshot, dict) or system_snapshot.get("status") != "healthy":
             return {"status": "skipped", "reason": "system_not_healthy"}
+        if self._gpu_busy_probe():
+            return {"status": "skipped", "reason": "gpu_busy"}
         state_key = f"sleep-memory:{local_now.date().isoformat()}"
         if self.audit.review_state(state_key):
             return {"status": "already_ran"}
         result = self._post_json(
             "/internal/v1/memory/sleep/run",
             {
-                "mode": "commit",
+                "mode": "commit" if self.sleep_automatic_commits else "dry_run",
                 "trigger_kind": "scheduled",
                 "config": {"max_events": 96, "model_call_budget": 2},
             },
@@ -493,7 +514,11 @@ class ReviewScheduler:
             request = Request(
                 f"{self.memory_url}{path}",
                 data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    **({"X-VoiceOS-Internal-Token": self.sleep_internal_token} if self.sleep_internal_token else {}),
+                },
                 method="POST",
             )
             with urlopen(request, timeout=10) as response:

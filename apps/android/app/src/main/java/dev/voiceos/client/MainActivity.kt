@@ -64,8 +64,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var attentionContainer: LinearLayout
     private lateinit var activityContainer: LinearLayout
     private lateinit var adminStatusView: TextView
+    private lateinit var agentRunStatusView: TextView
+    private lateinit var agentRunContainer: LinearLayout
     private lateinit var sleepStatusView: TextView
     private lateinit var sleepReportView: TextView
+    private lateinit var doctrineStatusView: TextView
+    private lateinit var doctrineCandidateContainer: LinearLayout
     private lateinit var deviceContainer: LinearLayout
     private lateinit var historyView: TextView
     private lateinit var taskStatusView: TextView
@@ -439,26 +443,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         window.navigationBarColor = CarbonPalette.black
         window.decorView.systemUiVisibility = 0
 
-        fun kicker(text: String) = TextView(this).apply {
-            this.text = text.uppercase(Locale.US)
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.17f
-            setTextColor(CarbonPalette.teal)
-        }
-
-        fun heading(text: String, size: Float = 24f) = TextView(this).apply {
-            this.text = text
-            textSize = size
-            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-            setTextColor(CarbonPalette.white)
-        }
-
-        fun panel(padding: Int = 20) = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
-            background = carbonPanel(this@MainActivity)
-        }
+        fun kicker(text: String) = carbonKicker(text)
+        fun heading(text: String, size: Float = 24f) = carbonHeading(text, size)
+        fun panel(padding: Int = 20) = carbonPanelLayout(padding)
 
         fun navChip(label: String, active: Boolean) = TextView(this).apply {
             text = label
@@ -800,6 +787,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             addView(kicker("VoiceOS infrastructure"), fullWidthWrap().apply { topMargin = dp(24) })
             addView(heading("System", 30f), fullWidthWrap().apply { topMargin = dp(5) })
             addView(panel(17).apply {
+                addView(kicker("Codex execution fabric"), fullWidthWrap())
+                addView(heading("VIC agent work", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                agentRunStatusView = TextView(this@MainActivity).apply {
+                    text = "Loading coordinators and subagents..."; textSize = 13f; setTextColor(CarbonPalette.muted); setPadding(0, dp(10), 0, 0)
+                }
+                addView(agentRunStatusView, fullWidthWrap())
+                agentRunContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(agentRunContainer, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("REFRESH AGENT WORK") { loadAgentRuns() }, fullWidthWrap().apply { topMargin = dp(12) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            addView(panel(17).apply {
                 addView(kicker("One attention queue"), fullWidthWrap())
                 addView(heading("VIC inbox", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
                 attentionContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
@@ -832,17 +830,19 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 addView(updateContainer, fullWidthWrap().apply { topMargin = dp(8) })
                 addView(secondaryButton("REFRESH UPDATES") { loadUpdateProposals() }, fullWidthWrap().apply { topMargin = dp(14) })
             }, fullWidthWrap().apply { topMargin = dp(18) })
-            addView(panel(17).apply {
-                addView(kicker("Reconstructive memory"), fullWidthWrap())
-                addView(heading("VIC sleep cycle", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
-                sleepStatusView = operationText("Loading sleep-memory status...", CarbonPalette.line)
-                addView(sleepStatusView, fullWidthWrap().apply { topMargin = dp(12) })
-                sleepReportView = operationText("No morning report yet.", CarbonPalette.line)
-                addView(sleepReportView, fullWidthWrap().apply { topMargin = dp(8) })
-                addView(secondaryButton("DRY RUN") { runSleepMemory("dry_run") }, fullWidthWrap().apply { topMargin = dp(12) })
-                addView(secondaryButton("RUN & COMMIT") { runSleepMemory("commit") }, fullWidthWrap().apply { topMargin = dp(8) })
-                addView(secondaryButton("ROLL BACK LAST CYCLE") { actOnLastSleepCycle("rollback") }, fullWidthWrap().apply { topMargin = dp(8) })
-            }, fullWidthWrap().apply { topMargin = dp(18) })
+            val sleepPanel = buildSleepMemoryPanel(
+                this@MainActivity,
+                onDryRun = { runSleepMemory("dry_run") },
+                onCommit = { runSleepMemory("commit") },
+                onRollback = { actOnLastSleepCycle("rollback") },
+            )
+            sleepStatusView = sleepPanel.status
+            sleepReportView = sleepPanel.report
+            addView(sleepPanel.root, fullWidthWrap().apply { topMargin = dp(18) })
+            val doctrinePanel = buildDoctrinePanel(this@MainActivity)
+            doctrineStatusView = doctrinePanel.status
+            doctrineCandidateContainer = doctrinePanel.candidates
+            addView(doctrinePanel.root, fullWidthWrap().apply { topMargin = dp(18) })
             addView(panel(17).apply {
                 addView(kicker("Hands-free access"), fullWidthWrap())
                 addView(heading("Wake word", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
@@ -967,33 +967,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         setOnClickListener { action() }
     }
 
-    private fun fullWidthWrap() = LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT,
-        ViewGroup.LayoutParams.WRAP_CONTENT,
-    )
+    private fun fullWidthWrap() = fullWidthWrapLayout()
 
     private fun weightedButton() = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
 
-    private fun taskPanel(padding: Int = 20) = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
-        background = carbonPanel(this@MainActivity)
-    }
+    private fun taskPanel(padding: Int = 20) = carbonPanelLayout(padding)
 
-    private fun taskKicker(text: String) = TextView(this).apply {
-        this.text = text.uppercase(Locale.US)
-        textSize = 10f
-        typeface = Typeface.DEFAULT_BOLD
-        letterSpacing = 0.17f
-        setTextColor(CarbonPalette.teal)
-    }
+    private fun taskKicker(text: String) = carbonKicker(text)
 
-    private fun taskHeading(text: String, size: Float = 24f) = TextView(this).apply {
-        this.text = text
-        textSize = size
-        typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-        setTextColor(CarbonPalette.white)
-    }
+    private fun taskHeading(text: String, size: Float = 24f) = carbonHeading(text, size)
 
     private fun handlePrimaryAction() {
         if (conversationActive) {
@@ -1649,10 +1631,102 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             loadUpdateProposals()
             loadOperations()
             loadSleepMemory()
+            loadDoctrine()
+            loadAgentRuns()
+        }
+    }
+
+    private fun loadAgentRuns() {
+        if (!::agentRunContainer.isInitialized) return
+        agentRunStatusView.text = "Loading coordinators and subagents..."
+        GatewayClient.getAgentRuns(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                agentRunContainer.removeAllViews()
+                result.fold(onSuccess = { runs ->
+                    val active = runs.count { it.status !in setOf("completed", "failed", "cancelled") }
+                    agentRunStatusView.text = if (active == 0) "No Codex agents are working right now." else "$active agent run${if (active == 1) " is" else "s are"} active."
+                    val roots = runs.filter { it.parentRunId == null }
+                    roots.forEach { run ->
+                        val children = runs.filter { it.parentRunId == run.id }
+                        val card = taskPanel(14).apply {
+                            addView(this@MainActivity.carbonKicker("${run.status}  •  ${run.role}"), fullWidthWrap())
+                            addView(taskHeading(run.objective, 18f), fullWidthWrap().apply { topMargin = dp(5) })
+                            addView(TextView(this@MainActivity).apply {
+                                text = run.currentActivity.ifBlank { run.resultSummary.ifBlank { run.error.ifBlank { "Waiting for Codex supervisor" } } } +
+                                    "\n${run.model}  •  ${run.sandbox}  •  ${children.size} subagent${if (children.size == 1) "" else "s"}"
+                                textSize = 12f; setTextColor(CarbonPalette.white); setPadding(0, dp(9), 0, 0)
+                            }, fullWidthWrap())
+                            children.forEach { child -> addView(TextView(this@MainActivity).apply {
+                                text = "↳ ${child.role.uppercase(Locale.US)}  ${child.status}\n${child.currentActivity.ifBlank { child.resultSummary.ifBlank { child.objective } }}"
+                                textSize = 12f; setTextColor(CarbonPalette.muted); setPadding(dp(10), dp(9), 0, 0)
+                            }, fullWidthWrap()) }
+                            if (run.status !in setOf("completed", "failed", "cancelled")) addView(secondaryButton("STOP RUN") { cancelAgentRun(run) }, fullWidthWrap().apply { topMargin = dp(10) })
+                        }
+                        agentRunContainer.addView(card, fullWidthWrap().apply { topMargin = dp(8) })
+                    }
+                }, onFailure = { error ->
+                    agentRunStatusView.text = "Agent activity unavailable: ${error.message.orEmpty()}"
+                    agentRunStatusView.setTextColor(CarbonPalette.red)
+                })
+            }
+        }
+    }
+
+    private fun cancelAgentRun(run: AgentRun) {
+        GatewayClient.cancelAgentRun(GatewaySettings.baseUrl(this), run.id, DeviceCredentials.token(this)) { result ->
+            runOnUiThread { result.fold(onSuccess = { loadAgentRuns() }, onFailure = { Toast.makeText(this, "Could not stop agent: ${it.message.orEmpty()}", Toast.LENGTH_LONG).show() }) }
         }
     }
 
     private var latestSleepCycleId: String = ""
+
+    private fun loadDoctrine() {
+        if (!::doctrineStatusView.isInitialized) return
+        GatewayClient.getDoctrineStatus(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                result.fold(onSuccess = { status ->
+                    doctrineStatusView.text = (if (status.enabled) "REVIEW ENABLED" else "DISABLED") +
+                        "\nActive " + status.active + "  •  Awaiting review " + status.awaitingReview +
+                        "\nContamination failures " + status.contaminationFailures + "  •  Contradictions " + status.openContradictions +
+                        "\nProcessed sources " + status.processedRecords + "  •  Authorization warnings " + status.authorizationWarnings
+                    doctrineStatusView.setTextColor(if (status.authorizationWarnings > 0 || status.contaminationFailures > 0) CarbonPalette.amber else CarbonPalette.white)
+                    if (status.enabled) loadDoctrineCandidates() else if (::doctrineCandidateContainer.isInitialized) doctrineCandidateContainer.removeAllViews()
+                }, onFailure = { doctrineStatusView.text = "Doctrine status unavailable: " + it.message.orEmpty() })
+            }
+        }
+    }
+
+    private fun loadDoctrineCandidates() {
+        GatewayClient.getDoctrineCandidates(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                if (!::doctrineCandidateContainer.isInitialized) return@runOnUiThread
+                doctrineCandidateContainer.removeAllViews()
+                result.fold(onSuccess = { candidates ->
+                    candidates.forEach { candidate ->
+                        doctrineCandidateContainer.addView(taskPanel(12).apply {
+                            addView(taskHeading(candidate.proposition, 17f), fullWidthWrap())
+                            addView(TextView(this@MainActivity).apply {
+                                text = "${candidate.domain.replace('_', ' ')}  •  ${candidate.principleType.replace('_', ' ')}\n${candidate.decisionRule}\n\nRATIONALE\n${candidate.rationale}\n\nEXCEPTIONS\n${candidate.exceptions.joinToString().ifBlank { "None recorded" }}\n\nCONFIDENCE ${"%.2f".format(candidate.confidence)}  •  STYLE ${"%.2f".format(candidate.styleContamination)}  •  IDENTITY ${"%.2f".format(candidate.identityContamination)}"
+                                textSize = 12f; setTextColor(CarbonPalette.white); setTextIsSelectable(true); setPadding(0, dp(10), 0, 0)
+                            }, fullWidthWrap())
+                            val actions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                            actions.addView(secondaryButton("REJECT") { decideDoctrineCandidate(candidate, "reject") }, weightedButton())
+                            actions.addView(secondaryButton("REVISE") { decideDoctrineCandidate(candidate, "request_revision") }, weightedButton().apply { marginStart = dp(6) })
+                            actions.addView(actionButton("APPROVE").apply { setOnClickListener { decideDoctrineCandidate(candidate, "approve") } }, weightedButton().apply { marginStart = dp(6) })
+                            addView(actions, fullWidthWrap().apply { topMargin = dp(10) })
+                            addView(TextView(this@MainActivity).apply { text = "Approval does not activate doctrine."; textSize = 11f; setTextColor(CarbonPalette.muted) }, fullWidthWrap().apply { topMargin = dp(8) })
+                        }, fullWidthWrap().apply { topMargin = dp(8) })
+                    }
+                }, onFailure = { doctrineStatusView.text = doctrineStatusView.text.toString() + "\nCandidate review unavailable: " + it.message.orEmpty() })
+            }
+        }
+    }
+
+    private fun decideDoctrineCandidate(candidate: DoctrineCandidate, decision: String) {
+        GatewayClient.decideDoctrineCandidate(GatewaySettings.baseUrl(this), candidate.id, decision, DeviceCredentials.token(this)) { result ->
+            runOnUiThread { result.fold(onSuccess = { loadDoctrine() }, onFailure = { doctrineStatusView.text = "Doctrine decision failed: " + it.message.orEmpty() }) }
+        }
+    }
 
     private fun loadSleepMemory() {
         val baseUrl = GatewaySettings.baseUrl(this)
@@ -1909,15 +1983,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun artifactPanel(padding: Int) = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
-        background = carbonPanel(this@MainActivity)
-    }
+    private fun artifactPanel(padding: Int) = carbonPanelLayout(padding)
 
-    private fun artifactHeading(value: String, size: Float) = TextView(this).apply {
-        text = value; textSize = size; typeface = Typeface.create("sans-serif", Typeface.NORMAL); setTextColor(CarbonPalette.white)
-    }
+    private fun artifactHeading(value: String, size: Float) = carbonHeading(value, size)
 
     private fun renderTasks(tasks: List<VoiceTask>, preserveStatus: Boolean = false) {
         latestTasks = tasks

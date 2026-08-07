@@ -286,6 +286,40 @@ pub struct JobRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentRunRecord {
+    pub id: String,
+    pub owner_id: String,
+    pub task_id: Option<String>,
+    pub parent_run_id: Option<String>,
+    pub idempotency_key: String,
+    pub role: String,
+    pub objective: String,
+    pub status: String,
+    pub provider: String,
+    pub model: String,
+    pub reasoning_effort: String,
+    pub sandbox: String,
+    pub capability_scope: serde_json::Value,
+    pub codex_thread_id: Option<String>,
+    pub current_activity: Option<String>,
+    pub result_summary: Option<String>,
+    pub error: Option<String>,
+    pub requested_by: String,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentRunProgressUpdate {
+    pub event_kind: String,
+    pub activity: String,
+    pub evidence: serde_json::Value,
+    pub codex_thread_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TaskInitiative {
     pub task_id: String,
     pub job_id: String,

@@ -1424,6 +1424,7 @@ dependencies = [
  "sha2",
  "tokio",
  "urlencoding",
+ "uuid",
  "voiceos-core",
  "voiceos-ontology",
 ]

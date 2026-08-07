@@ -22,9 +22,14 @@ before one atomic commit.
 
 Raw events are immutable. Derived memories never replace evidence. Identity and
 doctrine proposals always require explicit human approval. Dream associations
-are quarantined, omitted from ordinary retrieval, and cannot trigger tools or
-become verified facts without a separate promotion decision. Routine cycles do
-not invoke Codex.
+are quarantined, omitted from ordinary retrieval, and cannot trigger tools.
+Dream promotion can only produce a working hypothesis. A later supported
+inference requires additional evidence and a separate validation decision; a
+verified fact requires another evidence-backed validation. No promotion action
+can jump directly from dream association to supported inference or verified
+fact. Until that separate validation workflow exists, database guards prevent
+dream-origin working hypotheses from advancing at all. Routine cycles do not
+invoke Codex.
 
 Python may schedule or proxy a cycle but may not persist cognitive memory.
 Android and kiosk clients only use authenticated public Rust-owned routes through

@@ -293,6 +293,7 @@ class ReviewSchedulerTest(unittest.TestCase):
             health_probe=lambda: {"status": "healthy", "issues": [], "checked_at": quiet_now.isoformat()},
             now=lambda: quiet_now,
             sleep_memory_enabled=True,
+            gpu_busy_probe=lambda: False,
         )
 
         first = scheduler.run_once()
@@ -300,8 +301,23 @@ class ReviewSchedulerTest(unittest.TestCase):
 
         calls = [item for item in self.posted if item[0] == "/internal/v1/memory/sleep/run"]
         self.assertEqual(1, len(calls))
+        self.assertEqual("dry_run", calls[0][1]["mode"])
         self.assertEqual("completed", first["sleep_cycle"]["status"])
         self.assertEqual("already_ran", second["sleep_cycle"]["status"])
+
+    def test_sleep_cycle_skips_when_gpu_is_busy(self) -> None:
+        quiet_now = datetime(2026, 8, 4, 23, 0, tzinfo=UTC)
+        self.responses["/v1/outreach/policy"] = policy()
+        scheduler = ReviewScheduler(
+            "http://memory", self.audit,
+            fetch_json=lambda path: self.responses.get(path),
+            create_outreach=lambda payload: None,
+            post_json=lambda path, payload: self.posted.append((path, payload)) or {},
+            health_probe=lambda: {"status": "healthy", "issues": []},
+            now=lambda: quiet_now, sleep_memory_enabled=True, gpu_busy_probe=lambda: True,
+        )
+        self.assertEqual("gpu_busy", scheduler.run_once()["sleep_cycle"]["reason"])
+        self.assertFalse(any(path == "/internal/v1/memory/sleep/run" for path, _ in self.posted))
 
 
 if __name__ == "__main__":
