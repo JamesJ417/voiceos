@@ -218,7 +218,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="127.0.0.1"); parser.add_argument("--port", type=int, default=8793)
+    parser.add_argument("--host", default="127.0.0.1"); parser.add_argument("--port", type=int, default=8795)
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.signal_store = SignalStore(Path(os.environ.get("VOICEOS_COMMUNICATION_SIGNAL_FILE", "/var/lib/voiceos/connectors/communication.json")))  # type: ignore[attr-defined]

@@ -179,15 +179,17 @@ impl ConversationStore {
         ];
         let mut rules = Vec::new();
         for (name, description, source, actions, max_runs) in defaults {
-            if let Some(existing) = self
-                .connection()?
-                .query_row(
-                    "SELECT automation_id FROM automation_rules WHERE owner_id=?1 AND name=?2",
-                    params![owner_id.trim(), name],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
-            {
+            let existing = {
+                let connection = self.connection()?;
+                connection
+                    .query_row(
+                        "SELECT automation_id FROM automation_rules WHERE owner_id=?1 AND name=?2",
+                        params![owner_id.trim(), name],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+            };
+            if let Some(existing) = existing {
                 if let Some(rule) = self.automation_rule(owner_id, &existing)? {
                     rules.push(rule);
                 }

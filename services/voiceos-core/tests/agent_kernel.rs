@@ -601,6 +601,11 @@ fn attention_automations_are_owned_evidenced_rate_limited_and_disableable() {
             && rule.frequency_limit.max_runs > 0
             && !rule.evidence.is_null()
     }));
+    let repeated = store.ensure_default_attention_automations("owner").unwrap();
+    assert_eq!(
+        defaults.iter().map(|rule| &rule.id).collect::<Vec<_>>(),
+        repeated.iter().map(|rule| &rule.id).collect::<Vec<_>>()
+    );
     let disabled = store
         .set_automation_rule_enabled("owner", &defaults[0].id, false)
         .unwrap()

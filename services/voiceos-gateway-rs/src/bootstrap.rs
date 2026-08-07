@@ -42,7 +42,7 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         let imported = store.import_legacy_audit(&legacy_path, "legacy-audit")?;
         eprintln!("Imported {imported} legacy audit turns");
     }
-    if env::var("VOICEOS_PROPOSE_SKILLS_FROM_AUDIT").as_deref() != Ok("0")
+    if env::var("VOICEOS_PROPOSE_SKILLS_FROM_AUDIT").as_deref() == Ok("1")
         && legacy_audit_path.is_file()
     {
         match store.propose_skills_from_legacy_audit(&legacy_audit_path, &primary_owner_id, 2) {

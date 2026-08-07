@@ -10,7 +10,7 @@ Group=voiceos
 WorkingDirectory=@@REPO_ROOT@@
 Environment=PYTHONPATH=@@REPO_ROOT@@
 EnvironmentFile=-/etc/voiceos/voiceos-connectors.env
-ExecStart=/usr/bin/python3 -m services.gateway.connector_signals --host 127.0.0.1 --port 8793
+ExecStart=/usr/bin/python3 -m services.gateway.connector_signals --host 127.0.0.1 --port 8795
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

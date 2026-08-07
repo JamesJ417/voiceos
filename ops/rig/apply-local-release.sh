@@ -48,13 +48,25 @@ rollback_root="/var/lib/voiceos/releases/$release_id"
 sudo useradd --system --home-dir /var/lib/voiceos --create-home --shell /usr/sbin/nologin voiceos 2>/dev/null || true
 sudo install -d -o voiceos -g voiceos -m 0750 /var/lib/voiceos /var/lib/voiceos/releases
 sudo install -d -o root -g voiceos -m 0750 "$rollback_root"
-for existing in \
+managed_files=(
   /opt/voiceos/bin/voiceos-gateway \
+  /opt/voiceos/bin/check-hermes-upstream \
+  /opt/voiceos/bin/stage-hermes-candidate \
+  /opt/voiceos/bin/deploy-hermes-candidate \
   /etc/systemd/system/voiceos-rust.service \
   /etc/systemd/system/voiceos-gateway.service \
-  /etc/systemd/system/voiceos-connectors.service; do
+  /etc/systemd/system/voiceos-connectors.service \
+  /etc/systemd/system/voiceos-codex-supervisor.service \
+  /etc/systemd/system/voiceos-model-warm.service \
+  /etc/systemd/system/voiceos-codex.service \
+  /etc/systemd/system/voiceos-hermes-update-check.service \
+  /etc/systemd/system/voiceos-hermes-update-check.timer
+)
+for existing in "${managed_files[@]}"; do
   if sudo test -f "$existing"; then
-    sudo cp --preserve=mode,timestamps "$existing" "$rollback_root/$(basename "$existing")"
+    sudo cp --archive "$existing" "$rollback_root/$(basename "$existing")"
+  else
+    sudo touch "$rollback_root/$(basename "$existing").absent"
   fi
 done
 
@@ -63,14 +75,21 @@ rollback_release() {
   trap - ERR
   set +e
   echo "Release failed near line $failed_line; restoring snapshot $rollback_root" >&2
-  sudo test -f "$rollback_root/voiceos-gateway" \
-    && sudo install -o root -g root -m 0755 "$rollback_root/voiceos-gateway" /opt/voiceos/bin/voiceos-gateway
-  for unit in voiceos-rust.service voiceos-gateway.service voiceos-connectors.service; do
-    sudo test -f "$rollback_root/$unit" \
-      && sudo install -o root -g root -m 0644 "$rollback_root/$unit" "/etc/systemd/system/$unit"
+  for existing in "${managed_files[@]}"; do
+    local backup="$rollback_root/$(basename "$existing")"
+    if sudo test -f "$backup"; then
+      sudo cp --archive "$backup" "$existing"
+    elif sudo test -f "$backup.absent"; then
+      if [[ "$existing" == /etc/systemd/system/* ]]; then
+        sudo systemctl disable --now "$(basename "$existing")" 2>/dev/null || true
+      fi
+      sudo rm -f -- "$existing"
+    fi
   done
   sudo systemctl daemon-reload
-  sudo systemctl restart voiceos-rust.service voiceos-connectors.service voiceos-gateway.service
+  for unit in voiceos-rust.service voiceos-connectors.service voiceos-gateway.service; do
+    sudo systemctl cat "$unit" >/dev/null 2>&1 && sudo systemctl restart "$unit" || true
+  done
   printf '{"release_id":"%s","status":"rolled_back","failed_line":%s}\n' "$release_id" "$failed_line" \
     | sudo tee "$rollback_root/result.json" >/dev/null
   exit 1
@@ -83,13 +102,13 @@ cargo build --release --package voiceos-gateway --manifest-path "$repo_root/Carg
 python3 -m unittest discover -s "$repo_root/services/gateway/tests" -p 'test_*.py'
 python3 -m unittest discover -s "$repo_root/contracts/tests" -p 'test_*.py'
 
-"$repo_root/ops/rig/install-gateway-service.sh" "$repo_root"
+bash "$repo_root/ops/rig/install-gateway-service.sh" "$repo_root"
 sudo install -d -o voiceos -g voiceos -m 0750 /var/lib/voiceos-rust /var/lib/voiceos/artifacts
 sudo install -d -o voiceos -g voiceos -m 0750 /var/lib/voiceos/update-candidates
 sudo install -d -o root -g root -m 0755 /opt/voiceos/bin
 sudo install -o root -g root -m 0755 \
   "$repo_root/target/release/voiceos-gateway" /opt/voiceos/bin/voiceos-gateway
-if [[ ! -f /etc/voiceos/rust.env ]]; then
+if ! sudo test -f /etc/voiceos/rust.env; then
   sudo install -o root -g voiceos -m 0640 \
     "$repo_root/ops/rig/voiceos-rust.env.example" /etc/voiceos/rust.env
 fi
@@ -111,9 +130,22 @@ sudo systemctl enable voiceos-codex-supervisor.service
 sudo systemctl enable --now voiceos-rust.service voiceos-connectors.service voiceos-hermes-update-check.timer
 sudo systemctl restart voiceos-rust.service voiceos-connectors.service voiceos-gateway.service
 
-curl --fail --silent --show-error http://127.0.0.1:8790/v1/health >/dev/null
-curl --fail --silent --show-error http://127.0.0.1:8793/v1/health >/dev/null
-curl --fail --silent --show-error http://127.0.0.1:8787/v1/health >/dev/null
+wait_for_health() {
+  local url="$1"
+  local attempt
+  for attempt in $(seq 1 30); do
+    if curl --fail --silent --max-time 3 "$url" >/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  curl --fail --silent --show-error --max-time 5 "$url" >/dev/null
+}
+
+wait_for_health http://127.0.0.1:8790/v1/health
+wait_for_health http://127.0.0.1:8793/v1/health
+wait_for_health http://127.0.0.1:8795/v1/health
+wait_for_health http://127.0.0.1:8787/v1/health
 binary_sha="$(sha256sum /opt/voiceos/bin/voiceos-gateway | awk '{print $1}')"
 printf '{"release_id":"%s","status":"healthy","binary_sha256":"%s","rollback_root":"%s"}\n' \
   "$release_id" "$binary_sha" "$rollback_root" \

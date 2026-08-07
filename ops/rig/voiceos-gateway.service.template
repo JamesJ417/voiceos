@@ -10,6 +10,9 @@ Group=voiceos
 WorkingDirectory=@@REPO_ROOT@@
 EnvironmentFile=/etc/voiceos/voiceos-gateway.env
 EnvironmentFile=-/etc/voiceos/voiceos-admin.env
+Environment=VOICEOS_EMAIL_SIGNALS_URL=http://127.0.0.1:8795/v1/email-signals
+Environment=VOICEOS_CALENDAR_SIGNALS_URL=http://127.0.0.1:8795/v1/calendar-signals
+Environment=VOICEOS_COMMUNICATION_SIGNALS_URL=http://127.0.0.1:8795/v1/communication-signals
 ExecStart=/usr/bin/python3 -m services.gateway.server --host 127.0.0.1 --port 8787
 Restart=on-failure
 RestartSec=3

@@ -28,19 +28,19 @@ sudo install -d -o voiceos -g voiceos -m 0750 /var/lib/voiceos
 sudo install -d -o voiceos -g voiceos -m 0750 /var/lib/voiceos/connectors
 sudo install -d -o root -g voiceos -m 0750 /etc/voiceos
 sudo install -d -o root -g voiceos -m 0750 /etc/voiceos/secrets
-if [[ ! -f /etc/voiceos/voiceos-gateway.env ]]; then
+if ! sudo test -f /etc/voiceos/voiceos-gateway.env; then
   sudo install -o root -g voiceos -m 0640 \
     "$script_dir/voiceos-gateway.env.example" /etc/voiceos/voiceos-gateway.env
 fi
-if [[ ! -f /etc/voiceos/voiceos-connectors.env ]]; then
+if ! sudo test -f /etc/voiceos/voiceos-connectors.env; then
   sudo install -o root -g voiceos -m 0640 \
     "$script_dir/voiceos-connectors.env.example" /etc/voiceos/voiceos-connectors.env
 fi
-if [[ ! -f /etc/voiceos/secrets/connector-ingest-token ]]; then
+if ! sudo test -f /etc/voiceos/secrets/connector-ingest-token; then
   python3 -c 'import secrets; print(secrets.token_urlsafe(48))' \
     | sudo install -o root -g voiceos -m 0640 /dev/stdin /etc/voiceos/secrets/connector-ingest-token
 fi
-if [[ ! -f /etc/voiceos/voiceos-admin.env ]]; then
+if ! sudo test -f /etc/voiceos/voiceos-admin.env; then
   admin_token="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
   printf 'VOICEOS_ADMIN_TOKEN=%s\n' "$admin_token" \
     | sudo install -o root -g voiceos -m 0640 /dev/stdin /etc/voiceos/voiceos-admin.env
