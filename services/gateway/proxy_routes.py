@@ -99,6 +99,7 @@ _POST = (
 )
 
 PROXY_ROUTES = (
+    ProxyRoute("GET", "/v1/agents/events", ProxyTransport.SSE),
     ProxyRoute("GET", "/v1/artifacts/events", ProxyTransport.SSE),
     ProxyRoute("GET", "/v1/conversations/active/events", ProxyTransport.SSE),
     ProxyRoute("GET", "/v1/artifacts/{artifact_id}/preview", ProxyTransport.BINARY),

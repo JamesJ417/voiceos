@@ -1,6 +1,11 @@
+use std::convert::Infallible;
+use std::time::Duration;
+
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::Sse;
+use axum::response::sse::{Event, KeepAlive};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -15,6 +20,11 @@ use super::error::{ApiResult, api_error};
 pub(crate) struct AgentRunQuery {
     task_id: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AgentEventQuery {
+    after: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +78,44 @@ pub(crate) async fn list(
         )
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
     Ok(Json(json!({"runs": runs})))
+}
+
+pub(crate) async fn events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<AgentEventQuery>,
+) -> ApiResult<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>> {
+    authenticate(&state, &headers)?;
+    let header_cursor = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok());
+    let mut cursor = query.after.or(header_cursor).unwrap_or(0).max(0);
+    let owner = state.primary_owner_id.clone();
+    let store = state.store.clone();
+    let stream = async_stream::stream! {
+        loop {
+            let read_store = store.clone();
+            let read_owner = owner.clone();
+            match tokio::task::spawn_blocking(move || read_store.agent_events_after(&read_owner, cursor, 100)).await {
+                Ok(Ok(events)) if !events.is_empty() => for event in events {
+                    cursor = event.id;
+                    let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_owned());
+                    yield Ok(Event::default().event(event.event_type).id(cursor.to_string()).data(data));
+                },
+                Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(400)).await,
+                _ => {
+                    yield Ok(Event::default().event("agent.error").data("{\"error\":\"agent_stream_unavailable\"}"));
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    };
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    ))
 }
 
 pub(crate) async fn create(

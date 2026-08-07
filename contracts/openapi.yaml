@@ -844,6 +844,24 @@ paths:
                   run: { $ref: "#/components/schemas/AgentRun" }
         "400": { description: Invalid or over-broad run request }
         "401": { description: Device authentication required }
+  /v1/agents/events:
+    get:
+      operationId: streamAgentRunEvents
+      summary: Stream durable coordinator and subagent progress
+      parameters:
+        - in: query
+          name: after
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: header
+          name: Last-Event-ID
+          schema: { type: string }
+      responses:
+        "200":
+          description: Authenticated SSE stream of agent lifecycle, plan, command, file, and subagent events
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { description: Device authentication required }
   /v1/agents/runs/{run_id}:
     get:
       operationId: getAgentRun
@@ -1702,7 +1720,7 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, conversation.floor.changed, task.changed, task.initiative.updated, task.progress.updated, task.schedule.changed, approval.proposed, approval.decided, attention.changed, attention.actioned, calendar.changed, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated, vic.review.completed, automation.executed, agent.run.updated, agent.run.queued, agent.run.starting, agent.run.running, agent.run.waiting_approval, agent.run.waiting_input, agent.run.completed, agent.run.failed, agent.run.cancelled, agent.plan.updated, agent.command.started, agent.command.completed, agent.file.changed, agent.subagent.started, agent.subagent.completed]
+          enum: [conversation.turn, conversation.floor.changed, task.changed, task.initiative.updated, task.progress.updated, task.schedule.changed, approval.proposed, approval.decided, attention.changed, attention.actioned, calendar.changed, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated, vic.review.completed, automation.executed, agent.run.updated, agent.run.queued, agent.run.starting, agent.run.running, agent.run.waiting_approval, agent.run.waiting_input, agent.run.completed, agent.run.failed, agent.run.cancelled, agent.progress.updated, agent.plan.updated, agent.command.started, agent.command.updated, agent.command.completed, agent.file.changed, agent.subagent.started, agent.subagent.updated, agent.subagent.completed, agent.approval.denied]
         payload: { type: object }
         created_at: { type: string, format: date-time }
     Task:

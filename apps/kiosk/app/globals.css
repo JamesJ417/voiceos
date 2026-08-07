@@ -317,6 +317,8 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
 .skill-proposal-card summary { padding: 11px 13px; color: var(--muted); cursor: pointer; font-size: 12px; }
 .skill-proposal-card pre { max-height: 280px; overflow: auto; margin: 0; padding: 14px; border-top: 1px solid var(--line-soft); color: #dce5e4; background: rgba(0,0,0,0.2); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; font-size: 11px; line-height: 1.55; }
 .agent-runs-panel { grid-column: 1 / -1; }
+.agent-live-home { grid-column: 1 / -1; }
+.agent-run-card.compact > p { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .agent-run-list { display: grid; gap: 14px; margin-top: 18px; }
 .agent-run-card { border: 1px solid var(--line-soft); border-radius: 14px; padding: 16px; background: rgba(5, 12, 13, .52); }
 .agent-run-card header, .agent-run-card footer { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

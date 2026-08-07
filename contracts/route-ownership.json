@@ -7,6 +7,7 @@
     { "method": "POST", "path": "/v1/devices/{device_id}/revocation", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/activity", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/agents/runs", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "codex-supervisor" },
+    { "method": "GET", "path": "/v1/agents/events", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "codex-supervisor" },
     { "method": "POST", "path": "/v1/agents/runs", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "codex-supervisor" },
     { "method": "GET", "path": "/v1/agents/runs/{run_id}", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "codex-supervisor" },
     { "method": "POST", "path": "/v1/agents/runs/{run_id}/cancel", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "codex-supervisor" },

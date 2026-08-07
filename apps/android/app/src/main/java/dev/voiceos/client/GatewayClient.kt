@@ -97,9 +97,9 @@ data class EnrolledDevice(
 data class AdminStatus(val installationJson: String)
 
 data class AgentRun(
-    val id: String, val parentRunId: String?, val role: String, val objective: String,
+    val id: String, val taskId: String?, val parentRunId: String?, val role: String, val objective: String,
     val status: String, val model: String, val sandbox: String, val currentActivity: String,
-    val resultSummary: String, val error: String,
+    val resultSummary: String, val error: String, val updatedAt: String,
 )
 
 data class SleepMemoryStatus(
@@ -193,6 +193,44 @@ object GatewayClient {
 
     fun cancelAgentRun(baseUrl: String, runId: String, deviceToken: String?, callback: (Result<AgentRun>) -> Unit) {
         Thread({ callback(runCatching { cancelAgentRunBlocking(baseUrl, runId, deviceToken) }) }, "voiceos-agent-cancel").start()
+    }
+
+    fun streamAgentEvents(
+        baseUrl: String, deviceToken: String, after: Long,
+        onEvent: (ClientEvent) -> Unit, onClosed: (Throwable?) -> Unit,
+    ): EventSubscription {
+        val connection = URL("$baseUrl/v1/agents/events?after=${after.coerceAtLeast(0)}").openConnection() as HttpURLConnection
+        val active = AtomicBoolean(true)
+        connection.connectTimeout = 7_000
+        connection.readTimeout = 0
+        connection.setRequestProperty("Accept", "text/event-stream")
+        connection.setRequestProperty("Authorization", "Bearer $deviceToken")
+        Thread({
+            var failure: Throwable? = null
+            try {
+                if (connection.responseCode !in 200..299) throw IOException("Agent stream returned HTTP ${connection.responseCode}")
+                connection.inputStream.bufferedReader().use { reader ->
+                    var data: String? = null
+                    while (active.get()) {
+                        val line = reader.readLine() ?: break
+                        when {
+                            line.startsWith("data:") -> data = line.removePrefix("data:").trim()
+                            line.isEmpty() && data != null -> {
+                                val value = JSONObject(data)
+                                onEvent(ClientEvent(value.getLong("id"), value.optString("event_type", "agent.updated"), value.optJSONObject("payload") ?: JSONObject()))
+                                data = null
+                            }
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                if (active.get()) failure = error
+            } finally {
+                connection.disconnect()
+                onClosed(failure)
+            }
+        }, "voiceos-agent-events").start()
+        return EventSubscription(active, connection)
     }
 
     fun getAttention(baseUrl: String, deviceToken: String?, callback: (Result<List<AttentionItem>>) -> Unit) {
@@ -1112,10 +1150,11 @@ object GatewayClient {
     }
 
     private fun parseAgentRun(payload: JSONObject) = AgentRun(
-        id=payload.getString("id"), parentRunId=payload.optString("parent_run_id").takeIf { it.isNotBlank() && it != "null" },
+        id=payload.getString("id"), taskId=payload.optString("task_id").takeIf { it.isNotBlank() && it != "null" },
+        parentRunId=payload.optString("parent_run_id").takeIf { it.isNotBlank() && it != "null" },
         role=payload.optString("role"), objective=payload.optString("objective"), status=payload.optString("status"),
         model=payload.optString("model"), sandbox=payload.optString("sandbox"), currentActivity=payload.optString("current_activity"),
-        resultSummary=payload.optString("result_summary"), error=payload.optString("error"),
+        resultSummary=payload.optString("result_summary"), error=payload.optString("error"), updatedAt=payload.optString("updated_at"),
     )
 
     private fun decideUpdateProposalBlocking(baseUrl: String, updateId: String, approve: Boolean, deviceToken: String?): UpdateProposal {

@@ -29,6 +29,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/health", get(health::health))
         .route("/v1/activity", get(activity::list))
         .route("/v1/agents/runs", get(agents::list).post(agents::create))
+        .route("/v1/agents/events", get(agents::events))
         .route("/v1/agents/runs/{run_id}", get(agents::get))
         .route("/v1/agents/runs/{run_id}/cancel", post(agents::cancel))
         .route(

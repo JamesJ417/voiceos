@@ -109,6 +109,7 @@ const STORAGE = {
   session: "voiceos.web.session-id",
   speechRate: "voiceos.web.speech-rate",
   eventCursor: "voiceos.web.event-cursor",
+  agentEventCursor: "voiceos.web.agent-event-cursor",
 };
 
 const suggestedGateway = "https://voiceos-rig.example.ts.net";
@@ -475,6 +476,47 @@ export default function Home() {
   useEffect(() => {
     if (!gateway || !token) return;
     const controller = new AbortController();
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    const connect = async () => {
+      try {
+        const after = Number(localStorage.getItem(STORAGE.agentEventCursor) ?? "0");
+        const response = await fetch(`${gateway}/v1/agents/events?after=${Number.isFinite(after) ? after : 0}`, {
+          headers: { Accept: "text/event-stream", Authorization: `Bearer ${token}` },
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok || !response.body) throw new Error(`Agent event stream HTTP ${response.status}`);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (!stopped) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split("\n\n");
+          buffer = frames.pop() ?? "";
+          for (const frame of frames) {
+            const id = frame.split("\n").find(line=>line.startsWith("id:"))?.slice(3).trim();
+            const eventName = frame.split("\n").find(line=>line.startsWith("event:"))?.slice(6).trim();
+            if (id) localStorage.setItem(STORAGE.agentEventCursor, id);
+            if (eventName?.startsWith("agent.")) void loadAgentRuns();
+          }
+        }
+        if (!stopped) reconnectTimer = setTimeout(()=>void connect(), 2000);
+      } catch (error) {
+        if (!stopped && !(error instanceof DOMException && error.name === "AbortError")) {
+          reconnectTimer = setTimeout(()=>void connect(), 2000);
+        }
+      }
+    };
+    void connect();
+    return ()=>{ stopped=true; controller.abort(); if(reconnectTimer) clearTimeout(reconnectTimer); };
+  }, [gateway, token, loadAgentRuns]);
+
+  useEffect(() => {
+    if (!gateway || !token) return;
+    const controller = new AbortController();
     let stopped = false;
     const connect = async () => {
       try {
@@ -799,6 +841,8 @@ export default function Home() {
               <input ref={fileInput} className="visually-hidden" type="file" accept=".txt,.md,.json,.csv,text/plain,text/markdown,application/json,text/csv" onChange={(event) => void uploadFile(event)} />
             </section>
 
+            <AgentLivePanel runs={agentRuns} onViewAll={()=>setView("system")} />
+
             <ProviderPanel providers={providers} active={health.language_model} />
             <HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} />
           </div>
@@ -825,6 +869,15 @@ function AgentActivityPanel({ runs, onRefresh, onCancel }: { runs:AgentRun[]; on
   const roots = runs.filter(run=>!run.parent_run_id);
   const active = runs.filter(run=>!["completed","failed","cancelled"].includes(run.status)).length;
   return <section className="agent-runs-panel panel wide-panel"><div className="panel-heading"><div><p className="kicker">Codex execution fabric</p><h2>VIC agent work</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><p className="proposal-intro">{active ? `${active} agent run${active===1?" is":"s are"} active.` : "No agents are working right now."} Every coordinator and subagent remains attached to its task and evidence trail.</p><div className="agent-run-list">{roots.length ? roots.map(root=>{const children=runs.filter(run=>run.parent_run_id===root.id); const cancellable=!["completed","failed","cancelled"].includes(root.status); return <article className="agent-run-card" key={root.id}><header><div><span className={`agent-status status-${root.status}`}>{root.status.replaceAll("_"," ")}</span><h3>{root.objective}</h3></div>{cancellable&&<button className="deny" onClick={()=>onCancel(root)}>Stop</button>}</header><p>{root.current_activity||root.result_summary||root.error||"Waiting for Codex supervisor"}</p><footer><span>{root.role}</span><span>{root.model}</span><span>{root.sandbox}</span><span>{children.length} subagent{children.length===1?"":"s"}</span></footer>{children.length>0&&<div className="agent-children">{children.map(child=><div key={child.id}><span className={`agent-status status-${child.status}`}>{child.status}</span><strong>{child.role}</strong><p>{child.current_activity||child.result_summary||child.objective}</p></div>)}</div>}</article>}) : <EmptyState text="Ask VIC to delegate a bounded task to Codex and its work will appear here." />}</div></section>;
+}
+
+function AgentLivePanel({ runs, onViewAll }: { runs:AgentRun[]; onViewAll:()=>void }) {
+  const terminal=["completed","failed","cancelled"];
+  const roots=runs.filter(run=>!run.parent_run_id);
+  const activeRoots=roots.filter(run=>!terminal.includes(run.status));
+  const visible=[...activeRoots,...roots.filter(run=>terminal.includes(run.status)).slice(0,2)].filter((run,index,items)=>items.findIndex(item=>item.id===run.id)===index);
+  const active=runs.filter(run=>!terminal.includes(run.status)).length;
+  return <section className="agent-live-home panel"><div className="panel-heading"><div><p className="kicker">Live Codex execution</p><h2>VIC agent work</h2></div><span className={`provider-state ${active?"green":"cyan"}`}>{active?`${active} active`:"Idle"}</span></div><p className="proposal-intro">{active?"Coordinator and subagent progress updates as it happens.":"Recent agent results remain available here."}</p><div className="agent-run-list">{visible.length?visible.map(root=>{const children=runs.filter(run=>run.parent_run_id===root.id);return <article className="agent-run-card compact" key={root.id}><header><div><span className={`agent-status status-${root.status}`}>{terminal.includes(root.status)?"result":"live"} · {root.status}</span><h3>{root.objective}</h3></div></header><p>{root.error||root.result_summary||root.current_activity||"Waiting for Codex supervisor"}</p>{children.length>0&&<div className="agent-children">{children.map(child=><div key={child.id}><span className={`agent-status status-${child.status}`}>{child.status}</span><strong>{child.role}</strong><p>{child.error||child.result_summary||child.current_activity||child.objective}</p></div>)}</div>}</article>}):<EmptyState text="When VIC delegates work, the coordinator and its subagents will appear here." />}</div><button className="secondary-button" onClick={onViewAll}>View all agent activity</button></section>;
 }
 
 function SettingsDialog({ gateway, enrollmentCode, setEnrollmentCode, onSaveGateway, onEnroll, onClose, hasToken, onForget }: { gateway: string; enrollmentCode: string; setEnrollmentCode: (value: string) => void; onSaveGateway: (value: string) => void; onEnroll: (event: FormEvent) => void; onClose: () => void; hasToken: boolean; onForget: () => void }) {

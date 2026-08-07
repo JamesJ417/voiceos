@@ -8,6 +8,42 @@ use crate::{AgentRunProgressUpdate, AgentRunRecord, ConversationStore, StoreErro
 const MAX_OBJECTIVE_CHARS: usize = 16_384;
 
 impl ConversationStore {
+    pub fn agent_events_after(
+        &self,
+        owner_id: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<crate::ExecutionEvent>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT event_id,owner_id,stream_id,event_type,actor,payload_json,occurred_at FROM execution_events WHERE owner_id=?1 AND event_id>?2 AND event_type LIKE 'agent.%' ORDER BY event_id ASC LIMIT ?3",
+        )?;
+        statement
+            .query_map(
+                params![owner_id.trim(), after.max(0), limit.clamp(1, 500)],
+                |row| {
+                    let payload: String = row.get(5)?;
+                    Ok(crate::ExecutionEvent {
+                        id: row.get(0)?,
+                        owner_id: row.get(1)?,
+                        stream_id: row.get(2)?,
+                        event_type: row.get(3)?,
+                        actor: row.get(4)?,
+                        payload: serde_json::from_str(&payload).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                payload.len(),
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        occurred_at: row.get(6)?,
+                    })
+                },
+            )?
+            .map(|row| row.map_err(StoreError::from))
+            .collect()
+    }
+
     pub fn claim_next_agent_run(
         &self,
         owner_id: &str,
@@ -784,5 +820,39 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn agent_event_cursor_is_ordered_and_excludes_other_activity() {
+        let store = ConversationStore::in_memory().unwrap();
+        store
+            .append_execution_event("owner", "other", "task.changed", "vic", json!({}))
+            .unwrap();
+        let first = store
+            .append_execution_event(
+                "owner",
+                "run",
+                "agent.run.running",
+                "supervisor",
+                json!({"step":1}),
+            )
+            .unwrap();
+        let second = store
+            .append_execution_event(
+                "owner",
+                "run",
+                "agent.plan.updated",
+                "supervisor",
+                json!({"step":2}),
+            )
+            .unwrap();
+        let initial = store.agent_events_after("owner", 0, 10).unwrap();
+        assert_eq!(
+            initial.iter().map(|event| event.id).collect::<Vec<_>>(),
+            vec![first.id, second.id]
+        );
+        let resumed = store.agent_events_after("owner", first.id, 10).unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].id, second.id);
     }
 }

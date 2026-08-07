@@ -66,6 +66,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var adminStatusView: TextView
     private lateinit var agentRunStatusView: TextView
     private lateinit var agentRunContainer: LinearLayout
+    private lateinit var homeAgentRunStatusView: TextView
+    private lateinit var homeAgentRunContainer: LinearLayout
     private lateinit var sleepStatusView: TextView
     private lateinit var sleepReportView: TextView
     private lateinit var doctrineStatusView: TextView
@@ -119,6 +121,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var failedTranscript: String? = null
     private var pendingApproval: ApprovalRequest? = null
     private var eventSubscription: EventSubscription? = null
+    private var agentEventSubscription: EventSubscription? = null
     private var artifactEventSubscription: EventSubscription? = null
     private var artifactRenderer: PdfRenderer? = null
     private var artifactDescriptor: ParcelFileDescriptor? = null
@@ -255,6 +258,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         renderState(VoiceState.READY, "Ready")
         handleEnrollment(enrollment)
         startSharedEventStream()
+        startAgentEventStream()
+        loadAgentRuns()
         startArtifactEventStream()
         DailyCheckinScheduler.schedule(this)
         VICWakeService.ensureStartedIfEnabled(this)
@@ -330,6 +335,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         requestGeneration += 1
         eventSubscription?.close()
         eventSubscription = null
+        agentEventSubscription?.close()
+        agentEventSubscription = null
         artifactEventSubscription?.close()
         artifactEventSubscription = null
         artifactRenderer?.close()
@@ -626,6 +633,41 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         conversationActions.addView(retryButton, weightedButton().apply { marginStart = dp(6) })
         conversationPanel.addView(conversationActions, fullWidthWrap().apply { topMargin = dp(12) })
         homePage.addView(conversationPanel, fullWidthWrap().apply { topMargin = dp(14) })
+
+        val agentPanel = panel(17)
+        val agentHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        agentHeader.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(kicker("Live Codex execution"))
+            addView(heading("VIC agent work", 22f).apply { setPadding(0, dp(5), 0, 0) })
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        agentHeader.addView(TextView(this).apply {
+            text = "LIVE"
+            textSize = 9f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(CarbonPalette.green)
+            gravity = Gravity.CENTER
+            background = carbonControl(this@MainActivity, CarbonPalette.green)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+        })
+        agentPanel.addView(agentHeader, fullWidthWrap())
+        homeAgentRunStatusView = TextView(this).apply {
+            text = "Checking coordinator and subagent activity..."
+            textSize = 13f
+            setTextColor(CarbonPalette.muted)
+            setPadding(0, dp(10), 0, 0)
+        }
+        agentPanel.addView(homeAgentRunStatusView, fullWidthWrap())
+        homeAgentRunContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        agentPanel.addView(homeAgentRunContainer, fullWidthWrap().apply { topMargin = dp(6) })
+        agentPanel.addView(
+            secondaryButton("VIEW ALL AGENT ACTIVITY") { showPage(AppPage.SYSTEM) },
+            fullWidthWrap().apply { topMargin = dp(12) },
+        )
+        homePage.addView(agentPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
         val approvals = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -1241,6 +1283,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         "approval.decided" -> pendingApproval = null
                         "status.changed" -> checkGatewayHealth(justEnrolled = false)
                         "memory.sleep.completed", "memory.sleep.action" -> if (currentPage == AppPage.SYSTEM) loadSleepMemory()
+                        "agent.run.updated", "agent.run.queued", "agent.run.starting", "agent.run.running",
+                        "agent.run.completed", "agent.run.failed", "agent.run.cancelled",
+                        "agent.plan.updated", "agent.command.updated", "agent.file.changed",
+                        "agent.subagent.updated" -> loadAgentRuns()
                     }
                 }
             },
@@ -1252,6 +1298,37 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             { if (!isFinishing && !isDestroyed) startSharedEventStream() },
                             2_000,
                         )
+                    }
+                }
+            },
+        )
+    }
+
+    private fun startAgentEventStream() {
+        val token = DeviceCredentials.token(this) ?: return
+        agentEventSubscription?.close()
+        val preferences = getSharedPreferences("voiceos_agent_events", MODE_PRIVATE)
+        agentEventSubscription = GatewayClient.streamAgentEvents(
+            GatewaySettings.baseUrl(this),
+            token,
+            preferences.getLong("cursor", 0),
+            onEvent = { event ->
+                preferences.edit().putLong("cursor", event.id).apply()
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) loadAgentRuns()
+                }
+            },
+            onClosed = { error ->
+                if (error != null && !isFinishing && !isDestroyed) {
+                    runOnUiThread {
+                        if (::homeAgentRunStatusView.isInitialized) {
+                            homeAgentRunStatusView.text = "Live agent sync reconnecting..."
+                            homeAgentRunStatusView.setTextColor(CarbonPalette.amber)
+                            homeAgentRunStatusView.postDelayed(
+                                { if (!isFinishing && !isDestroyed) startAgentEventStream() },
+                                2_000,
+                            )
+                        }
                     }
                 }
             },
@@ -1375,6 +1452,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             credential.deviceToken,
                         )
                         startSharedEventStream()
+                        startAgentEventStream()
+                        loadAgentRuns()
                         startVicOutreachConnection()
                         checkGatewayHealth(justEnrolled = true)
                     },
@@ -1637,38 +1716,103 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun loadAgentRuns() {
-        if (!::agentRunContainer.isInitialized) return
-        agentRunStatusView.text = "Loading coordinators and subagents..."
+        if (!::agentRunContainer.isInitialized || !::homeAgentRunContainer.isInitialized) return
         GatewayClient.getAgentRuns(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
             runOnUiThread {
-                agentRunContainer.removeAllViews()
                 result.fold(onSuccess = { runs ->
                     val active = runs.count { it.status !in setOf("completed", "failed", "cancelled") }
-                    agentRunStatusView.text = if (active == 0) "No Codex agents are working right now." else "$active agent run${if (active == 1) " is" else "s are"} active."
                     val roots = runs.filter { it.parentRunId == null }
-                    roots.forEach { run ->
-                        val children = runs.filter { it.parentRunId == run.id }
-                        val card = taskPanel(14).apply {
-                            addView(this@MainActivity.carbonKicker("${run.status}  •  ${run.role}"), fullWidthWrap())
-                            addView(taskHeading(run.objective, 18f), fullWidthWrap().apply { topMargin = dp(5) })
-                            addView(TextView(this@MainActivity).apply {
-                                text = run.currentActivity.ifBlank { run.resultSummary.ifBlank { run.error.ifBlank { "Waiting for Codex supervisor" } } } +
-                                    "\n${run.model}  •  ${run.sandbox}  •  ${children.size} subagent${if (children.size == 1) "" else "s"}"
-                                textSize = 12f; setTextColor(CarbonPalette.white); setPadding(0, dp(9), 0, 0)
-                            }, fullWidthWrap())
-                            children.forEach { child -> addView(TextView(this@MainActivity).apply {
-                                text = "↳ ${child.role.uppercase(Locale.US)}  ${child.status}\n${child.currentActivity.ifBlank { child.resultSummary.ifBlank { child.objective } }}"
-                                textSize = 12f; setTextColor(CarbonPalette.muted); setPadding(dp(10), dp(9), 0, 0)
-                            }, fullWidthWrap()) }
-                            if (run.status !in setOf("completed", "failed", "cancelled")) addView(secondaryButton("STOP RUN") { cancelAgentRun(run) }, fullWidthWrap().apply { topMargin = dp(10) })
-                        }
-                        agentRunContainer.addView(card, fullWidthWrap().apply { topMargin = dp(8) })
+                    val summary = if (active == 0) {
+                        "No Codex agents are working. Recent results remain below."
+                    } else {
+                        "$active coordinator/subagent run${if (active == 1) " is" else "s are"} active and updating live."
                     }
+                    agentRunStatusView.text = summary
+                    homeAgentRunStatusView.text = summary
+                    val color = if (active > 0) CarbonPalette.green else CarbonPalette.muted
+                    agentRunStatusView.setTextColor(color)
+                    homeAgentRunStatusView.setTextColor(color)
+                    renderAgentRuns(agentRunContainer, roots, runs, compact = false)
+                    val activeRoots = roots.filter { it.status !in setOf("completed", "failed", "cancelled") }
+                    val recentResults = roots.filter { it.status in setOf("completed", "failed", "cancelled") }.take(2)
+                    renderAgentRuns(
+                        homeAgentRunContainer,
+                        (activeRoots + recentResults).distinctBy { it.id },
+                        runs,
+                        compact = true,
+                    )
                 }, onFailure = { error ->
-                    agentRunStatusView.text = "Agent activity unavailable: ${error.message.orEmpty()}"
+                    val message = "Agent activity unavailable: ${error.message.orEmpty()}"
+                    agentRunStatusView.text = message
+                    homeAgentRunStatusView.text = message
                     agentRunStatusView.setTextColor(CarbonPalette.red)
+                    homeAgentRunStatusView.setTextColor(CarbonPalette.red)
                 })
             }
+        }
+    }
+
+    private fun renderAgentRuns(
+        container: LinearLayout,
+        roots: List<AgentRun>,
+        allRuns: List<AgentRun>,
+        compact: Boolean,
+    ) {
+        container.removeAllViews()
+        if (roots.isEmpty()) {
+            container.addView(TextView(this).apply {
+                text = "When VIC delegates work to Codex, the coordinator and every subagent will appear here."
+                textSize = 12f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(8), 0, 0)
+            }, fullWidthWrap())
+            return
+        }
+        roots.forEach { run ->
+            val children = allRuns.filter { it.parentRunId == run.id }
+            val terminal = run.status in setOf("completed", "failed", "cancelled")
+            val detail = when {
+                run.error.isNotBlank() -> "FAILED\n${run.error}"
+                run.resultSummary.isNotBlank() -> "RESULT\n${run.resultSummary}"
+                run.currentActivity.isNotBlank() -> run.currentActivity
+                else -> "Waiting for Codex supervisor"
+            }
+            val card = taskPanel(if (compact) 12 else 14).apply {
+                addView(
+                    this@MainActivity.carbonKicker("${if (terminal) "RESULT" else "LIVE"}  •  ${run.status}  •  ${run.role}"),
+                    fullWidthWrap(),
+                )
+                addView(taskHeading(run.objective, if (compact) 16f else 18f), fullWidthWrap().apply { topMargin = dp(5) })
+                addView(TextView(this@MainActivity).apply {
+                    text = detail
+                    textSize = 12f
+                    setTextColor(if (run.error.isNotBlank()) CarbonPalette.red else CarbonPalette.white)
+                    setPadding(0, dp(8), 0, 0)
+                    maxLines = if (compact) 5 else Int.MAX_VALUE
+                }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "${run.model}  •  ${run.sandbox}  •  ${children.size} subagent${if (children.size == 1) "" else "s"}"
+                    textSize = 10f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(7), 0, 0)
+                }, fullWidthWrap())
+                children.forEach { child ->
+                    val childDetail = child.currentActivity.ifBlank {
+                        child.resultSummary.ifBlank { child.error.ifBlank { child.objective } }
+                    }
+                    addView(TextView(this@MainActivity).apply {
+                        text = "↳ ${child.role.uppercase(Locale.US)}  ${child.status}\n$childDetail"
+                        textSize = 11f
+                        setTextColor(if (child.error.isNotBlank()) CarbonPalette.red else CarbonPalette.muted)
+                        setPadding(dp(10), dp(8), 0, 0)
+                        maxLines = if (compact) 4 else Int.MAX_VALUE
+                    }, fullWidthWrap())
+                }
+                if (!terminal) {
+                    addView(secondaryButton("STOP RUN") { cancelAgentRun(run) }, fullWidthWrap().apply { topMargin = dp(10) })
+                }
+            }
+            container.addView(card, fullWidthWrap().apply { topMargin = dp(8) })
         }
     }
 
