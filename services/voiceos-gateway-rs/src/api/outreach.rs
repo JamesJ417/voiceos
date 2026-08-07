@@ -3,6 +3,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use voiceos_core::OutreachPolicyUpdate;
 
 use super::error::{ApiResult, api_error};
 use crate::state::AppState;
@@ -54,6 +55,19 @@ pub(crate) async fn policy(State(state): State<AppState>) -> ApiResult<Json<Valu
     let owner = state.primary_owner_id.clone();
     let store = state.store.clone();
     let policy = tokio::task::spawn_blocking(move || store.outreach_policy(&owner))
+        .await
+        .map_err(internal_join)?
+        .map_err(store_error)?;
+    Ok(Json(json!({"policy": policy})))
+}
+
+pub(crate) async fn update_policy(
+    State(state): State<AppState>,
+    Json(update): Json<OutreachPolicyUpdate>,
+) -> ApiResult<Json<Value>> {
+    let owner = state.primary_owner_id.clone();
+    let store = state.store.clone();
+    let policy = tokio::task::spawn_blocking(move || store.update_outreach_policy(&owner, update))
         .await
         .map_err(internal_join)?
         .map_err(store_error)?;

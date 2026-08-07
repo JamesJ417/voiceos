@@ -1,5 +1,26 @@
-<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <gradient android:angle="315" android:startColor="#1B2226" android:endColor="#080A0B" />
-    <corners android:radius="22dp" />
-    <stroke android:width="1dp" android:color="#2C615A" />
-</shape>
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="315"
+                android:centerColor="#101719"
+                android:endColor="#050708"
+                android:startColor="#20282B" />
+            <corners android:radius="24dp" />
+        </shape>
+    </item>
+    <item
+        android:bottom="4dp"
+        android:left="4dp"
+        android:right="4dp"
+        android:top="4dp"
+        android:drawable="@drawable/widget_graphene_mesh" />
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#00000000" />
+            <corners android:radius="24dp" />
+            <stroke android:width="1dp" android:color="#7053E8D0" />
+        </shape>
+    </item>
+</layer-list>

@@ -88,6 +88,27 @@ The default gateway URL is `http://10.0.2.2:8787`, which reaches this laptop fro
 
 Cleartext HTTP is allowed only in the debug build for initial LAN testing. The production transport will require TLS over the private Tailscale network.
 
+### Hey VIC wake word
+
+The Pixel can run a local, opt-in **Hey VIC** detector from the System page.
+VoiceOS uses sherpa-onnx 1.13.4 with the 3.3M English GigaSpeech keyword model;
+the pinned AAR is downloaded and checksum-verified during the Android build.
+Pre-wake audio is processed only on the phone and is never sent to the gateway.
+
+When detected, the wake service releases its `AudioRecord` before starting
+Conversation Mode, which then claims the normal server-owned conversation
+floor. The service pauses while Conversation Mode owns the microphone, resumes
+after the conversation ends, and remains available while the screen is locked.
+Say **Goodbye VIC** to end the conversation. Android's microphone privacy
+indicator and the persistent **Hey VIC enabled** notification show whenever the
+local listener is active; either the System-page control or notification action
+disables it immediately.
+
+The current build packages ARM64 native libraries for the Pixel and other modern
+ARM64 Android devices. Wake detection uses an energy gate, keyword confidence
+threshold, eight-second cooldown, and conversation-state suppression to reduce
+false activations.
+
 ## Carbon Command interfaces
 
 The Pixel client and the touchscreen console share the Carbon Command visual
@@ -205,6 +226,24 @@ Run the agent-kernel contract tests with the rest of the Rust workspace:
 cargo test --workspace --all-targets
 ```
 
+## Managed files and PDF generation
+
+The Rust control plane owns an owner-scoped artifact catalog with immutable
+revisions, lifecycle progress, managed storage keys, byte counts, and SHA-256
+checksums. A background worker generates PDFs outside the request path and emits
+queued, progress, ready, and failed events over authenticated SSE. Preview and
+download revalidate the stored size and checksum before returning any bytes.
+
+Carbon Command on the web and Android expose the same Files catalog. Ready PDFs
+can be previewed without making storage paths public; Android renders the first
+page locally. VIC has typed `artifact.pdf.create`, `artifact.pdf.revise`,
+`artifact.search`, and `artifact.attach` intents, while Rust remains the catalog and
+task-attachment authority. Set `VOICEOS_ARTIFACT_DIR` to override the managed
+storage root; otherwise it is stored below `VOICEOS_RUST_DATA_DIR/artifacts`.
+The older task-progress `artifact.attach` action, which accepted an arbitrary
+URI, has been retired. Attachments now flow only through the managed artifact
+tool after the catalog reports the file ready and validates its checksum.
+
 ## Canonical ontology
 
 `services/voiceos-ontology` converts supported speech into typed canonical
@@ -213,10 +252,50 @@ resolution runs first. A configured structured local-model fallback can propose
 an interpretation, but the same catalog validates its intent, entities,
 arguments, units, ranges, and confidence before anything can use it.
 
+Catalog v2 distinguishes private knowledge documents (uploaded context under
+`knowledge.document.*`) from VIC-created managed files (under `artifact.*`). It
+also defines Artifact, Task, Person, Project, Skill, Email, and Location entities,
+task-progress intents, and a four-way validator decision: execute, confirm,
+clarify, or reject. Every structured tool call must receive and audit one of these
+versioned decisions before the broker can execute it; missing or unavailable
+validation fails closed.
+
 Original phrases, normalized phrases, interpretations, validation issues,
-corrections, and final decisions are stored in `ontology.sqlite3`. Learned
+corrections, catalog version, validator result, and final decisions are stored in
+`ontology.sqlite3`. v1 records migrate through compatibility aliases when read.
+Learned
 aliases are explicit and owner-scoped; approving “the mining box” as `gpu-rig`
 changes lookup data and never retrains a model.
+
+## Proactive review and outreach
+
+The gateway runs a durable changed-only VIC review loop every 15–30 minutes
+(20 minutes by default). It fingerprints tasks and task jobs, pending approvals,
+managed artifacts, private knowledge files, deterministic system health, and an
+optional owner-authorized email- and calendar-signal adapter. Unchanged sources produce no new
+work and no model call. Email signals invoke the optional interpretation callback
+only when the adapter marks them `requires_interpretation`.
+
+Authoritative task and approval events trigger the same scan immediately. Failed
+work, open blockers, pending approvals, degraded health, and deadlines within 24
+hours become `needs_you` outreach. Routine changes enter a durable digest buffer
+and are combined into morning or evening summaries. The existing twelve-question
+planning flow receives one silent prompt at the configured daily planning time.
+
+`GET` and `POST /v1/outreach/policy` manage quiet hours, timezone, daily contact
+limit, cooldown, driving and do-not-disturb state, current location, planning and
+digest times, and scan cadence. Quiet hours, away/driving state, DND, cooldown,
+and daily limits hold contact rather than discarding it. Android uses a silent
+channel for ordinary/check-in updates; only `needs_you` uses VIC’s special sound.
+
+The attention engine is governed by owner-scoped automation rules available at
+`GET` and `POST /v1/automations`. Every rule has a structured trigger, conditions,
+an allowlist of permitted actions, a rolling frequency limit, provenance evidence,
+and an `enabled` off switch. VoiceOS seeds rules for scheduled review, tasks/jobs,
+system conditions, approvals, email, calendar, documents, unanswered questions,
+daily planning, and digest delivery. Every execution emits `automation.executed`
+with the rule ID and evidence key. Disabling or rate-limiting a rule prevents that
+action even if the underlying attention signal exists.
 
 ## Next milestones
 

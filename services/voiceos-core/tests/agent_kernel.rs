@@ -1,7 +1,7 @@
 use rusqlite::{Connection, params};
 use serde_json::json;
 use tempfile::tempdir;
-use voiceos_core::ConversationStore;
+use voiceos_core::{AutomationFrequencyLimit, ConversationStore, OutreachPolicyUpdate};
 
 #[test]
 fn canonical_goal_task_job_artifact_and_event_records_are_owner_scoped() {
@@ -31,12 +31,27 @@ fn canonical_goal_task_job_artifact_and_event_records_are_owner_scoped() {
         )
         .unwrap();
     let artifact = store
-        .record_artifact(
+        .create_artifact(
             "owner-1",
             Some(&job.id),
+            Some(&task.id),
+            None,
             "test-report",
-            "voiceos://artifacts/test-report-1",
-            Some("abc123"),
+            "Test report",
+            "test-report.bin",
+            "application/octet-stream",
+            "Agent-kernel test report",
+            "voiceos-core",
+            json!({"source": "agent-kernel-test"}),
+        )
+        .unwrap();
+    let artifact = store
+        .complete_artifact(
+            "owner-1",
+            &artifact.id,
+            "tests/test-report.bin",
+            "abc123",
+            42,
         )
         .unwrap();
     let first = store
@@ -105,6 +120,71 @@ fn jobs_require_typed_capability_arrays_and_idempotency_keys() {
         store
             .create_job("owner", None, "job-1", json!(["system.health"]))
             .is_err()
+    );
+}
+
+#[test]
+fn managed_artifact_catalog_tracks_progress_checksum_search_and_revisions() {
+    let store = ConversationStore::in_memory().unwrap();
+    let first = store
+        .create_artifact(
+            "owner",
+            None,
+            None,
+            None,
+            "pdf",
+            "Recipe Cards",
+            "recipe-cards.pdf",
+            "application/pdf",
+            "Printable family recipe cards",
+            "vic",
+            json!({"source":"test"}),
+        )
+        .unwrap();
+    assert_eq!("queued", first.status);
+    store
+        .update_artifact_progress("owner", &first.id, "generating", 35)
+        .unwrap();
+    let ready = store
+        .complete_artifact("owner", &first.id, "ab/artifact.pdf", "deadbeef", 2048)
+        .unwrap();
+    assert_eq!("ready", ready.status);
+    assert_eq!(100, ready.progress_percent);
+    assert_eq!(1, ready.version);
+    assert_eq!(
+        1,
+        store
+            .list_artifacts("owner", Some("family recipe"), 10)
+            .unwrap()
+            .len()
+    );
+    assert!(
+        store
+            .artifact("another-owner", &first.id)
+            .unwrap()
+            .is_none()
+    );
+    let revision = store
+        .create_artifact(
+            "owner",
+            None,
+            None,
+            Some(&first.id),
+            "pdf",
+            "Recipe Cards",
+            "recipe-cards-v2.pdf",
+            "application/pdf",
+            "Revised recipe cards",
+            "vic",
+            json!({}),
+        )
+        .unwrap();
+    assert_eq!(2, revision.version);
+    let events = store.artifact_events_after("owner", 0, 20).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| event.event_type == "artifact.ready")
     );
 }
 
@@ -477,4 +557,197 @@ fn vic_outreach_is_durable_deduplicated_and_actionable() {
     let policy = store.outreach_policy("owner").unwrap();
     assert!(policy.enabled);
     assert_eq!(policy.max_checkins_per_day, 6);
+    assert_eq!(policy.scan_interval_minutes, 20);
+    let updated = store
+        .update_outreach_policy(
+            "owner",
+            OutreachPolicyUpdate {
+                do_not_disturb: Some(true),
+                current_location: Some("work".to_owned()),
+                daily_planning_time: Some("07:45".to_owned()),
+                scan_interval_minutes: Some(15),
+                ..OutreachPolicyUpdate::default()
+            },
+        )
+        .unwrap();
+    assert!(updated.do_not_disturb);
+    assert_eq!(updated.current_location, "work");
+    assert_eq!(updated.daily_planning_time, "07:45");
+    assert_eq!(updated.scan_interval_minutes, 15);
+    assert!(
+        store
+            .update_outreach_policy(
+                "owner",
+                OutreachPolicyUpdate {
+                    scan_interval_minutes: Some(5),
+                    ..OutreachPolicyUpdate::default()
+                },
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn attention_automations_are_owned_evidenced_rate_limited_and_disableable() {
+    let store = ConversationStore::in_memory().unwrap();
+    let defaults = store.ensure_default_attention_automations("owner").unwrap();
+    assert_eq!(11, defaults.len());
+    assert!(defaults.iter().all(|rule| {
+        rule.owner_id == "owner"
+            && rule.enabled
+            && rule.trigger.is_object()
+            && rule.conditions.is_object()
+            && !rule.permitted_actions.is_empty()
+            && rule.frequency_limit.max_runs > 0
+            && !rule.evidence.is_null()
+    }));
+    let repeated = store.ensure_default_attention_automations("owner").unwrap();
+    assert_eq!(
+        defaults.iter().map(|rule| &rule.id).collect::<Vec<_>>(),
+        repeated.iter().map(|rule| &rule.id).collect::<Vec<_>>()
+    );
+    let disabled = store
+        .set_automation_rule_enabled("owner", &defaults[0].id, false)
+        .unwrap()
+        .unwrap();
+    assert!(!disabled.enabled);
+    assert_eq!(
+        10,
+        store.automation_rules("owner", false, 100).unwrap().len()
+    );
+    assert!(
+        store
+            .create_automation_rule(
+                "owner",
+                "unsafe",
+                "Must be rejected",
+                json!({"kind": "event", "source": "email"}),
+                json!({}),
+                vec!["shell.execute".to_owned()],
+                AutomationFrequencyLimit {
+                    max_runs: 1,
+                    window_minutes: 60,
+                },
+                json!({"test": true}),
+                true,
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn attention_inbox_and_calendar_planner_are_owner_scoped_and_deterministic() {
+    let store = ConversationStore::in_memory().unwrap();
+    let task = store
+        .create_task(
+            "owner",
+            None,
+            None,
+            "Print recipe cards",
+            "Cards are printed",
+            60,
+        )
+        .unwrap();
+    store
+        .set_task_due_at("owner", &task.id, Some("2026-08-05T18:00:00Z"))
+        .unwrap();
+    store
+        .set_task_schedule(
+            "owner",
+            &task.id,
+            None,
+            Some("FREQ=WEEKLY"),
+            Some("work"),
+            10,
+            15,
+            Some("09:00"),
+        )
+        .unwrap();
+    store
+        .upsert_calendar_event(
+            "owner",
+            "meeting-1",
+            "Morning meeting",
+            "2026-08-05T09:00:00Z",
+            "2026-08-05T10:00:00Z",
+            Some("work"),
+            "confirmed",
+            "accepted",
+            None,
+            0,
+            0,
+            json!({"provider": "test"}),
+        )
+        .unwrap();
+    let item = store
+        .upsert_attention_item(
+            "owner",
+            "email",
+            "email-1",
+            "Recipe card quote",
+            "A vendor sent a quote.",
+            "important",
+            Some(&task.id),
+            "2026-08-05T08:00:00Z",
+            None,
+            true,
+            vec![
+                "summarize".to_owned(),
+                "prepare_reply".to_owned(),
+                "request_send_approval".to_owned(),
+            ],
+            json!({"message_id": "email-1"}),
+        )
+        .unwrap();
+    assert!(item.approval_required);
+    assert_eq!(
+        1,
+        store
+            .attention_items("owner", Some("open"), 20)
+            .unwrap()
+            .len()
+    );
+    let plan = store
+        .build_daily_work_plan(
+            "owner",
+            "2026-08-05T08:00:00Z",
+            "2026-08-05T17:00:00Z",
+            "work",
+        )
+        .unwrap();
+    assert_eq!(1, plan.blocks.len());
+    assert_eq!("2026-08-05T10:25:00+00:00", plan.blocks[0].start_at);
+    assert_eq!("work", plan.blocks[0].location.as_deref().unwrap());
+    assert!(
+        store
+            .attention_items("another-owner", None, 20)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn hermes_updates_are_inert_evidenced_and_approval_controlled() {
+    let store = ConversationStore::in_memory().unwrap();
+    let proposal = store.upsert_update_proposal(
+        "owner", "hermes-agent", "old", "new", "Release notes",
+        json!(["uv.lock"]), json!(["gateway.py"]), json!(["config.py"]),
+        json!({"changed":["planning/SKILL.md"],"activation":"quarantined_pending_voiceos_approval"}),
+        json!(["security.py"]), json!(["gateway","skill-control"]), "old",
+        Some("/var/lib/voiceos/update-candidates/hermes/new"),
+        json!({"production_changed":false}),
+    ).unwrap();
+    assert_eq!("discovered", proposal.status);
+    assert_eq!(false, proposal.evidence["production_changed"]);
+    let approved = store
+        .set_update_status("owner", &proposal.id, "approved", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!("approved", approved.status);
+    assert!(
+        store
+            .update_proposals("other", None, 20)
+            .unwrap()
+            .is_empty()
+    );
 }

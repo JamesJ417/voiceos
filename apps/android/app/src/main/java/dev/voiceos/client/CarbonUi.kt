@@ -8,10 +8,16 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.RectF
+import android.graphics.LinearGradient
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import java.util.Locale
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -21,7 +27,7 @@ object CarbonPalette {
     val surface = Color.rgb(18, 23, 26)
     val surfaceRaised = Color.rgb(24, 30, 34)
     val line = Color.rgb(42, 52, 56)
-    val teal = Color.rgb(53, 224, 193)
+    val teal = Color.rgb(67, 230, 201)
     val cyan = Color.rgb(69, 207, 228)
     val green = Color.rgb(74, 222, 128)
     val amber = Color.rgb(245, 185, 66)
@@ -31,24 +37,62 @@ object CarbonPalette {
     val muted = Color.rgb(141, 155, 157)
 }
 
+fun Context.carbonPanelLayout(padding: Int = 20): LinearLayout = LinearLayout(this).apply {
+    orientation = LinearLayout.VERTICAL
+    val pixels = (padding * resources.displayMetrics.density).toInt()
+    setPadding(pixels, pixels, pixels, pixels)
+    background = carbonPanel(this@carbonPanelLayout)
+}
+
+fun Context.carbonKicker(value: String): TextView = TextView(this).apply {
+    text = value.uppercase(Locale.US)
+    textSize = 10f
+    typeface = Typeface.DEFAULT_BOLD
+    letterSpacing = 0.17f
+    setTextColor(CarbonPalette.teal)
+}
+
+fun Context.carbonHeading(value: String, size: Float = 24f): TextView = TextView(this).apply {
+    text = value
+    textSize = size
+    typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+    setTextColor(CarbonPalette.white)
+}
+
+fun fullWidthWrapLayout(): LinearLayout.LayoutParams = LinearLayout.LayoutParams(
+    ViewGroup.LayoutParams.MATCH_PARENT,
+    ViewGroup.LayoutParams.WRAP_CONTENT,
+)
+
 class CarbonBackgroundDrawable(context: Context) : Drawable() {
     private val density = context.resources.displayMetrics.density
-    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = CarbonPalette.black }
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val weaveDark = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(42, 255, 255, 255)
+        color = Color.argb(24, 255, 255, 255)
         strokeWidth = density * 0.45f
     }
     private val weaveTeal = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(18, 53, 224, 193)
+        color = Color.argb(24, 67, 230, 201)
         strokeWidth = density * 0.55f
     }
     private val hexPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(34, 107, 130, 134)
+        color = Color.argb(30, 96, 126, 126)
         style = Paint.Style.STROKE
         strokeWidth = density * 0.7f
     }
+    private val nodePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(38, 67, 230, 201)
+        style = Paint.Style.FILL
+    }
 
     override fun draw(canvas: Canvas) {
+        fill.shader = LinearGradient(
+            bounds.left.toFloat(), bounds.top.toFloat(),
+            bounds.right.toFloat(), bounds.bottom.toFloat(),
+            intArrayOf(Color.rgb(24, 32, 35), CarbonPalette.black, Color.rgb(7, 13, 14)),
+            floatArrayOf(0f, 0.48f, 1f),
+            Shader.TileMode.CLAMP,
+        )
         canvas.drawRect(bounds, fill)
         val weaveStep = density * 11f
         var diagonal = -bounds.height().toFloat()
@@ -58,16 +102,27 @@ class CarbonBackgroundDrawable(context: Context) : Drawable() {
             diagonal += weaveStep
         }
 
-        val radius = density * 42f
+        val radius = density * 31f
         val hexWidth = radius * 1.732f
         val rowHeight = radius * 1.5f
         var row = -1
         var centerY = -radius
         while (centerY < bounds.height() + radius) {
             var centerX = if (row % 2 == 0) 0f else hexWidth / 2f
+            var column = 0
             while (centerX < bounds.width() + radius) {
                 canvas.drawPath(hexPath(centerX, centerY, radius), hexPaint)
+                if ((row + column) % 4 == 0) {
+                    val angle = Math.toRadians(-30.0)
+                    canvas.drawCircle(
+                        centerX + radius * cos(angle).toFloat(),
+                        centerY + radius * sin(angle).toFloat(),
+                        density * 1.35f,
+                        nodePaint,
+                    )
+                }
                 centerX += hexWidth
+                column += 1
             }
             row += 1
             centerY += rowHeight

@@ -15,6 +15,10 @@ class ConversationCommandsTest {
             ConversationCommands.Action.STOP,
             ConversationCommands.action("That's all!"),
         )
+        assertEquals(
+            ConversationCommands.Action.STOP,
+            ConversationCommands.action("Okay, goodbye VIC."),
+        )
     }
 
     @Test

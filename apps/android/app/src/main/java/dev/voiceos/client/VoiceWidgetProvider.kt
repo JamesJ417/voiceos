@@ -77,15 +77,15 @@ class VoiceWidgetProvider : AppWidgetProvider() {
                     }
                 }
             return RemoteViews(context.packageName, R.layout.voice_widget).apply {
-                setTextViewText(R.id.widget_status, "VoiceOS • $status")
+                setTextViewText(R.id.widget_status, "VIC  //  ${status.uppercase()}")
                 setTextViewText(R.id.widget_gateway, GatewaySettings.displayName(context))
                 setTextViewText(
                     R.id.widget_task_summary,
-                    if (tasks.isEmpty()) "TASK PROGRESS • CLEAR" else {
+                    if (tasks.isEmpty()) "MISSION QUEUE  //  CLEAR" else {
                         val needsMe = tasks.count { it.progressLane == "needs_me" }
                         val vic = tasks.count { it.progressLane == "vic_working" }
                         val review = tasks.count { it.progressLane == "review" }
-                        "NEEDS ME $needsMe • VIC $vic • REVIEW $review"
+                        "ME $needsMe  //  VIC $vic  //  REVIEW $review"
                     },
                 )
                 setOnClickPendingIntent(R.id.widget_talk, activityIntent(context, MainActivity.ACTION_WIDGET_TALK, 101))
@@ -116,7 +116,7 @@ class VoiceWidgetProvider : AppWidgetProvider() {
                             "needs_me" -> task.nextUserAction.ifBlank { "Your action is needed" }
                             "vic_working" -> task.nextVicAction.ifBlank { "VIC is working" }
                             "review" -> task.nextUserAction.ifBlank { "Ready for your review" }
-                            else -> "${task.completedSteps}/${task.totalSteps} steps • ${task.openBlockers} blockers"
+                            else -> "${task.completedSteps}/${task.totalSteps} steps  //  ${task.openBlockers} blockers"
                         },
                     )
                     views.setOnClickPendingIntent(rows[index], openTaskIntent(context, task.id))

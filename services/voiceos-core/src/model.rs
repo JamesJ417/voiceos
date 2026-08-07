@@ -134,6 +134,7 @@ pub struct TaskRecord {
     pub title: String,
     pub observable_outcome: String,
     pub estimated_minutes: u32,
+    pub due_at: Option<String>,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
@@ -244,7 +245,32 @@ pub struct OutreachPolicy {
     pub driving_mode: bool,
     pub spoken_headphones_only: bool,
     pub daily_digest_enabled: bool,
+    pub do_not_disturb: bool,
+    pub current_location: String,
+    pub daily_planning_time: String,
+    pub morning_digest_time: String,
+    pub evening_digest_time: String,
+    pub scan_interval_minutes: u32,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutreachPolicyUpdate {
+    pub enabled: Option<bool>,
+    pub quiet_hours_start: Option<String>,
+    pub quiet_hours_end: Option<String>,
+    pub timezone: Option<String>,
+    pub max_checkins_per_day: Option<u32>,
+    pub cooldown_minutes: Option<u32>,
+    pub driving_mode: Option<bool>,
+    pub spoken_headphones_only: Option<bool>,
+    pub daily_digest_enabled: Option<bool>,
+    pub do_not_disturb: Option<bool>,
+    pub current_location: Option<String>,
+    pub daily_planning_time: Option<String>,
+    pub morning_digest_time: Option<String>,
+    pub evening_digest_time: Option<String>,
+    pub scan_interval_minutes: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,6 +283,40 @@ pub struct JobRecord {
     pub capability_scope: serde_json::Value,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentRunRecord {
+    pub id: String,
+    pub owner_id: String,
+    pub task_id: Option<String>,
+    pub parent_run_id: Option<String>,
+    pub idempotency_key: String,
+    pub role: String,
+    pub objective: String,
+    pub status: String,
+    pub provider: String,
+    pub model: String,
+    pub reasoning_effort: String,
+    pub sandbox: String,
+    pub capability_scope: serde_json::Value,
+    pub codex_thread_id: Option<String>,
+    pub current_activity: Option<String>,
+    pub result_summary: Option<String>,
+    pub error: Option<String>,
+    pub requested_by: String,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentRunProgressUpdate {
+    pub event_kind: String,
+    pub activity: String,
+    pub evidence: serde_json::Value,
+    pub codex_thread_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -344,14 +404,149 @@ pub struct AutomationProposal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutomationFrequencyLimit {
+    pub max_runs: u32,
+    pub window_minutes: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AutomationRule {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+    pub trigger: serde_json::Value,
+    pub conditions: serde_json::Value,
+    pub permitted_actions: Vec<String>,
+    pub frequency_limit: AutomationFrequencyLimit,
+    pub evidence: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AttentionItem {
+    pub id: String,
+    pub owner_id: String,
+    pub category: String,
+    pub source_id: String,
+    pub title: String,
+    pub summary: String,
+    pub urgency: String,
+    pub status: String,
+    pub task_id: Option<String>,
+    pub occurred_at: String,
+    pub due_at: Option<String>,
+    pub approval_required: bool,
+    pub available_actions: Vec<String>,
+    pub evidence: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSchedule {
+    pub task_id: String,
+    pub owner_id: String,
+    pub earliest_start_at: Option<String>,
+    pub recurrence_rule: Option<String>,
+    pub location: Option<String>,
+    pub preparation_minutes: u32,
+    pub travel_minutes: u32,
+    pub preferred_time: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CalendarEvent {
+    pub id: String,
+    pub owner_id: String,
+    pub source_id: String,
+    pub title: String,
+    pub start_at: String,
+    pub end_at: String,
+    pub location: Option<String>,
+    pub status: String,
+    pub response_status: String,
+    pub task_id: Option<String>,
+    pub preparation_minutes: u32,
+    pub travel_minutes: u32,
+    pub metadata: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlannedWorkBlock {
+    pub task_id: String,
+    pub title: String,
+    pub start_at: String,
+    pub end_at: String,
+    pub location: Option<String>,
+    pub preparation_minutes: u32,
+    pub travel_minutes: u32,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DailyWorkPlan {
+    pub owner_id: String,
+    pub date: String,
+    pub generated_at: String,
+    pub current_location: String,
+    pub blocks: Vec<PlannedWorkBlock>,
+    pub unscheduled_task_ids: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UpdateProposal {
+    pub id: String,
+    pub owner_id: String,
+    pub component: String,
+    pub current_version: String,
+    pub proposed_version: String,
+    pub status: String,
+    pub release_notes: String,
+    pub dependency_changes: serde_json::Value,
+    pub api_changes: serde_json::Value,
+    pub configuration_changes: serde_json::Value,
+    pub skill_changes: serde_json::Value,
+    pub security_changes: serde_json::Value,
+    pub affected_components: serde_json::Value,
+    pub rollback_version: String,
+    pub candidate_path: Option<String>,
+    pub evidence: serde_json::Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRecord {
     pub id: String,
     pub owner_id: String,
     pub job_id: Option<String>,
+    pub task_id: Option<String>,
+    pub parent_artifact_id: Option<String>,
     pub kind: String,
+    pub title: String,
+    pub filename: String,
+    pub media_type: String,
+    pub description: String,
+    pub status: String,
+    pub progress_percent: u32,
+    pub storage_key: Option<String>,
     pub uri: String,
     pub sha256: Option<String>,
+    pub byte_size: Option<u64>,
+    pub version: u32,
+    pub metadata: serde_json::Value,
+    pub error: Option<String>,
+    pub created_by: String,
     pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -275,6 +275,28 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
 @media (max-width: 900px) { .task-grid { grid-template-columns: 1fr; } }
 @media (max-width: 620px) { .task-rollups { grid-template-columns: repeat(2, 1fr); } }
 
+.files-panel { padding: 28px; overflow: visible; }
+.files-layout { display: grid; grid-template-columns: minmax(320px, .8fr) minmax(460px, 1.2fr); gap: 18px; margin-top: 22px; }
+.artifact-list { display: grid; align-content: start; gap: 12px; }
+.artifact-card { padding: 17px; border: 1px solid var(--line-soft); border-radius: 16px; background: rgba(5,8,9,.38); }
+.artifact-card.selected { border-color: rgba(53,224,193,.55); box-shadow: 0 0 24px rgba(53,224,193,.06); }
+.artifact-title { display: grid; grid-template-columns: auto 1fr auto; gap: 11px; align-items: center; }
+.artifact-title h3 { margin: 0 0 3px; font-size: 17px; }
+.artifact-title small, .pdf-preview small { color: var(--muted); }
+.artifact-icon { display: grid; place-items: center; width: 43px; height: 48px; color: var(--teal); border: 1px solid rgba(53,224,193,.35); border-radius: 10px; font-size: 10px; font-weight: 800; }
+.artifact-status { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .11em; }
+.artifact-status.ready { color: var(--green); }
+.artifact-status.failed, .artifact-error { color: var(--red); }
+.artifact-card > p { color: var(--muted); line-height: 1.5; }
+.artifact-progress { height: 5px; overflow: hidden; border-radius: 99px; background: var(--line-soft); }
+.artifact-progress i { display: block; height: 100%; background: var(--teal); transition: width .25s ease; }
+.artifact-card footer { display: flex; justify-content: space-between; margin-top: 12px; color: var(--muted); font-size: 10px; }
+.artifact-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 13px; }
+.pdf-preview { min-height: 680px; padding: 14px; border: 1px solid var(--line-soft); border-radius: 16px; background: #111719; }
+.pdf-preview > div:first-child { display: flex; justify-content: space-between; gap: 12px; padding: 4px 4px 13px; }
+.pdf-preview iframe { width: 100%; height: 620px; border: 0; border-radius: 10px; background: white; }
+@media (max-width: 1000px) { .files-layout { grid-template-columns: 1fr; } .pdf-preview { min-height: 560px; } .pdf-preview iframe { height: 500px; } }
+
 .skill-proposals-panel { grid-column: 1 / -1; padding: 28px; overflow: visible; }
 .proposal-intro { margin: 12px 0 0; color: var(--muted); line-height: 1.55; }
 .skill-proposal-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 20px; }
@@ -294,6 +316,20 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
 .skill-proposal-card details { margin-top: 12px; border: 1px solid var(--line-soft); border-radius: 11px; overflow: hidden; }
 .skill-proposal-card summary { padding: 11px 13px; color: var(--muted); cursor: pointer; font-size: 12px; }
 .skill-proposal-card pre { max-height: 280px; overflow: auto; margin: 0; padding: 14px; border-top: 1px solid var(--line-soft); color: #dce5e4; background: rgba(0,0,0,0.2); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; font-size: 11px; line-height: 1.55; }
+.agent-runs-panel { grid-column: 1 / -1; }
+.agent-live-home { grid-column: 1 / -1; }
+.agent-run-card.compact > p { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.agent-run-list { display: grid; gap: 14px; margin-top: 18px; }
+.agent-run-card { border: 1px solid var(--line-soft); border-radius: 14px; padding: 16px; background: rgba(5, 12, 13, .52); }
+.agent-run-card header, .agent-run-card footer { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.agent-run-card h3 { margin: 7px 0 0; font-size: 17px; }
+.agent-run-card footer { justify-content: flex-start; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
+.agent-status { display: inline-block; padding: 4px 8px; border-radius: 999px; color: var(--cyan); background: rgba(69,207,228,.12); text-transform: uppercase; font-size: 9px; letter-spacing: .08em; }
+.status-completed { color: var(--green); } .status-failed, .status-cancelled { color: var(--red); }
+.agent-children { margin-top: 14px; padding-left: 14px; border-left: 2px solid rgba(67,230,201,.28); display: grid; gap: 9px; }
+.agent-children div { padding: 10px 12px; border-radius: 10px; background: rgba(255,255,255,.025); }
+.agent-children strong { margin-left: 8px; font-size: 12px; text-transform: capitalize; }
+.agent-children p { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
 .proposal-actions { display: grid; grid-template-columns: 1fr 1.25fr; gap: 9px; margin-top: 15px; }
 .proposal-actions button { min-height: 47px; border-radius: 12px; cursor: pointer; font-weight: 720; }
 .proposal-actions .deny { color: #ff9ca4; border: 1px solid rgba(239,107,115,0.35); background: rgba(239,107,115,0.08); }

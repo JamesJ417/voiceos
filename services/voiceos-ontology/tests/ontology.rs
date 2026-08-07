@@ -5,6 +5,7 @@ use serde_json::json;
 use voiceos_ontology::{
     AliasInput, CanonicalRequest, Catalog, Confidence, DecisionStatus, EntityKind, IntentId,
     Interpreter, ModelCandidate, ModelFallback, OntologyStore, ResolutionSource,
+    ValidatorDisposition,
 };
 
 struct FixedFallback(ModelCandidate);
@@ -43,14 +44,156 @@ fn seeded_terms_cover_provider_memory_documents_health_services_and_approval() {
             "remember that my favorite color is amber",
             "memory.remember",
         ),
-        ("show my files", "document.list"),
+        ("show my files", "artifact.search"),
+        ("show my uploaded documents", "knowledge.document.list"),
         ("how much disk space is free", "system.disk.check"),
         ("is ollama running", "system.service.check"),
         ("approve", "approval.decide"),
     ];
     for (phrase, intent) in cases {
         let decision = interpreter.interpret("owner", phrase).unwrap();
-        assert_eq!(decision.interpretation.unwrap().intent.0, intent);
+        assert_eq!(
+            decision.interpretation.unwrap().intent.0,
+            intent,
+            "phrase: {phrase}"
+        );
+    }
+}
+
+#[test]
+fn catalog_v2_adds_operational_entity_kinds_and_migrates_v1_intents() {
+    let catalog = Catalog::seeded();
+    assert_eq!(catalog.version(), 2);
+    assert!(catalog.supports_version(1));
+    for kind in [
+        EntityKind::Artifact,
+        EntityKind::Task,
+        EntityKind::Person,
+        EntityKind::Project,
+        EntityKind::Skill,
+        EntityKind::Email,
+        EntityKind::Location,
+    ] {
+        assert!(catalog.entity_kinds().contains(&kind));
+    }
+    assert_eq!(
+        catalog.canonical_intent(&IntentId::from("document.list")).0,
+        "knowledge.document.list"
+    );
+}
+
+#[test]
+fn legacy_ontology_database_is_migrated_without_losing_compatibility() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy-ontology.sqlite3");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE ontology_interpretations (
+                interpretation_id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                original_phrase TEXT NOT NULL,
+                normalized_phrase TEXT NOT NULL,
+                interpretation_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                validation_json TEXT NOT NULL,
+                corrections_json TEXT NOT NULL,
+                final_decision TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+    drop(connection);
+
+    OntologyStore::open(&path).unwrap();
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let columns = connection
+        .prepare("PRAGMA table_info(ontology_interpretations)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(columns.contains(&"catalog_version".to_owned()));
+    assert!(columns.contains(&"validator_json".to_owned()));
+}
+
+#[test]
+fn alias_matching_respects_token_boundaries() {
+    let interpreter = interpreter();
+    let decision = interpreter
+        .interpret_deterministic("owner", "use resolution for this")
+        .unwrap();
+    assert!(decision.interpretation.is_none());
+    assert_eq!(
+        decision.validator.disposition,
+        ValidatorDisposition::AskClarifyingQuestion
+    );
+}
+
+#[test]
+fn structured_tools_must_receive_an_executable_ontology_decision() {
+    let interpreter = interpreter();
+    let valid = interpreter
+        .validate_tool(
+            "owner",
+            "artifact.pdf.create",
+            std::collections::BTreeMap::from([("title".to_owned(), json!("Recipe cards"))]),
+            1.0,
+            ResolutionSource::Deterministic,
+        )
+        .unwrap();
+    assert_eq!(valid.catalog_version, 2);
+    assert_eq!(valid.validator.disposition, ValidatorDisposition::Execute);
+
+    let incomplete = interpreter
+        .validate_tool(
+            "owner",
+            "artifact.pdf.create",
+            std::collections::BTreeMap::new(),
+            1.0,
+            ResolutionSource::Deterministic,
+        )
+        .unwrap();
+    assert_eq!(
+        incomplete.validator.disposition,
+        ValidatorDisposition::AskClarifyingQuestion
+    );
+
+    let unknown = interpreter
+        .validate_tool(
+            "owner",
+            "unregistered.tool",
+            std::collections::BTreeMap::new(),
+            1.0,
+            ResolutionSource::Deterministic,
+        )
+        .unwrap();
+    assert_eq!(unknown.validator.disposition, ValidatorDisposition::Reject);
+}
+
+#[test]
+fn actual_vic_transcripts_form_a_regression_corpus() {
+    let cases: Vec<serde_json::Value> =
+        serde_json::from_str(include_str!("fixtures/vic_transcripts.json")).unwrap();
+    let interpreter = interpreter();
+    for case in cases {
+        let phrase = case["phrase"].as_str().unwrap();
+        let decision = interpreter.interpret("owner", phrase).unwrap();
+        assert_eq!(
+            decision.interpretation.as_ref().unwrap().intent.0,
+            case["expected_intent"].as_str().unwrap(),
+            "phrase: {phrase}"
+        );
+        assert_eq!(
+            serde_json::to_value(decision.validator.disposition).unwrap(),
+            case["expected_disposition"],
+            "phrase: {phrase}"
+        );
     }
 }
 
@@ -120,6 +263,11 @@ fn original_phrase_interpretation_and_correction_are_durable() {
     assert_eq!(corrected.original_phrase, "show my files");
     assert_eq!(corrected.final_decision, DecisionStatus::Resolved);
     assert_eq!(corrected.corrections.len(), 1);
+    assert_eq!(corrected.catalog_version, 2);
+    let corpus = interpreter.correction_regression_corpus("owner").unwrap();
+    assert_eq!(corpus.len(), 1);
+    assert_eq!(corpus[0].phrase, "show my files");
+    assert!(corpus[0].corrected);
     assert_eq!(
         interpreter.get("owner", &initial.id).unwrap().unwrap(),
         corrected

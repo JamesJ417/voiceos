@@ -75,21 +75,25 @@ arbitrary command, tool, or model-selection parameters.
 `voiceos-ontology` sits between recognized speech and future command dispatch.
 It defines provider-neutral intent, entity, alias, unit, argument, confidence,
 validation, correction, and final-decision contracts. Its seed catalog covers
-playback speed, provider selection, memory, documents, health, disk, network,
-services, project tests, and approvals.
+playback speed, provider selection, memory, private knowledge documents, managed
+artifacts, task progress, health, disk, network, services, project tests, and
+approvals. Catalog v2 adds Artifact, Task, Person, Project, Skill, Email, and
+Location entities while preserving compatibility mappings for v1 intent IDs.
 
 The resolver uses deterministic rules and owner-approved aliases first. An
 optional local-model fallback must return one structured candidate, which is
 validated against exactly the same allowlisted intent and argument schemas. A
 model cannot add an intent, entity, argument, unit, or permission. Invalid model
-output is rejected and audited rather than passed to tools.
+output is rejected and audited rather than passed to tools. Alias detection is
+token-boundary-aware, so a short alias cannot accidentally match inside an
+unrelated word.
 
-The Rust gateway currently records deterministic ontology decisions in shadow
-mode for every text turn. The explicit ontology interpretation endpoint can use
-the model fallback when enabled. This separation avoids adding a second model
-call to ordinary conversation while shadow data is evaluated. Until the shared
-owner migration lands, the authenticated device ID is the temporary ontology
-owner key.
+The Rust gateway records deterministic ontology decisions for text turns and
+exposes an internal validation endpoint for structured tools. The Python broker
+must obtain a versioned execute, confirm, clarify, or reject result before a tool
+can run; validator errors fail closed. The explicit speech interpretation endpoint
+can use the model fallback when enabled. Until the shared owner migration lands,
+the authenticated device ID is the temporary ontology owner key.
 
 Audit endpoints are private-tailnet administration surfaces. They must not be exposed through Tailscale Funnel and need stronger administrator authorization before a multi-user deployment.
 

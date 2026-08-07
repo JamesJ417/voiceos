@@ -106,7 +106,7 @@ class VicOutreachService : Service() {
 object VicOutreachNotifications {
     private const val CHANNEL_CONNECTION = "vic-outreach-connection-v1"
     private const val CHANNEL_QUIET = "vic-outreach-quiet-v1"
-    private const val CHANNEL_CHECK_IN = "vic-outreach-check-in-v1"
+    private const val CHANNEL_CHECK_IN = "vic-outreach-check-in-v2"
     private const val CHANNEL_NEEDS_YOU = "vic-outreach-needs-you-v1"
 
     fun ensureChannels(context: Context) {
@@ -126,11 +126,10 @@ object VicOutreachNotifications {
                 description = "Non-interrupting VIC progress updates"
                 setSound(null, null)
             },
-            NotificationChannel(CHANNEL_CHECK_IN, "VIC check-ins", NotificationManager.IMPORTANCE_HIGH).apply {
-                description = "VIC status updates and questions"
-                setSound(sound, audio)
-                enableVibration(true)
-                vibrationPattern = longArrayOf(0, 90, 70, 150)
+            NotificationChannel(CHANNEL_CHECK_IN, "VIC check-ins", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Non-interrupting VIC planning prompts and questions"
+                setSound(null, null)
+                enableVibration(false)
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
             },
             NotificationChannel(CHANNEL_NEEDS_YOU, "VIC needs you", NotificationManager.IMPORTANCE_HIGH).apply {

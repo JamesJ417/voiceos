@@ -7,6 +7,7 @@ import unittest
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from services.gateway.hermes_skill_worker import SkillControlError, SkillController
 
@@ -113,6 +114,20 @@ class HermesSkillWorkerTest(unittest.TestCase):
         proposal = self.controller.scan("hermes-run-3")[0]
         with self.assertRaisesRegex(SkillControlError, "validation must pass"):
             self.controller.decide(str(proposal["proposal_id"]), approve=True)
+
+    def test_upstream_candidate_skill_is_quarantined_without_touching_active_tree(self) -> None:
+        root = Path(self.temp.name) / "candidates" / "release" / "repo" / "skills"
+        candidate = root / "rig-health" / "SKILL.md"
+        candidate.parent.mkdir(parents=True)
+        candidate.write_bytes(VALID_V2)
+        with patch.dict("os.environ", {"VOICEOS_UPDATE_CANDIDATE_ROOT": str(Path(self.temp.name) / "candidates")}):
+            proposal = self.controller.scan_candidate(root, "hermes-update:new")[0]
+        self.assertTrue(candidate.exists())
+        self.assertFalse((self.skills / "rig-health" / "SKILL.md").exists())
+        self.assertFalse(proposal["active_path_changed"])
+        evidence = FakeRustHandler.imports[0]["evidence"][0]
+        self.assertEqual("hermes-upstream-candidate", evidence["source"])
+        self.assertEqual("retain_approved_previous_version", evidence["rollback"])
 
 
 if __name__ == "__main__":

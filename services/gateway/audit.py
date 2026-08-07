@@ -112,6 +112,27 @@ class AuditStore:
                 );
                 CREATE INDEX IF NOT EXISTS client_events_created_idx
                     ON client_events(event_id, created_at);
+                CREATE TABLE IF NOT EXISTS review_scheduler_state (
+                    state_key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS review_digest_items (
+                    item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    dedupe_key TEXT NOT NULL UNIQUE,
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    consumed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS review_digest_pending_idx
+                    ON review_digest_items(consumed_at, item_id);
+                CREATE TABLE IF NOT EXISTS review_pending_notices (
+                    dedupe_key TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             columns = {
@@ -189,6 +210,51 @@ class AuditStore:
             )
             self._connection.commit()
             return device_id
+
+    def list_devices(self) -> list[dict[str, object]]:
+        """Return enrollment inventory without ever exposing credential material."""
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT device_id, device_name, created_at, last_seen_at, disabled_at
+                FROM devices
+                ORDER BY disabled_at IS NOT NULL, COALESCE(last_seen_at, created_at) DESC
+                """
+            ).fetchall()
+        return [
+            {
+                "device_id": str(row["device_id"]),
+                "display_name": str(row["device_name"]),
+                "enrolled_at": str(row["created_at"]),
+                "last_seen_at": str(row["last_seen_at"]) if row["last_seen_at"] else None,
+                "revoked_at": str(row["disabled_at"]) if row["disabled_at"] else None,
+                "status": "revoked" if row["disabled_at"] else "active",
+            }
+            for row in rows
+        ]
+
+    def revoke_device(self, device_id: str) -> dict[str, object]:
+        revoked_at = _now()
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT device_id, device_name, disabled_at FROM devices WHERE device_id = ?",
+                (device_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("device_not_found")
+            if row["disabled_at"] is None:
+                self._connection.execute(
+                    "UPDATE devices SET disabled_at = ? WHERE device_id = ?",
+                    (revoked_at, device_id),
+                )
+            else:
+                revoked_at = str(row["disabled_at"])
+        return {
+            "device_id": str(row["device_id"]),
+            "display_name": str(row["device_name"]),
+            "status": "revoked",
+            "revoked_at": revoked_at,
+        }
 
     def create_pending_approval(
         self,
@@ -297,6 +363,28 @@ class AuditStore:
                 "evidence": json.loads(row["evidence_json"] or "{}"),
                 "status": decision,
             }
+
+    def pending_approvals(self, limit: int = 100) -> list[dict[str, Any]]:
+        now = int(time.time())
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT request_id, session_id, tool_name, arguments_json,
+                       provider, provider_run_id, evidence_json, expires_at, created_at
+                FROM pending_approvals
+                WHERE status='pending' AND expires_at >= ?
+                ORDER BY created_at LIMIT ?
+                """,
+                (now, min(max(limit, 1), 500)),
+            ).fetchall()
+        return [
+            {
+                **dict(row),
+                "arguments": json.loads(str(row["arguments_json"])),
+                "evidence": json.loads(str(row["evidence_json"])),
+            }
+            for row in rows
+        ]
 
     def record_turn(
         self,
@@ -417,6 +505,89 @@ class AuditStore:
             (event_type, _json(payload), _now()),
         )
         return int(cursor.lastrowid)
+
+    def review_state(self, key: str, default: Any = None) -> Any:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value_json FROM review_scheduler_state WHERE state_key=?",
+                (key,),
+            ).fetchone()
+        return default if row is None else json.loads(str(row["value_json"]))
+
+    def set_review_state(self, key: str, value: Any) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO review_scheduler_state(state_key, value_json, updated_at)
+                VALUES(?,?,?)
+                ON CONFLICT(state_key) DO UPDATE SET
+                    value_json=excluded.value_json,
+                    updated_at=excluded.updated_at
+                """,
+                (key, _json(value), _now()),
+            )
+
+    def add_review_digest_item(
+        self, dedupe_key: str, category: str, title: str, body: str
+    ) -> bool:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                INSERT OR IGNORE INTO review_digest_items
+                    (dedupe_key, category, title, body, created_at)
+                VALUES(?,?,?,?,?)
+                """,
+                (dedupe_key, category, title, body, _now()),
+            )
+        return cursor.rowcount == 1
+
+    def pending_review_digest(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT item_id, dedupe_key, category, title, body, created_at
+                FROM review_digest_items WHERE consumed_at IS NULL
+                ORDER BY item_id LIMIT ?
+                """,
+                (min(max(limit, 1), 500),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def consume_review_digest(self, item_ids: list[int]) -> None:
+        if not item_ids:
+            return
+        placeholders = ",".join("?" for _ in item_ids)
+        with self._lock, self._connection:
+            self._connection.execute(
+                f"UPDATE review_digest_items SET consumed_at=? WHERE item_id IN ({placeholders})",
+                (_now(), *item_ids),
+            )
+
+    def hold_review_notice(self, dedupe_key: str, payload: dict[str, Any]) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO review_pending_notices(dedupe_key, payload_json, created_at)
+                VALUES(?,?,?)
+                ON CONFLICT(dedupe_key) DO UPDATE SET payload_json=excluded.payload_json
+                """,
+                (dedupe_key, _json(payload), _now()),
+            )
+
+    def pending_review_notices(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT dedupe_key, payload_json FROM review_pending_notices ORDER BY created_at LIMIT ?",
+                (min(max(limit, 1), 500),),
+            ).fetchall()
+        return [json.loads(str(row["payload_json"])) for row in rows]
+
+    def release_review_notice(self, dedupe_key: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM review_pending_notices WHERE dedupe_key=?",
+                (dedupe_key,),
+            )
 
     def daily_checkin_status(
         self, checkin_date: str, questions: tuple[str, ...]

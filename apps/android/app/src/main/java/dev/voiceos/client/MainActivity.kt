@@ -12,10 +12,13 @@ import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
 import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -30,15 +33,17 @@ import android.view.WindowInsets
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ImageView
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.util.Locale
 import java.util.UUID
+import java.io.File
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private enum class VoiceState { READY, STARTING, LISTENING, PROCESSING, SPEAKING, ERROR }
-    private enum class AppPage { COMMAND, TASKS, HISTORY, SYSTEM }
+    private enum class AppPage { HOME, TASKS, FILES, HISTORY, SYSTEM }
     private enum class TaskFilter { ALL, NEEDS_ME, VIC_WORKING, REVIEW }
 
     private lateinit var statusView: TextView
@@ -54,11 +59,29 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var skillCatalogStatusView: TextView
     private lateinit var skillCatalogContainer: LinearLayout
     private lateinit var skillUsageContainer: LinearLayout
+    private lateinit var updateStatusView: TextView
+    private lateinit var updateContainer: LinearLayout
+    private lateinit var attentionContainer: LinearLayout
+    private lateinit var activityContainer: LinearLayout
+    private lateinit var adminStatusView: TextView
+    private lateinit var agentRunStatusView: TextView
+    private lateinit var agentRunContainer: LinearLayout
+    private lateinit var homeAgentRunStatusView: TextView
+    private lateinit var homeAgentRunContainer: LinearLayout
+    private lateinit var sleepStatusView: TextView
+    private lateinit var sleepReportView: TextView
+    private lateinit var doctrineStatusView: TextView
+    private lateinit var doctrineCandidateContainer: LinearLayout
+    private lateinit var deviceContainer: LinearLayout
     private lateinit var historyView: TextView
     private lateinit var taskStatusView: TextView
     private lateinit var taskContainer: LinearLayout
+    private lateinit var artifactStatusView: TextView
+    private lateinit var artifactContainer: LinearLayout
+    private lateinit var artifactPreviewView: ImageView
     private lateinit var ttsStatusView: TextView
     private lateinit var voiceButton: Button
+    private lateinit var wakeWordButton: Button
     private lateinit var rootScroll: ScrollView
     private lateinit var talkButton: HexTalkButton
     private lateinit var cancelButton: Button
@@ -75,7 +98,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private val navViews = mutableMapOf<AppPage, TextView>()
 
     private var voiceState = VoiceState.READY
-    private var currentPage = AppPage.COMMAND
+    private var currentPage = AppPage.HOME
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var textToSpeechReady = false
@@ -88,6 +111,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var correctionMode = false
     private var pendingCorrectionAfterSpeech = false
     private var pendingPermissionCorrection = false
+    private var pendingWakeWordEnable = false
     private var requestGeneration = 0
     private var latestPartialTranscript: String? = null
 
@@ -97,6 +121,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var failedTranscript: String? = null
     private var pendingApproval: ApprovalRequest? = null
     private var eventSubscription: EventSubscription? = null
+    private var agentEventSubscription: EventSubscription? = null
+    private var artifactEventSubscription: EventSubscription? = null
+    private var artifactRenderer: PdfRenderer? = null
+    private var artifactDescriptor: ParcelFileDescriptor? = null
+    private var pendingArtifactDownload: Pair<String, ByteArray>? = null
     private var conversationActive = false
     private var conversationReceiverRegistered = false
     private var currentTaskFilter = TaskFilter.ALL
@@ -155,7 +184,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 VICConversationService.STATE_PAUSED -> {
                     renderState(VoiceState.READY, "Conversation paused")
                     voiceTitleView.text = "Conversation paused"
-                    statusView.text = "VOICE CHANNEL PAUSED"
+                    statusView.text = "PAUSED"
                 }
                 VICConversationService.STATE_ERROR -> renderState(VoiceState.ERROR, detail.ifBlank { "Conversation error" })
                 VICConversationService.STATE_STOPPED -> renderState(VoiceState.READY, "Conversation ended")
@@ -173,7 +202,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         override fun onBeginningOfSpeech() {
-            statusView.text = "VOICE CHANNEL LISTENING"
+            statusView.text = "LISTENING"
         }
 
         override fun onRmsChanged(rmsdB: Float) = Unit
@@ -229,7 +258,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         renderState(VoiceState.READY, "Ready")
         handleEnrollment(enrollment)
         startSharedEventStream()
+        startAgentEventStream()
+        loadAgentRuns()
+        startArtifactEventStream()
         DailyCheckinScheduler.schedule(this)
+        VICWakeService.ensureStartedIfEnabled(this)
         if (
             android.os.Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -262,6 +295,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         conversationReceiverRegistered = true
         restoreConversationSnapshot()
+        updateWakeWordButton()
     }
 
     override fun onStop() {
@@ -275,6 +309,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_ARTIFACT_DOWNLOAD) {
+            val pending = pendingArtifactDownload
+            pendingArtifactDownload = null
+            if (resultCode == RESULT_OK && pending != null && data?.data != null) {
+                contentResolver.openOutputStream(data.data!!)?.use { it.write(pending.second) }
+                Toast.makeText(this, "Saved ${pending.first}", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
         if (requestCode != REQUEST_DOCUMENT || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         val filename = DocumentInput.filename(contentResolver, uri)
@@ -292,6 +335,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         requestGeneration += 1
         eventSubscription?.close()
         eventSubscription = null
+        agentEventSubscription?.close()
+        agentEventSubscription = null
+        artifactEventSubscription?.close()
+        artifactEventSubscription = null
+        artifactRenderer?.close()
+        artifactDescriptor?.close()
         speechRecognizer?.cancel()
         speechRecognizer?.destroy()
         speechRecognizer = null
@@ -385,11 +434,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         if (requestCode != REQUEST_MICROPHONE) return
         if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            if (pendingPermissionCorrection) startRecognition(correction = true)
-            else startConversationMode()
+            when {
+                pendingWakeWordEnable -> setWakeWordEnabled(true)
+                pendingPermissionCorrection -> startRecognition(correction = true)
+                else -> startConversationMode()
+            }
         } else {
             showRecoverableError("Microphone permission is required for voice requests.", speakError = true)
         }
+        pendingWakeWordEnable = false
     }
 
     private fun createContentView(): ScrollView {
@@ -397,38 +450,23 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         window.navigationBarColor = CarbonPalette.black
         window.decorView.systemUiVisibility = 0
 
-        fun kicker(text: String) = TextView(this).apply {
-            this.text = text.uppercase(Locale.US)
-            textSize = 10f
-            typeface = Typeface.DEFAULT_BOLD
-            letterSpacing = 0.17f
-            setTextColor(CarbonPalette.teal)
-        }
-
-        fun heading(text: String, size: Float = 24f) = TextView(this).apply {
-            this.text = text
-            textSize = size
-            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-            setTextColor(CarbonPalette.white)
-        }
-
-        fun panel(padding: Int = 20) = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
-            background = carbonPanel(this@MainActivity)
-        }
+        fun kicker(text: String) = carbonKicker(text)
+        fun heading(text: String, size: Float = 24f) = carbonHeading(text, size)
+        fun panel(padding: Int = 20) = carbonPanelLayout(padding)
 
         fun navChip(label: String, active: Boolean) = TextView(this).apply {
             text = label
-            textSize = 11f
+            textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
+            maxLines = 1
+            isSingleLine = true
             setTextColor(if (active) CarbonPalette.teal else CarbonPalette.muted)
             background = carbonControl(
                 this@MainActivity,
                 if (active) CarbonPalette.teal else CarbonPalette.line,
             )
-            setPadding(dp(12), dp(11), dp(12), dp(11))
+            setPadding(dp(3), dp(12), dp(3), dp(12))
             alpha = if (active) 1f else 0.72f
         }
 
@@ -466,7 +504,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             gravity = Gravity.CENTER_VERTICAL
         }
         brandRow.addView(HexMarkView(this), LinearLayout.LayoutParams(dp(42), dp(38)))
-        brandRow.addView(heading("VoiceOS", 25f).apply {
+        brandRow.addView(heading("VIC", 25f).apply {
             setPadding(dp(9), 0, 0, 0)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         gatewayView = TextView(this).apply {
@@ -486,34 +524,35 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val commandNav = navChip("⌂  COMMAND", true)
-        val tasksNav = navChip("✓  TASKS", false)
-        val historyNav = navChip("◷  HISTORY", false)
-        val systemNav = navChip("⌁  SYSTEM", false)
+        val homeNav = navChip("HOME", true)
+        val tasksNav = navChip("TASKS", false)
+        val filesNav = navChip("FILES", false)
+        val historyNav = navChip("HISTORY", false)
+        val systemNav = navChip("SYSTEM", false)
         navViews.clear()
-        navViews[AppPage.COMMAND] = commandNav
+        navViews[AppPage.HOME] = homeNav
         navViews[AppPage.TASKS] = tasksNav
+        navViews[AppPage.FILES] = filesNav
         navViews[AppPage.HISTORY] = historyNav
         navViews[AppPage.SYSTEM] = systemNav
-        navigation.addView(commandNav, weightedButton())
-        navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(7) })
-        navigation.addView(historyNav, weightedButton().apply { marginStart = dp(7) })
-        navigation.addView(systemNav, weightedButton().apply { marginStart = dp(7) })
+        navigation.addView(homeNav, weightedButton())
+        navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(4) })
+        navigation.addView(filesNav, weightedButton().apply { marginStart = dp(4) })
+        navigation.addView(historyNav, weightedButton().apply { marginStart = dp(4) })
+        navigation.addView(systemNav, weightedButton().apply { marginStart = dp(4) })
         content.addView(navigation, fullWidthWrap().apply { topMargin = dp(18) })
 
-        val commandPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        commandPage.addView(kicker("Carbon Command"), fullWidthWrap().apply { topMargin = dp(24) })
-        commandPage.addView(heading("Command center", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+        val homePage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val voicePanel = panel(20)
-        statusView = kicker("Voice channel ready")
+        statusView = kicker("Ready")
         voicePanel.addView(statusView, fullWidthWrap())
         voiceTitleView = heading("What can I help with?", 29f).apply {
             setPadding(0, dp(7), 0, 0)
         }
         voicePanel.addView(voiceTitleView, fullWidthWrap())
         voicePanel.addView(TextView(this).apply {
-            text = "Tap the control and speak. VoiceOS keeps the conversation across your enrolled devices."
+            text = "Tap the control and speak. VIC keeps the conversation across your enrolled devices."
             textSize = 14f
             setTextColor(CarbonPalette.muted)
             setLineSpacing(0f, 1.18f)
@@ -547,7 +586,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         voicePanel.addView(stateTrack, fullWidthWrap())
         cancelButton = actionButton("CANCEL").apply { setOnClickListener { cancelCurrentAction() } }
         voicePanel.addView(cancelButton, fullWidthWrap().apply { topMargin = dp(9) })
-        commandPage.addView(voicePanel, fullWidthWrap().apply { topMargin = dp(18) })
+        homePage.addView(voicePanel, fullWidthWrap().apply { topMargin = dp(20) })
 
         val conversationPanel = panel(18)
         val conversationHeader = LinearLayout(this).apply {
@@ -593,7 +632,42 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         conversationActions.addView(correctButton, weightedButton().apply { marginStart = dp(6) })
         conversationActions.addView(retryButton, weightedButton().apply { marginStart = dp(6) })
         conversationPanel.addView(conversationActions, fullWidthWrap().apply { topMargin = dp(12) })
-        commandPage.addView(conversationPanel, fullWidthWrap().apply { topMargin = dp(14) })
+        homePage.addView(conversationPanel, fullWidthWrap().apply { topMargin = dp(14) })
+
+        val agentPanel = panel(17)
+        val agentHeader = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        agentHeader.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(kicker("Live Codex execution"))
+            addView(heading("VIC agent work", 22f).apply { setPadding(0, dp(5), 0, 0) })
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        agentHeader.addView(TextView(this).apply {
+            text = "LIVE"
+            textSize = 9f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(CarbonPalette.green)
+            gravity = Gravity.CENTER
+            background = carbonControl(this@MainActivity, CarbonPalette.green)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+        })
+        agentPanel.addView(agentHeader, fullWidthWrap())
+        homeAgentRunStatusView = TextView(this).apply {
+            text = "Checking coordinator and subagent activity..."
+            textSize = 13f
+            setTextColor(CarbonPalette.muted)
+            setPadding(0, dp(10), 0, 0)
+        }
+        agentPanel.addView(homeAgentRunStatusView, fullWidthWrap())
+        homeAgentRunContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        agentPanel.addView(homeAgentRunContainer, fullWidthWrap().apply { topMargin = dp(6) })
+        agentPanel.addView(
+            secondaryButton("VIEW ALL AGENT ACTIVITY") { showPage(AppPage.SYSTEM) },
+            fullWidthWrap().apply { topMargin = dp(12) },
+        )
+        homePage.addView(agentPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
         val approvals = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -608,7 +682,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         approvals.addView(approveButton, weightedButton())
         approvals.addView(denyButton, weightedButton().apply { marginStart = dp(8) })
-        commandPage.addView(approvals, fullWidthWrap().apply { topMargin = dp(12) })
+        homePage.addView(approvals, fullWidthWrap().apply { topMargin = dp(12) })
 
         val utilityPanel = panel(16)
         utilityPanel.addView(kicker("Voice controls"), fullWidthWrap())
@@ -620,7 +694,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             contentDescription = "Add a private knowledge file"
         }
         utilityPanel.addView(utilityRow("PRIVATE KNOWLEDGE", uploadButton), fullWidthWrap().apply { topMargin = dp(6) })
-        commandPage.addView(utilityPanel, fullWidthWrap().apply { topMargin = dp(14) })
+        homePage.addView(utilityPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
         val providerPanel = panel(17)
         providerPanel.addView(kicker("Reasoning fabric"), fullWidthWrap())
@@ -634,7 +708,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             background = carbonControl(this@MainActivity, CarbonPalette.green)
         }
         providerPanel.addView(providerStatusView, fullWidthWrap().apply { topMargin = dp(14) })
-        commandPage.addView(providerPanel, fullWidthWrap().apply { topMargin = dp(14) })
+        homePage.addView(providerPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
         val healthPanel = panel(17)
         healthPanel.addView(kicker("Live infrastructure"), fullWidthWrap())
@@ -648,9 +722,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             background = carbonControl(this@MainActivity, CarbonPalette.line)
         }
         healthPanel.addView(systemStatusView, fullWidthWrap().apply { topMargin = dp(14) })
-        commandPage.addView(healthPanel, fullWidthWrap().apply { topMargin = dp(14) })
+        homePage.addView(healthPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
-        commandPage.addView(TextView(this).apply {
+        homePage.addView(TextView(this).apply {
             text = "PRIVATE  •  TAILSCALE  •  MEMORY ACTIVE"
             textSize = 9f
             letterSpacing = 0.11f
@@ -724,11 +798,106 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }, fullWidthWrap().apply { topMargin = dp(18) })
         }
 
+        val filesPage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            addView(kicker("Managed output storage"), fullWidthWrap().apply { topMargin = dp(24) })
+            addView(heading("Files", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+            addView(panel(17).apply {
+                addView(kicker("VIC artifact catalog"), fullWidthWrap())
+                artifactStatusView = TextView(this@MainActivity).apply {
+                    text = "Loading files…"; textSize = 13f; setTextColor(CarbonPalette.muted); setPadding(0, dp(12), 0, 0)
+                }
+                addView(artifactStatusView, fullWidthWrap())
+                artifactContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(artifactContainer, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("REFRESH FILES") { loadArtifacts() }, fullWidthWrap().apply { topMargin = dp(14) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            addView(panel(17).apply {
+                addView(kicker("Checksum-validated preview"), fullWidthWrap())
+                artifactPreviewView = ImageView(this@MainActivity).apply {
+                    adjustViewBounds = true; scaleType = ImageView.ScaleType.FIT_CENTER
+                    setBackgroundColor(0xffeef2f1.toInt()); contentDescription = "PDF preview"
+                }
+                addView(artifactPreviewView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(520)).apply { topMargin = dp(12) })
+            }, fullWidthWrap().apply { topMargin = dp(14) })
+        }
+
         val systemPage = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
             addView(kicker("VoiceOS infrastructure"), fullWidthWrap().apply { topMargin = dp(24) })
             addView(heading("System", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+            addView(panel(17).apply {
+                addView(kicker("Codex execution fabric"), fullWidthWrap())
+                addView(heading("VIC agent work", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                agentRunStatusView = TextView(this@MainActivity).apply {
+                    text = "Loading coordinators and subagents..."; textSize = 13f; setTextColor(CarbonPalette.muted); setPadding(0, dp(10), 0, 0)
+                }
+                addView(agentRunStatusView, fullWidthWrap())
+                agentRunContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(agentRunContainer, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("REFRESH AGENT WORK") { loadAgentRuns() }, fullWidthWrap().apply { topMargin = dp(12) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            addView(panel(17).apply {
+                addView(kicker("One attention queue"), fullWidthWrap())
+                addView(heading("VIC inbox", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                attentionContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(attentionContainer, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("REFRESH INBOX") { loadOperations() }, fullWidthWrap().apply { topMargin = dp(12) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            addView(panel(17).apply {
+                addView(kicker("Evidence and decisions"), fullWidthWrap())
+                addView(heading("Unified activity", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                activityContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(activityContainer, fullWidthWrap().apply { topMargin = dp(8) })
+            }, fullWidthWrap().apply { topMargin = dp(14) })
+            addView(panel(17).apply {
+                addView(kicker("Installation control center"), fullWidthWrap())
+                addView(heading("Rig and devices", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                adminStatusView = TextView(this@MainActivity).apply {
+                    text = "Loading installation evidence..."; textSize = 12f; setTextColor(CarbonPalette.white)
+                    setTextIsSelectable(true); setPadding(0, dp(10), 0, 0)
+                }
+                addView(adminStatusView, fullWidthWrap())
+                deviceContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(deviceContainer, fullWidthWrap().apply { topMargin = dp(10) })
+            }, fullWidthWrap().apply { topMargin = dp(14) })
+            addView(panel(17).apply {
+                addView(kicker("Safe upstream review"), fullWidthWrap())
+                addView(heading("Hermes updates", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                updateStatusView = TextView(this@MainActivity).apply { text = "Loading update candidatesâ€¦"; textSize = 13f; setTextColor(CarbonPalette.muted); setPadding(0, dp(12), 0, 0) }
+                addView(updateStatusView, fullWidthWrap())
+                updateContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+                addView(updateContainer, fullWidthWrap().apply { topMargin = dp(8) })
+                addView(secondaryButton("REFRESH UPDATES") { loadUpdateProposals() }, fullWidthWrap().apply { topMargin = dp(14) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            val sleepPanel = buildSleepMemoryPanel(
+                this@MainActivity,
+                onDryRun = { runSleepMemory("dry_run") },
+                onCommit = { runSleepMemory("commit") },
+                onRollback = { actOnLastSleepCycle("rollback") },
+            )
+            sleepStatusView = sleepPanel.status
+            sleepReportView = sleepPanel.report
+            addView(sleepPanel.root, fullWidthWrap().apply { topMargin = dp(18) })
+            val doctrinePanel = buildDoctrinePanel(this@MainActivity)
+            doctrineStatusView = doctrinePanel.status
+            doctrineCandidateContainer = doctrinePanel.candidates
+            addView(doctrinePanel.root, fullWidthWrap().apply { topMargin = dp(18) })
+            addView(panel(17).apply {
+                addView(kicker("Hands-free access"), fullWidthWrap())
+                addView(heading("Wake word", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "Runs locally on this Pixel. Say “Hey VIC” to begin and “Goodbye VIC” to end."
+                    textSize = 14f
+                    setTextColor(CarbonPalette.muted)
+                    setLineSpacing(dp(3).toFloat(), 1.12f)
+                    setPadding(0, dp(10), 0, 0)
+                }, fullWidthWrap())
+                wakeWordButton = secondaryButton("ENABLE “HEY VIC”") { toggleWakeWord() }
+                addView(wakeWordButton, fullWidthWrap().apply { topMargin = dp(14) })
+            }, fullWidthWrap().apply { topMargin = dp(18) })
             addView(panel(17).apply {
                 addView(kicker("Audio playback"), fullWidthWrap())
                 addView(heading("Speech engine", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
@@ -794,23 +963,26 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         pageViews.clear()
-        pageViews[AppPage.COMMAND] = commandPage
+        pageViews[AppPage.HOME] = homePage
         pageViews[AppPage.TASKS] = tasksPage
+        pageViews[AppPage.FILES] = filesPage
         pageViews[AppPage.HISTORY] = historyPage
         pageViews[AppPage.SYSTEM] = systemPage
-        content.addView(commandPage, fullWidthWrap())
+        content.addView(homePage, fullWidthWrap())
         content.addView(tasksPage, fullWidthWrap())
+        content.addView(filesPage, fullWidthWrap())
         content.addView(historyPage, fullWidthWrap())
         content.addView(systemPage, fullWidthWrap())
 
-        commandNav.setOnClickListener { showPage(AppPage.COMMAND) }
+        homeNav.setOnClickListener { showPage(AppPage.HOME) }
         tasksNav.setOnClickListener { showPage(AppPage.TASKS) }
+        filesNav.setOnClickListener { showPage(AppPage.FILES) }
         historyNav.setOnClickListener { showPage(AppPage.HISTORY) }
         systemNav.setOnClickListener { showPage(AppPage.SYSTEM) }
 
         rootScroll = ScrollView(this).apply {
             isFillViewport = true
-            setBackgroundColor(CarbonPalette.black)
+            background = CarbonBackgroundDrawable(this@MainActivity)
             addView(content)
         }
         return rootScroll
@@ -837,33 +1009,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         setOnClickListener { action() }
     }
 
-    private fun fullWidthWrap() = LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT,
-        ViewGroup.LayoutParams.WRAP_CONTENT,
-    )
+    private fun fullWidthWrap() = fullWidthWrapLayout()
 
     private fun weightedButton() = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
 
-    private fun taskPanel(padding: Int = 20) = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
-        background = carbonPanel(this@MainActivity)
-    }
+    private fun taskPanel(padding: Int = 20) = carbonPanelLayout(padding)
 
-    private fun taskKicker(text: String) = TextView(this).apply {
-        this.text = text.uppercase(Locale.US)
-        textSize = 10f
-        typeface = Typeface.DEFAULT_BOLD
-        letterSpacing = 0.17f
-        setTextColor(CarbonPalette.teal)
-    }
+    private fun taskKicker(text: String) = carbonKicker(text)
 
-    private fun taskHeading(text: String, size: Float = 24f) = TextView(this).apply {
-        this.text = text
-        textSize = size
-        typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-        setTextColor(CarbonPalette.white)
-    }
+    private fun taskHeading(text: String, size: Float = 24f) = carbonHeading(text, size)
 
     private fun handlePrimaryAction() {
         if (conversationActive) {
@@ -899,7 +1053,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         if (intent?.action == ACTION_VIC_TALK) {
             intent.action = null
-            showPage(AppPage.COMMAND)
+            showPage(AppPage.HOME)
             intent.getStringExtra(VicOutreachNotifications.EXTRA_BODY)?.takeIf { it.isNotBlank() }?.let {
                 transcriptView.text = "VIC reached out:\n\n$it"
             }
@@ -1128,6 +1282,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         }
                         "approval.decided" -> pendingApproval = null
                         "status.changed" -> checkGatewayHealth(justEnrolled = false)
+                        "memory.sleep.completed", "memory.sleep.action" -> if (currentPage == AppPage.SYSTEM) loadSleepMemory()
+                        "agent.run.updated", "agent.run.queued", "agent.run.starting", "agent.run.running",
+                        "agent.run.completed", "agent.run.failed", "agent.run.cancelled",
+                        "agent.plan.updated", "agent.command.updated", "agent.file.changed",
+                        "agent.subagent.updated" -> loadAgentRuns()
                     }
                 }
             },
@@ -1139,6 +1298,37 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             { if (!isFinishing && !isDestroyed) startSharedEventStream() },
                             2_000,
                         )
+                    }
+                }
+            },
+        )
+    }
+
+    private fun startAgentEventStream() {
+        val token = DeviceCredentials.token(this) ?: return
+        agentEventSubscription?.close()
+        val preferences = getSharedPreferences("voiceos_agent_events", MODE_PRIVATE)
+        agentEventSubscription = GatewayClient.streamAgentEvents(
+            GatewaySettings.baseUrl(this),
+            token,
+            preferences.getLong("cursor", 0),
+            onEvent = { event ->
+                preferences.edit().putLong("cursor", event.id).apply()
+                runOnUiThread {
+                    if (!isFinishing && !isDestroyed) loadAgentRuns()
+                }
+            },
+            onClosed = { error ->
+                if (error != null && !isFinishing && !isDestroyed) {
+                    runOnUiThread {
+                        if (::homeAgentRunStatusView.isInitialized) {
+                            homeAgentRunStatusView.text = "Live agent sync reconnecting..."
+                            homeAgentRunStatusView.setTextColor(CarbonPalette.amber)
+                            homeAgentRunStatusView.postDelayed(
+                                { if (!isFinishing && !isDestroyed) startAgentEventStream() },
+                                2_000,
+                            )
+                        }
                     }
                 }
             },
@@ -1262,6 +1452,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             credential.deviceToken,
                         )
                         startSharedEventStream()
+                        startAgentEventStream()
+                        loadAgentRuns()
                         startVicOutreachConnection()
                         checkGatewayHealth(justEnrolled = true)
                     },
@@ -1509,10 +1701,303 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         rootScroll.post { rootScroll.smoothScrollTo(0, 0) }
         if (page == AppPage.TASKS) loadTasks()
+        if (page == AppPage.FILES) loadArtifacts()
         if (page == AppPage.HISTORY) loadHistory()
         if (page == AppPage.SYSTEM) {
+            updateWakeWordButton()
             checkGatewayHealth(justEnrolled = false)
             loadSkillProposals()
+            loadUpdateProposals()
+            loadOperations()
+            loadSleepMemory()
+            loadDoctrine()
+            loadAgentRuns()
+        }
+    }
+
+    private fun loadAgentRuns() {
+        if (!::agentRunContainer.isInitialized || !::homeAgentRunContainer.isInitialized) return
+        GatewayClient.getAgentRuns(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                result.fold(onSuccess = { runs ->
+                    val active = runs.count { it.status !in setOf("completed", "failed", "cancelled") }
+                    val roots = runs.filter { it.parentRunId == null }
+                    val summary = if (active == 0) {
+                        "No Codex agents are working. Recent results remain below."
+                    } else {
+                        "$active coordinator/subagent run${if (active == 1) " is" else "s are"} active and updating live."
+                    }
+                    agentRunStatusView.text = summary
+                    homeAgentRunStatusView.text = summary
+                    val color = if (active > 0) CarbonPalette.green else CarbonPalette.muted
+                    agentRunStatusView.setTextColor(color)
+                    homeAgentRunStatusView.setTextColor(color)
+                    renderAgentRuns(agentRunContainer, roots, runs, compact = false)
+                    val activeRoots = roots.filter { it.status !in setOf("completed", "failed", "cancelled") }
+                    val recentResults = roots.filter { it.status in setOf("completed", "failed", "cancelled") }.take(2)
+                    renderAgentRuns(
+                        homeAgentRunContainer,
+                        (activeRoots + recentResults).distinctBy { it.id },
+                        runs,
+                        compact = true,
+                    )
+                }, onFailure = { error ->
+                    val message = "Agent activity unavailable: ${error.message.orEmpty()}"
+                    agentRunStatusView.text = message
+                    homeAgentRunStatusView.text = message
+                    agentRunStatusView.setTextColor(CarbonPalette.red)
+                    homeAgentRunStatusView.setTextColor(CarbonPalette.red)
+                })
+            }
+        }
+    }
+
+    private fun renderAgentRuns(
+        container: LinearLayout,
+        roots: List<AgentRun>,
+        allRuns: List<AgentRun>,
+        compact: Boolean,
+    ) {
+        container.removeAllViews()
+        if (roots.isEmpty()) {
+            container.addView(TextView(this).apply {
+                text = "When VIC delegates work to Codex, the coordinator and every subagent will appear here."
+                textSize = 12f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(8), 0, 0)
+            }, fullWidthWrap())
+            return
+        }
+        roots.forEach { run ->
+            val children = allRuns.filter { it.parentRunId == run.id }
+            val terminal = run.status in setOf("completed", "failed", "cancelled")
+            val detail = when {
+                run.error.isNotBlank() -> "FAILED\n${run.error}"
+                run.resultSummary.isNotBlank() -> "RESULT\n${run.resultSummary}"
+                run.currentActivity.isNotBlank() -> run.currentActivity
+                else -> "Waiting for Codex supervisor"
+            }
+            val card = taskPanel(if (compact) 12 else 14).apply {
+                addView(
+                    this@MainActivity.carbonKicker("${if (terminal) "RESULT" else "LIVE"}  •  ${run.status}  •  ${run.role}"),
+                    fullWidthWrap(),
+                )
+                addView(taskHeading(run.objective, if (compact) 16f else 18f), fullWidthWrap().apply { topMargin = dp(5) })
+                addView(TextView(this@MainActivity).apply {
+                    text = detail
+                    textSize = 12f
+                    setTextColor(if (run.error.isNotBlank()) CarbonPalette.red else CarbonPalette.white)
+                    setPadding(0, dp(8), 0, 0)
+                    maxLines = if (compact) 5 else Int.MAX_VALUE
+                }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "${run.model}  •  ${run.sandbox}  •  ${children.size} subagent${if (children.size == 1) "" else "s"}"
+                    textSize = 10f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(7), 0, 0)
+                }, fullWidthWrap())
+                children.forEach { child ->
+                    val childDetail = child.currentActivity.ifBlank {
+                        child.resultSummary.ifBlank { child.error.ifBlank { child.objective } }
+                    }
+                    addView(TextView(this@MainActivity).apply {
+                        text = "↳ ${child.role.uppercase(Locale.US)}  ${child.status}\n$childDetail"
+                        textSize = 11f
+                        setTextColor(if (child.error.isNotBlank()) CarbonPalette.red else CarbonPalette.muted)
+                        setPadding(dp(10), dp(8), 0, 0)
+                        maxLines = if (compact) 4 else Int.MAX_VALUE
+                    }, fullWidthWrap())
+                }
+                if (!terminal) {
+                    addView(secondaryButton("STOP RUN") { cancelAgentRun(run) }, fullWidthWrap().apply { topMargin = dp(10) })
+                }
+            }
+            container.addView(card, fullWidthWrap().apply { topMargin = dp(8) })
+        }
+    }
+
+    private fun cancelAgentRun(run: AgentRun) {
+        GatewayClient.cancelAgentRun(GatewaySettings.baseUrl(this), run.id, DeviceCredentials.token(this)) { result ->
+            runOnUiThread { result.fold(onSuccess = { loadAgentRuns() }, onFailure = { Toast.makeText(this, "Could not stop agent: ${it.message.orEmpty()}", Toast.LENGTH_LONG).show() }) }
+        }
+    }
+
+    private var latestSleepCycleId: String = ""
+
+    private fun loadDoctrine() {
+        if (!::doctrineStatusView.isInitialized) return
+        GatewayClient.getDoctrineStatus(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                result.fold(onSuccess = { status ->
+                    doctrineStatusView.text = (if (status.enabled) "REVIEW ENABLED" else "DISABLED") +
+                        "\nActive " + status.active + "  •  Awaiting review " + status.awaitingReview +
+                        "\nContamination failures " + status.contaminationFailures + "  •  Contradictions " + status.openContradictions +
+                        "\nProcessed sources " + status.processedRecords + "  •  Authorization warnings " + status.authorizationWarnings
+                    doctrineStatusView.setTextColor(if (status.authorizationWarnings > 0 || status.contaminationFailures > 0) CarbonPalette.amber else CarbonPalette.white)
+                    if (status.enabled) loadDoctrineCandidates() else if (::doctrineCandidateContainer.isInitialized) doctrineCandidateContainer.removeAllViews()
+                }, onFailure = { doctrineStatusView.text = "Doctrine status unavailable: " + it.message.orEmpty() })
+            }
+        }
+    }
+
+    private fun loadDoctrineCandidates() {
+        GatewayClient.getDoctrineCandidates(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                if (!::doctrineCandidateContainer.isInitialized) return@runOnUiThread
+                doctrineCandidateContainer.removeAllViews()
+                result.fold(onSuccess = { candidates ->
+                    candidates.forEach { candidate ->
+                        doctrineCandidateContainer.addView(taskPanel(12).apply {
+                            addView(taskHeading(candidate.proposition, 17f), fullWidthWrap())
+                            addView(TextView(this@MainActivity).apply {
+                                text = "${candidate.domain.replace('_', ' ')}  •  ${candidate.principleType.replace('_', ' ')}\n${candidate.decisionRule}\n\nRATIONALE\n${candidate.rationale}\n\nEXCEPTIONS\n${candidate.exceptions.joinToString().ifBlank { "None recorded" }}\n\nCONFIDENCE ${"%.2f".format(candidate.confidence)}  •  STYLE ${"%.2f".format(candidate.styleContamination)}  •  IDENTITY ${"%.2f".format(candidate.identityContamination)}"
+                                textSize = 12f; setTextColor(CarbonPalette.white); setTextIsSelectable(true); setPadding(0, dp(10), 0, 0)
+                            }, fullWidthWrap())
+                            val actions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                            actions.addView(secondaryButton("REJECT") { decideDoctrineCandidate(candidate, "reject") }, weightedButton())
+                            actions.addView(secondaryButton("REVISE") { decideDoctrineCandidate(candidate, "request_revision") }, weightedButton().apply { marginStart = dp(6) })
+                            actions.addView(actionButton("APPROVE").apply { setOnClickListener { decideDoctrineCandidate(candidate, "approve") } }, weightedButton().apply { marginStart = dp(6) })
+                            addView(actions, fullWidthWrap().apply { topMargin = dp(10) })
+                            addView(TextView(this@MainActivity).apply { text = "Approval does not activate doctrine."; textSize = 11f; setTextColor(CarbonPalette.muted) }, fullWidthWrap().apply { topMargin = dp(8) })
+                        }, fullWidthWrap().apply { topMargin = dp(8) })
+                    }
+                }, onFailure = { doctrineStatusView.text = doctrineStatusView.text.toString() + "\nCandidate review unavailable: " + it.message.orEmpty() })
+            }
+        }
+    }
+
+    private fun decideDoctrineCandidate(candidate: DoctrineCandidate, decision: String) {
+        GatewayClient.decideDoctrineCandidate(GatewaySettings.baseUrl(this), candidate.id, decision, DeviceCredentials.token(this)) { result ->
+            runOnUiThread { result.fold(onSuccess = { loadDoctrine() }, onFailure = { doctrineStatusView.text = "Doctrine decision failed: " + it.message.orEmpty() }) }
+        }
+    }
+
+    private fun loadSleepMemory() {
+        val baseUrl = GatewaySettings.baseUrl(this)
+        val token = DeviceCredentials.token(this)
+        if (::sleepStatusView.isInitialized) GatewayClient.getSleepMemoryStatus(baseUrl, token) { result -> runOnUiThread {
+            result.fold(onSuccess = { status ->
+                latestSleepCycleId = status.cycleId
+                sleepStatusView.text = "${if (status.enabled) "ENABLED" else "DISABLED"}  •  ${status.status.uppercase(Locale.US)}\nPhase: ${status.phase}  •  Mode: ${status.mode}"
+                sleepStatusView.setTextColor(if (status.enabled) CarbonPalette.white else CarbonPalette.amber)
+            }, onFailure = { sleepStatusView.text = "Sleep-memory status unavailable: ${it.message.orEmpty()}" })
+        } }
+        if (::sleepReportView.isInitialized) GatewayClient.getMorningReport(baseUrl, token) { result -> runOnUiThread {
+            result.fold(onSuccess = { report -> renderMorningReport(report) },
+                onFailure = { sleepReportView.text = "Morning report unavailable: ${it.message.orEmpty()}" })
+        } }
+    }
+
+    private fun renderMorningReport(report: SleepMorningReport?) {
+        sleepReportView.text = if (report == null) "No morning report yet." else
+            "Selected ${report.selectedEvents} events  •  Committed ${report.committedMemories}\n" +
+                "Contradictions ${report.contradictions}  •  Dreams quarantined ${report.quarantinedDreams}\n" +
+                "Skill candidates ${report.skillCandidates}  •  Protected ${report.protectedProposals}\n" +
+                "Rejected ${report.rejectedProposals}  •  Retrieval ${if (report.retrievalPassed) "PASSED" else "FAILED"}"
+    }
+
+    private fun runSleepMemory(mode: String) {
+        sleepStatusView.text = "VIC is running a bounded ${mode.replace('_', ' ')} cycle..."
+        GatewayClient.runSleepCycle(GatewaySettings.baseUrl(this), mode, DeviceCredentials.token(this)) { result -> runOnUiThread {
+            result.fold(onSuccess = { report -> renderMorningReport(report); loadSleepMemory() },
+                onFailure = { sleepStatusView.text = "Cycle failed: ${it.message.orEmpty()}" })
+        } }
+    }
+
+    private fun actOnLastSleepCycle(action: String) {
+        if (latestSleepCycleId.isBlank()) {
+            Toast.makeText(this, "No completed cycle is available.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        GatewayClient.actOnSleepCycle(GatewaySettings.baseUrl(this), latestSleepCycleId, action, DeviceCredentials.token(this)) { result -> runOnUiThread {
+            result.fold(onSuccess = { loadSleepMemory() },
+                onFailure = { sleepStatusView.text = "Action failed: ${it.message.orEmpty()}" })
+        } }
+    }
+
+    private fun loadOperations() {
+        val baseUrl = GatewaySettings.baseUrl(this)
+        val token = DeviceCredentials.token(this)
+        if (::attentionContainer.isInitialized) GatewayClient.getAttention(baseUrl, token) { result -> runOnUiThread {
+            attentionContainer.removeAllViews()
+            result.fold(onSuccess = { items ->
+                if (items.isEmpty()) attentionContainer.addView(operationText("Inbox clear", CarbonPalette.green))
+                items.take(20).forEach { item -> attentionContainer.addView(operationText(
+                    "${item.urgency.uppercase(Locale.US)}  •  ${item.category.uppercase(Locale.US)}\n${item.title}\n${item.summary}${if (item.approvalRequired) "\nNEEDS YOUR APPROVAL" else ""}",
+                    if (item.approvalRequired || item.urgency == "urgent") CarbonPalette.amber else CarbonPalette.line,
+                ), fullWidthWrap().apply { topMargin = dp(7) }) }
+            }, onFailure = { attentionContainer.addView(operationText("Inbox unavailable: ${it.message.orEmpty()}", CarbonPalette.red)) })
+        } }
+        if (::activityContainer.isInitialized) GatewayClient.getActivity(baseUrl, token) { result -> runOnUiThread {
+            activityContainer.removeAllViews()
+            result.fold(onSuccess = { items ->
+                if (items.isEmpty()) activityContainer.addView(operationText("No activity has been recorded yet.", CarbonPalette.line))
+                items.take(20).forEach { item -> activityContainer.addView(operationText(
+                    "${item.occurredAt}\nNOTICED  ${item.noticed}\nDECISION  ${item.decision}\nMODEL  ${item.model}\nCHANGED  ${item.changed}${if (item.needsYou) "\nNEEDS YOU" else ""}${if (item.rollback.isNotBlank()) "\nROLLBACK  ${item.rollback}" else ""}",
+                    if (item.needsYou) CarbonPalette.amber else CarbonPalette.line,
+                ), fullWidthWrap().apply { topMargin = dp(7) }) }
+            }, onFailure = { activityContainer.addView(operationText("Activity unavailable: ${it.message.orEmpty()}", CarbonPalette.red)) })
+        } }
+        if (::adminStatusView.isInitialized) GatewayClient.getAdminStatus(baseUrl, token) { result -> runOnUiThread {
+            result.fold(onSuccess = { adminStatusView.text = it.installationJson }, onFailure = { adminStatusView.text = "Control center unavailable: ${it.message.orEmpty()}" })
+        } }
+        if (::deviceContainer.isInitialized) GatewayClient.getDevices(baseUrl, token) { result -> runOnUiThread {
+            deviceContainer.removeAllViews()
+            result.fold(onSuccess = { devices -> devices.forEach { device ->
+                val row = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(12), dp(10), dp(12), dp(10)); background = carbonControl(this@MainActivity, if (device.status == "active") CarbonPalette.teal else CarbonPalette.line) }
+                row.addView(TextView(this).apply { text = "${device.displayName}${if (device.current) "  •  THIS DEVICE" else ""}\n${device.status.uppercase(Locale.US)}  •  last seen ${device.lastSeenAt}"; setTextColor(CarbonPalette.white); textSize = 13f }, fullWidthWrap())
+                if (device.status == "active" && !device.current) row.addView(secondaryButton("REQUEST REVOCATION") { requestDeviceRevocation(device) }, fullWidthWrap().apply { topMargin = dp(8) })
+                deviceContainer.addView(row, fullWidthWrap().apply { topMargin = dp(7) })
+            } }, onFailure = { deviceContainer.addView(operationText("Device inventory unavailable: ${it.message.orEmpty()}", CarbonPalette.red)) })
+        } }
+    }
+
+    private fun operationText(value: String, accent: Int) = TextView(this).apply {
+        text = value; textSize = 12f; setTextColor(CarbonPalette.white); setTextIsSelectable(true)
+        setPadding(dp(12), dp(10), dp(12), dp(10)); background = carbonControl(this@MainActivity, accent)
+    }
+
+    private fun requestDeviceRevocation(device: EnrolledDevice) {
+        GatewayClient.requestDeviceRevocation(GatewaySettings.baseUrl(this), device.id, DeviceCredentials.token(this)) { result -> runOnUiThread {
+            result.fold(onSuccess = { approval -> pendingApproval = approval; Toast.makeText(this, "Review the approval card to revoke ${device.displayName}.", Toast.LENGTH_LONG).show(); showPage(AppPage.HOME) },
+                onFailure = { Toast.makeText(this, "Revocation request failed: ${it.message.orEmpty()}", Toast.LENGTH_LONG).show() })
+        } }
+    }
+
+    private fun toggleWakeWord() {
+        if (WakeWordSettings.isEnabled(this)) {
+            setWakeWordEnabled(false)
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            setWakeWordEnabled(true)
+        } else {
+            pendingWakeWordEnable = true
+            pendingPermissionCorrection = false
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+        }
+    }
+
+    private fun setWakeWordEnabled(enabled: Boolean) {
+        if (enabled) VICWakeService.enable(this) else VICWakeService.disable(this)
+        updateWakeWordButton()
+        Toast.makeText(
+            this,
+            if (enabled) "Hey VIC is listening locally" else "Hey VIC disabled",
+            Toast.LENGTH_SHORT,
+        ).show()
+    }
+
+    private fun updateWakeWordButton() {
+        if (!::wakeWordButton.isInitialized) return
+        val enabled = WakeWordSettings.isEnabled(this)
+        wakeWordButton.text = if (enabled) "HEY VIC: ENABLED — TAP TO DISABLE" else "ENABLE “HEY VIC”"
+        wakeWordButton.setTextColor(if (enabled) CarbonPalette.black else CarbonPalette.white)
+        wakeWordButton.background = carbonControl(this, if (enabled) CarbonPalette.teal else CarbonPalette.line)
+        wakeWordButton.contentDescription = if (enabled) {
+            "Hey VIC wake word enabled. Tap to disable."
+        } else {
+            "Hey VIC wake word disabled. Tap to enable."
         }
     }
 
@@ -1548,6 +2033,103 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }
         }
     }
+
+    private fun startArtifactEventStream() {
+        val token = DeviceCredentials.token(this) ?: return
+        artifactEventSubscription?.close()
+        artifactEventSubscription = GatewayClient.streamArtifactEvents(
+            GatewaySettings.baseUrl(this), token,
+            onEvent = { runOnUiThread { if (!isFinishing && !isDestroyed && currentPage == AppPage.FILES) loadArtifacts() } },
+            onClosed = { error -> if (error != null && !isFinishing && !isDestroyed) runOnUiThread {
+                artifactStatusView.postDelayed({ if (!isFinishing && !isDestroyed) startArtifactEventStream() }, 2_000)
+            } },
+        )
+    }
+
+    private fun loadArtifacts() {
+        if (!::artifactStatusView.isInitialized) return
+        artifactStatusView.text = "Loading managed files…"
+        GatewayClient.getArtifacts(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(onSuccess = ::renderArtifacts, onFailure = {
+                    artifactStatusView.text = "Files are unavailable.\n${it.message.orEmpty()}"
+                    artifactStatusView.setTextColor(CarbonPalette.red)
+                })
+            }
+        }
+    }
+
+    private fun renderArtifacts(artifacts: List<VoiceArtifact>) {
+        artifactContainer.removeAllViews()
+        artifactStatusView.text = "${artifacts.size} managed file${if (artifacts.size == 1) "" else "s"} · live progress"
+        artifactStatusView.setTextColor(CarbonPalette.muted)
+        artifacts.forEach { artifact ->
+            val card = artifactPanel(13).apply {
+                addView(artifactHeading(artifact.title.ifBlank { artifact.filename }, 18f), fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "${artifact.filename} · v${artifact.version} · ${artifact.status.uppercase(Locale.US)} · ${artifact.progressPercent}%"
+                    textSize = 11f; setTextColor(if (artifact.status == "ready") CarbonPalette.green else CarbonPalette.teal)
+                    setPadding(0, dp(6), 0, 0)
+                }, fullWidthWrap())
+                if (artifact.description.isNotBlank()) addView(TextView(this@MainActivity).apply {
+                    text = artifact.description; textSize = 13f; setTextColor(CarbonPalette.muted); setPadding(0, dp(8), 0, 0)
+                }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = if (artifact.sha256.isBlank()) "Checksum pending" else "SHA-256 ${artifact.sha256.take(12)}…"
+                    textSize = 10f; setTextColor(CarbonPalette.muted); setPadding(0, dp(8), 0, 0)
+                }, fullWidthWrap())
+                val actions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                actions.addView(secondaryButton("PREVIEW") { previewArtifact(artifact) }.apply { isEnabled = artifact.status == "ready" }, weightedButton())
+                actions.addView(secondaryButton("DOWNLOAD") { saveArtifact(artifact) }.apply { isEnabled = artifact.status == "ready" }, weightedButton().apply { marginStart = dp(6) })
+                addView(actions, fullWidthWrap().apply { topMargin = dp(10) })
+            }
+            artifactContainer.addView(card, fullWidthWrap().apply { topMargin = dp(8) })
+        }
+        if (artifacts.isEmpty()) artifactStatusView.text = "No files yet. Ask VIC to create a PDF."
+    }
+
+    private fun previewArtifact(artifact: VoiceArtifact) {
+        artifactStatusView.text = "Validating and opening ${artifact.filename}…"
+        GatewayClient.downloadArtifact(GatewaySettings.baseUrl(this), artifact.id, DeviceCredentials.token(this)) { result ->
+            result.onSuccess { bytes ->
+                val file = File(cacheDir, "voiceos-${artifact.id}.pdf")
+                file.writeBytes(bytes)
+                runOnUiThread {
+                    try {
+                        artifactRenderer?.close(); artifactDescriptor?.close()
+                        artifactDescriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                        artifactRenderer = PdfRenderer(artifactDescriptor!!)
+                        val page = artifactRenderer!!.openPage(0)
+                        val width = resources.displayMetrics.widthPixels - dp(64)
+                        val height = (width.toFloat() / page.width * page.height).toInt()
+                        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY); page.close()
+                        artifactPreviewView.setImageBitmap(bitmap)
+                        artifactStatusView.text = "Previewing ${artifact.filename} · checksum validated"
+                    } catch (error: Exception) { artifactStatusView.text = "Could not preview PDF: ${error.message.orEmpty()}" }
+                }
+            }.onFailure { runOnUiThread { artifactStatusView.text = "Could not open PDF: ${it.message.orEmpty()}" } }
+        }
+    }
+
+    private fun saveArtifact(artifact: VoiceArtifact) {
+        artifactStatusView.text = "Preparing ${artifact.filename} for download…"
+        GatewayClient.downloadArtifact(GatewaySettings.baseUrl(this), artifact.id, DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                result.onSuccess { bytes ->
+                    pendingArtifactDownload = artifact.filename to bytes
+                    startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE); type = "application/pdf"; putExtra(Intent.EXTRA_TITLE, artifact.filename)
+                    }, REQUEST_ARTIFACT_DOWNLOAD)
+                }.onFailure { artifactStatusView.text = "Could not download PDF: ${it.message.orEmpty()}" }
+            }
+        }
+    }
+
+    private fun artifactPanel(padding: Int) = carbonPanelLayout(padding)
+
+    private fun artifactHeading(value: String, size: Float) = carbonHeading(value, size)
 
     private fun renderTasks(tasks: List<VoiceTask>, preserveStatus: Boolean = false) {
         latestTasks = tasks
@@ -1730,6 +2312,38 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     },
                 )
             }
+        }
+    }
+
+    private fun loadUpdateProposals() {
+        if (!::updateContainer.isInitialized) return
+        updateStatusView.text = "Checking the isolated update queueâ€¦"
+        GatewayClient.getUpdateProposals(GatewaySettings.baseUrl(this), DeviceCredentials.token(this)) { result ->
+            runOnUiThread {
+                updateContainer.removeAllViews()
+                result.onSuccess { proposals ->
+                    updateStatusView.text = if (proposals.isEmpty()) "Hermes is current; no candidates are waiting." else "${proposals.size} candidate${if (proposals.size == 1) "" else "s"} discovered. Nothing has changed production."
+                    proposals.forEach { proposal ->
+                        val card = taskPanel(14).apply {
+                            addView(taskHeading(proposal.component, 18f), fullWidthWrap())
+                            addView(TextView(this@MainActivity).apply { text = "${proposal.currentVersion.take(12)}  â†’  ${proposal.proposedVersion.take(12)}\n${proposal.releaseNotes}\n\nSKILLS (QUARANTINED)\n${proposal.skillChanges}\n\nSECURITY\n${proposal.securityChanges}\n\nROLLBACK  ${proposal.rollbackVersion.take(12)}"; textSize = 12f; setTextColor(CarbonPalette.white); setTextIsSelectable(true); setPadding(0, dp(10), 0, 0) }, fullWidthWrap())
+                            if (proposal.status == "discovered") {
+                                val decisions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                                decisions.addView(secondaryButton("REJECT") { decideUpdateProposal(proposal, false) }, weightedButton())
+                                decisions.addView(actionButton("APPROVE REVIEW").apply { setOnClickListener { decideUpdateProposal(proposal, true) } }, weightedButton().apply { marginStart = dp(8) })
+                                addView(decisions, fullWidthWrap().apply { topMargin = dp(12) })
+                            }
+                        }
+                        updateContainer.addView(card, fullWidthWrap().apply { topMargin = dp(8) })
+                    }
+                }.onFailure { updateStatusView.text = "Update proposals unavailable. ${it.message.orEmpty()}"; updateStatusView.setTextColor(CarbonPalette.red) }
+            }
+        }
+    }
+
+    private fun decideUpdateProposal(proposal: UpdateProposal, approve: Boolean) {
+        GatewayClient.decideUpdateProposal(GatewaySettings.baseUrl(this), proposal.id, approve, DeviceCredentials.token(this)) { result ->
+            runOnUiThread { result.fold(onSuccess = { loadUpdateProposals() }, onFailure = { Toast.makeText(this, it.message.orEmpty(), Toast.LENGTH_LONG).show() }) }
         }
     }
 
@@ -2087,12 +2701,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun renderState(state: VoiceState, label: String) {
         voiceState = state
         statusView.text = when (state) {
-            VoiceState.READY -> "VOICE CHANNEL READY"
-            VoiceState.STARTING -> "VOICE CHANNEL STARTING"
-            VoiceState.LISTENING -> "VOICE CHANNEL LISTENING"
-            VoiceState.PROCESSING -> "VOICE CHANNEL PROCESSING"
-            VoiceState.SPEAKING -> "VOICE CHANNEL SPEAKING"
-            VoiceState.ERROR -> "VOICE CHANNEL NEEDS ATTENTION"
+            VoiceState.READY -> "READY"
+            VoiceState.STARTING -> "STARTING"
+            VoiceState.LISTENING -> "LISTENING"
+            VoiceState.PROCESSING -> "THINKING"
+            VoiceState.SPEAKING -> "SPEAKING"
+            VoiceState.ERROR -> "NEEDS ATTENTION"
         }
         voiceTitleView.text = when (state) {
             VoiceState.READY -> "What can I help with?"
@@ -2208,6 +2822,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         private const val REQUEST_MICROPHONE = 42
         private const val REQUEST_DOCUMENT = 43
         private const val REQUEST_NOTIFICATIONS = 44
+        private const val REQUEST_ARTIFACT_DOWNLOAD = 45
         private const val RESPONSE_UTTERANCE_ID = "voiceos-response"
         private const val CORRECTION_PROMPT_ID = "voiceos-correction-prompt"
         private const val ERROR_UTTERANCE_ID = "voiceos-error"

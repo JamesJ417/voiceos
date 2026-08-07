@@ -124,6 +124,112 @@ impl DeterministicResolver {
                 source,
             ));
         }
+
+        if let Some(title) = strip_after(
+            &normalized,
+            &[
+                "create a pdf for ",
+                "create a pdf about ",
+                "make a pdf for ",
+                "generate a pdf for ",
+            ],
+        ) && !title.is_empty()
+        {
+            return Some(request(
+                "artifact.pdf.create",
+                [("title", json!(title))],
+                learned_entities,
+                0.94,
+                source,
+            ));
+        }
+        if has_any(
+            &normalized,
+            &["create a pdf", "make a pdf", "generate a pdf"],
+        ) {
+            return Some(request(
+                "artifact.pdf.create",
+                [],
+                learned_entities,
+                0.9,
+                source,
+            ));
+        }
+        if has_any(
+            &normalized,
+            &["revise the pdf", "update the pdf", "change the pdf"],
+        ) {
+            return Some(request(
+                "artifact.pdf.revise",
+                [],
+                learned_entities,
+                0.88,
+                source,
+            ));
+        }
+        if let Some(query) = strip_after(
+            &normalized,
+            &[
+                "find a pdf about ",
+                "find pdf about ",
+                "search my files for ",
+                "find my files about ",
+            ],
+        ) && !query.is_empty()
+        {
+            return Some(request(
+                "artifact.search",
+                [("query", json!(query))],
+                learned_entities,
+                0.96,
+                source,
+            ));
+        }
+        if has_any(
+            &normalized,
+            &[
+                "show my files",
+                "list my files",
+                "show vic created files",
+                "list generated pdfs",
+            ],
+        ) {
+            return Some(request(
+                "artifact.search",
+                [],
+                learned_entities,
+                0.97,
+                source,
+            ));
+        }
+        if has_any(
+            &normalized,
+            &["attach the pdf", "attach the file", "attach that pdf"],
+        ) {
+            return Some(request(
+                "artifact.attach",
+                [],
+                learned_entities,
+                0.86,
+                source,
+            ));
+        }
+        if has_any(
+            &normalized,
+            &[
+                "record task progress",
+                "update task progress",
+                "record progress on the task",
+            ],
+        ) {
+            return Some(request(
+                "task.progress.record",
+                [],
+                learned_entities,
+                0.86,
+                source,
+            ));
+        }
         if has_any(
             &normalized,
             &[
@@ -217,18 +323,19 @@ impl DeterministicResolver {
                 "upload document",
             ],
         ) {
-            return Some(request("document.add", [], vec![], 0.95, source));
+            return Some(request("knowledge.document.add", [], vec![], 0.95, source));
         }
         if has_any(
             &normalized,
             &[
-                "list files",
-                "list documents",
-                "show my files",
-                "show documents",
+                "list knowledge documents",
+                "list uploaded documents",
+                "show my knowledge documents",
+                "show my uploaded documents",
+                "show uploaded documents",
             ],
         ) {
-            return Some(request("document.list", [], vec![], 0.96, source));
+            return Some(request("knowledge.document.list", [], vec![], 0.96, source));
         }
         if let Some(document) = strip_after(
             &normalized,
@@ -241,7 +348,7 @@ impl DeterministicResolver {
         ) && !document.is_empty()
         {
             return Some(request(
-                "document.delete",
+                "knowledge.document.delete",
                 [("document", json!(document))],
                 vec![],
                 0.92,
@@ -390,7 +497,7 @@ fn resolve_entity(
 ) -> Option<EntityRef> {
     aliases
         .iter()
-        .filter(|alias| alias.entity.kind == kind && phrase.contains(&alias.phrase))
+        .filter(|alias| alias.entity.kind == kind && contains_phrase(phrase, &alias.phrase))
         .max_by_key(|alias| alias.phrase.len())
         .map(|alias| EntityRef {
             surface: Some(alias.phrase.clone()),
@@ -402,7 +509,7 @@ fn resolve_entity(
 fn resolve_learned_entities(phrase: &str, aliases: &[Alias]) -> Vec<EntityRef> {
     aliases
         .iter()
-        .filter(|alias| phrase.contains(&alias.phrase))
+        .filter(|alias| contains_phrase(phrase, &alias.phrase))
         .map(|alias| EntityRef {
             surface: Some(alias.phrase.clone()),
             ..alias.entity.clone()
@@ -448,14 +555,33 @@ fn playback_rate(phrase: &str) -> Option<f64> {
 fn has_any(phrase: &str, candidates: &[&str]) -> bool {
     candidates
         .iter()
-        .any(|candidate| phrase.contains(candidate))
+        .any(|candidate| contains_phrase(phrase, candidate))
+}
+
+pub fn contains_phrase(phrase: &str, candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return false;
+    }
+    phrase.match_indices(candidate).any(|(start, matched)| {
+        let end = start + matched.len();
+        let before_is_word = phrase[..start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric);
+        let after_is_word = phrase[end..]
+            .chars()
+            .next()
+            .is_some_and(char::is_alphanumeric);
+        !before_is_word && !after_is_word
+    })
 }
 
 fn is_task_assistance_request(phrase: &str) -> bool {
     if task_to_create(phrase).is_some() {
         return false;
     }
-    let mentions_tasks = has_any(phrase, &["task", "to do", "todo"]);
+    let mentions_tasks = has_any(phrase, &["task", "tasks", "to do", "todo"]);
     let asks_for_help = has_any(
         phrase,
         &[
@@ -502,7 +628,7 @@ fn is_task_review_request(phrase: &str) -> bool {
         return true;
     }
 
-    let mentions_tasks = has_any(phrase, &["task", "to do", "todo"]);
+    let mentions_tasks = has_any(phrase, &["task", "tasks", "to do", "todo"]);
     let asks_for_direction = has_any(
         phrase,
         &[
@@ -543,7 +669,7 @@ fn is_task_list_request(phrase: &str) -> bool {
         return true;
     }
 
-    let mentions_tasks = has_any(phrase, &["task", "to do", "todo"]);
+    let mentions_tasks = has_any(phrase, &["task", "tasks", "to do", "todo"]);
     let asks_for_list = has_any(
         phrase,
         &[

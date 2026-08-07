@@ -1,0 +1,27 @@
+name: Hermes upstream monitor
+
+on:
+  schedule:
+    - cron: "37 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compare locked Hermes commit with upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$(python3 -c 'import json; print(json.load(open("ops/agents/vendor-lock.json"))["dependencies"]["hermes-agent"]["commit"])')"
+          repo="$(python3 -c 'import json; print(json.load(open("ops/agents/vendor-lock.json"))["dependencies"]["hermes-agent"]["repository"])')"
+          proposed="$(git ls-remote "$repo" HEAD | awk '{print $1}')"
+          printf '{"current":"%s","proposed":"%s","update_available":%s}\n' "$current" "$proposed" "$([[ "$current" != "$proposed" ]] && echo true || echo false)" | tee hermes-upstream.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: hermes-upstream-check
+          path: hermes-upstream.json

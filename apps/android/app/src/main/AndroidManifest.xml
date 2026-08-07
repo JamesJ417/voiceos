@@ -56,6 +56,12 @@
             android:stopWithTask="false" />
 
         <service
+            android:name=".VICWakeService"
+            android:exported="false"
+            android:foregroundServiceType="microphone"
+            android:stopWithTask="false" />
+
+        <service
             android:name=".VicOutreachService"
             android:exported="false"
             android:foregroundServiceType="dataSync"

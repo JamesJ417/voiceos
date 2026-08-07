@@ -37,19 +37,26 @@ class ToolResult:
     result: dict[str, object] | None
     error: str | None
     processing_ms: int
+    ontology_decision: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
 
 
 ToolFunction = Callable[[dict[str, object]], dict[str, object]]
+OntologyValidator = Callable[[str, dict[str, object]], dict[str, object]]
 
 
 class ToolBroker:
     """Executes only registered functions; it never accepts a command string."""
 
-    def __init__(self, project_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        project_root: Path | None = None,
+        ontology_validator: OntologyValidator | None = None,
+    ) -> None:
         self.project_root = (project_root or Path.cwd()).resolve()
+        self._ontology_validator = ontology_validator or _local_ontology_validator
         self._specs = {
             "system.health": ToolSpec(
                 "system.health", "Report deterministic host health evidence.", "none", True,
@@ -161,13 +168,6 @@ class ToolBroker:
                 "Record an evidence-backed progress update without claiming the overall task is complete.",
                 _task_parameters({"summary": {"type": "string"}, "evidence": {"type": "object"}}, ["task_id", "summary"]),
             ),
-            "task.artifact.attach": (
-                "Attach a generated file, document, link, or other work product to a task.",
-                _task_parameters({
-                    "kind": {"type": "string"}, "uri": {"type": "string"},
-                    "description": {"type": "string"}, "owner": _party_schema(False),
-                }, ["task_id", "kind", "uri", "description", "owner"]),
-            ),
             "task.review.request": (
                 "Ask the user to review VIC's completed portion of a task.",
                 _task_parameters({"summary": {"type": "string"}}, ["task_id", "summary"]),
@@ -200,6 +200,73 @@ class ToolBroker:
         )
         self._functions[name] = executor
         self._model_aliases[name.replace(".", "_")] = name
+
+    def register_device_tools(self, executor: ToolFunction) -> None:
+        """Register credential-authority operations behind physical approval."""
+        name = "device.revoke"
+        self._specs[name] = ToolSpec(
+            name,
+            "Revoke one enrolled device credential. The requesting device cannot revoke itself.",
+            "confirm",
+            False,
+            {
+                "type": "object",
+                "properties": {
+                    "device_id": {"type": "string", "minLength": 1},
+                    "requesting_device_id": {"type": "string", "minLength": 1},
+                },
+                "required": ["device_id", "requesting_device_id"],
+                "additionalProperties": False,
+            },
+        )
+        self._functions[name] = executor
+        self._model_aliases[name.replace(".", "_")] = name
+
+    def register_artifact_tools(self, executor: ToolFunction) -> None:
+        """Give VIC structured, Rust-backed PDF catalog operations."""
+        pdf_properties = {
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "filename": {"type": "string"},
+            "task_id": {"type": "string"},
+            "template": {"type": "string", "enum": ["recipe-card"]},
+            "spec": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "subtitle": {"type": "string"},
+                    "sections": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"heading": {"type": "string"}, "body": {"type": "string"}},
+                            "required": ["heading", "body"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "footer": {"type": "string"},
+                },
+                "required": ["title", "sections"],
+                "additionalProperties": False,
+            },
+        }
+        definitions = {
+            "artifact.pdf.create": ("Create a managed PDF and optionally attach it to a task.", pdf_properties, ["title"]),
+            "artifact.pdf.revise": ("Create a new immutable revision of a managed PDF.", {"artifact_id": {"type": "string"}, **pdf_properties}, ["artifact_id", "title"]),
+            "artifact.find": ("Find VIC-created files by title, description, filename, or identifier; omit query to list all.", {"query": {"type": "string"}}, []),
+            "artifact.attach": ("Attach a ready managed artifact to an existing task.", {
+                "artifact_id": {"type": "string"}, "task_id": {"type": "string"}, "description": {"type": "string"},
+            }, ["artifact_id", "task_id", "description"]),
+        }
+        for name, (description, properties, required) in definitions.items():
+            self._specs[name] = ToolSpec(name, description, "none", False, {
+                "type": "object", "properties": properties, "required": required, "additionalProperties": False,
+            })
+            self._functions[name] = lambda arguments, selected=name: executor({"tool": selected, "arguments": arguments})
+            self._model_aliases[name.replace(".", "_")] = name
+
+    def set_ontology_validator(self, validator: OntologyValidator) -> None:
+        self._ontology_validator = validator
 
     def describe(self) -> list[dict[str, object]]:
         return [asdict(spec) for spec in self._specs.values()]
@@ -241,10 +308,22 @@ class ToolBroker:
                 selected_request_id, canonical_name, safe_arguments, "denied", False, None,
                 validation_error, _elapsed(started)
             )
-        if spec.approval == "confirm" and not approved:
+        ontology_decision = self._ontology_decision(canonical_name, safe_arguments)
+        disposition = ontology_decision.get("disposition")
+        if disposition in {"ask_clarifying_question", "reject"}:
+            return ToolResult(
+                selected_request_id, canonical_name, safe_arguments, "denied", False, None,
+                f"ontology_{disposition}", _elapsed(started), ontology_decision
+            )
+        if disposition not in {"execute", "ask_for_confirmation"}:
+            return ToolResult(
+                selected_request_id, canonical_name, safe_arguments, "denied", False, None,
+                "ontology_validator_invalid", _elapsed(started), ontology_decision
+            )
+        if (spec.approval == "confirm" or disposition == "ask_for_confirmation") and not approved:
             return ToolResult(
                 selected_request_id, canonical_name, safe_arguments, "approval_required", True, None, None,
-                _elapsed(started)
+                _elapsed(started), ontology_decision
             )
 
         try:
@@ -254,13 +333,30 @@ class ToolBroker:
                 result = self._functions[canonical_name](safe_arguments)
             return ToolResult(
                 selected_request_id, canonical_name, safe_arguments, "completed", False, result, None,
-                _elapsed(started)
+                _elapsed(started), ontology_decision
             )
         except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
             return ToolResult(
                 selected_request_id, canonical_name, safe_arguments, "error", False, None, str(error),
-                _elapsed(started)
+                _elapsed(started), ontology_decision
             )
+
+    def _ontology_decision(
+        self, name: str, arguments: dict[str, object]
+    ) -> dict[str, object]:
+        try:
+            decision = self._ontology_validator(name, arguments)
+        except (OSError, RuntimeError, ValueError) as error:
+            return {
+                "disposition": "reject",
+                "reason": "ontology_validator_unavailable",
+                "issues": [{"field": "validator", "code": "unavailable", "message": str(error)}],
+            }
+        return decision if isinstance(decision, dict) else {
+            "disposition": "reject",
+            "reason": "ontology_validator_invalid",
+            "issues": [],
+        }
 
     def _validate_arguments(self, name: str, arguments: dict[str, object]) -> str | None:
         if name in {"system.health", "disk.space", "network.status"}:
@@ -294,8 +390,42 @@ class ToolBroker:
             if not isinstance(rollback, str) or not rollback.strip() or len(rollback) > 4_000:
                 return "rollback_information_required"
             return None
+        if name == "device.revoke":
+            if set(arguments) != {"device_id", "requesting_device_id"}:
+                return "device_and_requester_required"
+            device_id = arguments.get("device_id")
+            requester = arguments.get("requesting_device_id")
+            if not isinstance(device_id, str) or not device_id.strip():
+                return "device_id_required"
+            if not isinstance(requester, str) or not requester.strip():
+                return "requesting_device_id_required"
+            return "self_revocation_not_allowed" if device_id == requester else None
         if name.startswith("task."):
             return _validate_task_tool(name, arguments)
+        if name.startswith("artifact."):
+            allowed = {
+                "artifact.pdf.create": {"title", "description", "filename", "task_id", "template", "spec"},
+                "artifact.pdf.revise": {"artifact_id", "title", "description", "filename", "task_id", "template", "spec"},
+                "artifact.find": set(),
+                "artifact.attach": {"artifact_id", "task_id", "description"},
+            }.get(name, set())
+            required = {
+                "artifact.pdf.create": {"title"},
+                "artifact.pdf.revise": {"artifact_id", "title"},
+                "artifact.find": {"query"},
+                "artifact.attach": {"artifact_id", "task_id", "description"},
+            }.get(name, set())
+            if not allowed or set(arguments) - allowed or not required.issubset(arguments):
+                return "invalid_artifact_arguments"
+            if any(not isinstance(arguments.get(key), str) or not str(arguments[key]).strip() for key in required):
+                return "artifact_text_required"
+            if "query" in arguments and (not isinstance(arguments["query"], str) or not arguments["query"].strip()):
+                return "artifact_text_required"
+            if "template" in arguments and arguments["template"] != "recipe-card":
+                return "artifact_template_not_allowlisted"
+            if "spec" in arguments and not isinstance(arguments["spec"], dict):
+                return "artifact_spec_invalid"
+            return None
         if name == "outreach.create":
             allowed = {"kind", "priority", "title", "body", "reason", "task_id", "dedupe_key"}
             required = {"kind", "priority", "title", "body", "reason"}
@@ -424,6 +554,49 @@ def _elapsed(started: float) -> int:
     return max(1, round((time.perf_counter() - started) * 1000))
 
 
+def _local_ontology_validator(
+    tool: str, arguments: dict[str, object]
+) -> dict[str, object]:
+    """Development fallback using the same tool-to-intent catalog identifiers.
+
+    Production replaces this callback with the Rust ontology endpoint. Keeping a
+    fail-closed, versioned fallback makes isolated broker tests exercise the gate
+    instead of silently bypassing it.
+    """
+    intents = {
+        "system.health": "system.health.check",
+        "disk.space": "system.disk.check",
+        "network.status": "system.network.check",
+        "service.status": "system.service.check",
+        "project.tests": "project.tests.run",
+        "rig.root_command": "system.admin.execute",
+        "task.step.create": "task.step.create",
+        "task.step.update": "task.step.update",
+        "task.blocker.create": "task.blocker.create",
+        "task.blocker.resolve": "task.blocker.resolve",
+        "task.handoff.create": "task.handoff.create",
+        "task.progress.record": "task.progress.record",
+        "task.review.request": "task.review.request",
+        "artifact.pdf.create": "artifact.pdf.create",
+        "artifact.pdf.revise": "artifact.pdf.revise",
+        "artifact.find": "artifact.search",
+        "artifact.attach": "artifact.attach",
+        "outreach.create": "outreach.create",
+        "device.revoke": "device.revoke",
+    }
+    intent = intents.get(tool)
+    if intent is None:
+        return {"catalog_version": 2, "disposition": "reject", "reason": "tool_has_no_canonical_intent", "issues": []}
+    return {
+        "catalog_version": 2,
+        "intent": intent,
+        "arguments": arguments,
+        "disposition": "ask_for_confirmation" if tool in {"project.tests", "rig.root_command", "device.revoke"} else "execute",
+        "reason": "intent_requires_confirmation" if tool in {"project.tests", "rig.root_command", "device.revoke"} else "validated_for_execution",
+        "issues": [],
+    }
+
+
 def _empty_parameters() -> dict[str, object]:
     return {"type": "object", "properties": {}, "additionalProperties": False}
 
@@ -449,7 +622,6 @@ def _validate_task_tool(name: str, arguments: dict[str, object]) -> str | None:
         "task.blocker.resolve": {"task_id", "blocker_id"},
         "task.handoff.create": {"task_id", "from_owner", "to_owner", "kind", "summary"},
         "task.progress.record": {"task_id", "summary"},
-        "task.artifact.attach": {"task_id", "kind", "uri", "description", "owner"},
         "task.review.request": {"task_id", "summary"},
     }.get(name)
     if required is None:

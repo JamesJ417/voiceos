@@ -1,12 +1,432 @@
 openapi: 3.1.0
 info:
   title: VoiceOS Gateway
-  version: 0.7.0
+  version: 0.11.0
 servers:
   - url: http://127.0.0.1:8787
 security:
   - deviceBearer: []
 paths:
+  /v1/devices:
+    get:
+      operationId: listEnrolledDevices
+      responses:
+        "200": { description: Credential-safe device inventory; token hashes and secrets are never returned }
+  /v1/devices/{device_id}/revocation:
+    post:
+      operationId: proposeDeviceRevocation
+      parameters:
+        - { in: path, name: device_id, required: true, schema: { type: string } }
+      responses:
+        "202": { description: Durable one-time approval proposal; the current device cannot revoke itself }
+  /v1/activity:
+    get:
+      operationId: listUnifiedActivity
+      parameters:
+        - { in: query, name: after, schema: { type: integer, minimum: 0 } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 1000 } }
+      responses:
+        "200": { description: "Unified VIC notices, decisions, models, attempts, changes, evidence, files, needs-you state, and rollback availability" }
+  /v1/memory/sleep/cycles/current:
+    get:
+      operationId: getCurrentSleepCycle
+      responses:
+        "200": { description: Current or most recent bounded VIC sleep-memory cycle }
+  /v1/memory/sleep/cycles:
+    post:
+      operationId: startSleepCycle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode: { type: string, enum: [dry_run, commit], default: dry_run }
+                trigger_kind: { type: string, enum: [manual, test], default: manual }
+                config: { type: object }
+      responses:
+        "201": { description: Completed bounded cycle and morning report }
+        "503": { description: Feature flag is disabled }
+  /v1/memory/sleep/cycles/{cycle_id}:
+    get:
+      operationId: getSleepCycle
+      parameters:
+        - { in: path, name: cycle_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "Cycle state, evidence, metrics, and report" }
+        "404": { description: Cycle does not exist }
+  /v1/memory/sleep/cycles/{cycle_id}/actions:
+    post:
+      operationId: actOnSleepCycle
+      parameters:
+        - { in: path, name: cycle_id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [commit, rollback, pause, resume, cancel, approve_proposal, reject_proposal, promote_dream] }
+                proposal_id: { type: [string, "null"], format: uuid }
+                memory_id: { type: [string, "null"], format: uuid }
+                reason: { type: [string, "null"] }
+      responses:
+        "200": { description: Audited cycle action result }
+  /v1/memory/morning-report:
+    get:
+      operationId: getMemoryMorningReport
+      responses:
+        "200": { description: "Latest concise consolidation, contradiction, dream, and skill summary" }
+  /v1/memory/search:
+    get:
+      operationId: searchReconstructiveMemory
+      parameters:
+        - { in: query, name: q, required: true, schema: { type: string, minLength: 1 } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { in: query, name: include_dreams, schema: { type: boolean, default: false } }
+      responses:
+        "200": { description: Provenance-bearing active memories; dreams excluded unless explicitly requested }
+  /v1/doctrine/status:
+    get:
+      operationId: getVicDoctrineStatus
+      responses:
+        "200": { description: Feature flags and identity-safe doctrine counts }
+  /v1/doctrine/sources:
+    get:
+      operationId: listPrivateDoctrineSourceProfiles
+      responses:
+        "200": { description: Private source profiles; requires source-audit mode }
+        "403": { description: Private source audit is disabled }
+  /v1/doctrine/sources/records:
+    get:
+      operationId: listPrivateDoctrineSourceRecords
+      responses:
+        "200": { description: Private authorized source records without source content }
+    post:
+      operationId: registerAuthorizedDoctrineSource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [profile_id, source_type, title, private_origin, authorization_status, authorization_basis, source_quality, content]
+              properties:
+                profile_id: { type: string }
+                source_type: { type: string, enum: [user_note, licensed_excerpt, public_domain, authorized_transcript, authorized_document] }
+                title: { type: string, minLength: 1 }
+                private_origin: { type: string, minLength: 1 }
+                publication_date: { type: [string, "null"] }
+                authorization_status: { type: string, const: approved }
+                authorization_basis: { type: string, minLength: 1 }
+                source_quality: { type: number, minimum: 0, maximum: 1 }
+                content: { type: string, minLength: 1, maxLength: 1048576 }
+      responses:
+        "201": { description: Immutable hashed private source record }
+  /v1/doctrine/sources/records/{record_id}/process:
+    post:
+      operationId: processAuthorizedDoctrineSource
+      parameters:
+        - { in: path, name: record_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Protected structured candidates; never approved or active }
+        "503": { description: Doctrine extraction is disabled }
+  /v1/doctrine/sources/records/{record_id}/revoke:
+    post:
+      operationId: revokeDoctrineSource
+      parameters:
+        - { in: path, name: record_id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Source revoked and materially dependent active doctrine returned to review }
+  /v1/doctrine/candidates:
+    get:
+      operationId: listDoctrineCandidates
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 200 } }
+      responses:
+        "200": { description: Structured protected doctrine candidates without private provenance }
+  /v1/doctrine/candidates/{candidate_id}/decision:
+    post:
+      operationId: decideDoctrineCandidate
+      parameters:
+        - { in: path, name: candidate_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [approve, reject, request_revision] }
+      responses:
+        "200": { description: Audited explicit candidate review; does not activate doctrine }
+  /v1/doctrine/candidates/{candidate_id}/status:
+    post:
+      operationId: setDoctrineCandidateActive
+      parameters:
+        - { in: path, name: candidate_id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [active]
+              properties:
+                active: { type: boolean }
+      responses:
+        "200": { description: Separate audited activation or deactivation of previously approved doctrine }
+  /v1/doctrine/candidates/{candidate_id}/provenance:
+    get:
+      operationId: getPrivateDoctrineProvenance
+      parameters:
+        - { in: path, name: candidate_id, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Private source identity and evidence; source-audit mode required }
+        "403": { description: Private source audit is disabled }
+  /v1/doctrine/active:
+    get:
+      operationId: retrieveActiveVicDoctrine
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 50 } }
+      responses:
+        "200": { description: Active identity-safe doctrine only; runtime flag required }
+  /v1/doctrine/lenses:
+    get:
+      operationId: retrieveVicReasoningLenses
+      parameters:
+        - { in: query, name: q, schema: { type: string } }
+      responses:
+        "200": { description: Abstract relevance lenses with no private source names }
+  /v1/doctrine/contradictions:
+    get:
+      operationId: listDoctrineContradictions
+      responses:
+        "200": { description: Unresolved candidate tensions retained without false consensus }
+  /v1/doctrine/evaluations:
+    post:
+      operationId: runDoctrineEvaluation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kind, input]
+              properties:
+                kind: { type: string, enum: [identity_leakage, prompt_injection, sycophancy, doctrine_fidelity, contradiction_handling, evidence_revision, style_independence, source_removal] }
+                input: { type: string, minLength: 1 }
+      responses:
+        "200": { description: Stored deterministic doctrine evaluation evidence }
+  /v1/admin/status:
+    get:
+      operationId: getInstallationStatus
+      responses:
+        "200": { description: "Installation resources, GPU, models, audio, services, backup evidence, and failures" }
+  /v1/admin/actions:
+    post:
+      operationId: proposeAdministratorAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, target]
+              properties:
+                action: { type: string, enum: [restart_service, speaker_test, microphone_test] }
+                target: { type: string }
+      responses:
+        "202": { description: Durable exact single-use root-broker approval proposal; never executes directly }
+  /v1/updates:
+    get:
+      operationId: listUpdateProposals
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [discovered, approved, rejected, candidate_ready, deploying, deployed, failed, rolled_back] } }
+      responses:
+        "200":
+          description: Inert owner-scoped upstream update proposals
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposals]
+                properties:
+                  proposals: { type: array, items: { $ref: "#/components/schemas/UpdateProposal" } }
+  /v1/updates/{update_id}/decision:
+    post:
+      operationId: decideUpdateProposal
+      parameters:
+        - { in: path, name: update_id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties: { decision: { type: string, enum: [approve, reject] } }
+      responses:
+        "200": { description: Update reviewed without deploying it }
+  /v1/updates/{update_id}/actions:
+    post:
+      operationId: proposeUpdateOperation
+      parameters:
+        - { in: path, name: update_id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties: { action: { type: string, enum: [stage, deploy, health_check, rollback] } }
+      responses:
+        "200": { description: Single-use root-broker approval card; no operation executes directly }
+  /v1/attention:
+    get:
+      operationId: listAttentionInbox
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [open, snoozed, resolved, dismissed] } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 500 } }
+      responses:
+        "200":
+          description: Unified owner-scoped items requiring attention
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, summary]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/AttentionItem" } }
+                  summary: { type: object }
+    post:
+      operationId: upsertAttentionItem
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpsertAttentionItem" }
+      responses:
+        "201": { description: Attention item created or refreshed by stable source identity }
+  /v1/attention/{attention_id}/actions:
+    post:
+      operationId: actOnAttentionItem
+      parameters:
+        - { in: path, name: attention_id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AttentionAction" }
+      responses:
+        "200": { description: "Item reviewed, converted to a task, drafted, or moved" }
+        "400": { description: Action is unavailable for this item }
+        "404": { description: Attention item not found }
+  /v1/calendar/events:
+    get:
+      operationId: listCalendarEvents
+      parameters:
+        - { in: query, name: start_at, required: true, schema: { type: string, format: date-time } }
+        - { in: query, name: end_at, required: true, schema: { type: string, format: date-time } }
+      responses:
+        "200": { description: Canonical busy-time events used by the planner }
+    post:
+      operationId: upsertCalendarEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CalendarEventInput" }
+      responses:
+        "201": { description: Calendar event normalized into the canonical store }
+  /v1/tasks/{task_id}/schedule:
+    post:
+      operationId: setTaskSchedule
+      parameters:
+        - { in: path, name: task_id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaskScheduleInput" }
+      responses:
+        "200": { description: "Task scheduling, recurrence, location, preparation, and travel metadata updated" }
+  /v1/plans/daily/work:
+    post:
+      operationId: buildDailyWorkPlan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DailyWorkPlanRequest" }
+      responses:
+        "200":
+          description: Deterministic task and calendar plan with unscheduled work and replanning warnings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plan]
+                properties:
+                  plan: { $ref: "#/components/schemas/DailyWorkPlan" }
+  /v1/automations:
+    get:
+      operationId: listAutomations
+      parameters:
+        - in: query
+          name: include_disabled
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Owner-scoped attention and automation rules
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [automations]
+                properties:
+                  automations: { type: array, items: { $ref: "#/components/schemas/AutomationRule" } }
+    post:
+      operationId: createAutomation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAutomationRule" }
+      responses:
+        "201": { description: Validated automation created }
+        "400": { description: "Invalid trigger, conditions, actions, frequency limit, or evidence" }
+  /v1/automations/{automation_id}/enabled:
+    post:
+      operationId: setAutomationEnabled
+      parameters:
+        - in: path
+          name: automation_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        "200": { description: Automation off switch updated }
+        "404": { description: Automation not found }
   /v1/health:
     get:
       operationId: getHealth
@@ -382,6 +802,93 @@ paths:
       operationId: listAuditEvents
       responses:
         "200": { description: Recent enrollment and tool-decision events }
+  /v1/agents/runs:
+    get:
+      operationId: listAgentRuns
+      summary: List durable Codex coordinator and subagent runs
+      parameters:
+        - in: query
+          name: task_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Owner-scoped Codex run tree
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs: { type: array, items: { $ref: "#/components/schemas/AgentRun" } }
+        "401": { description: Device authentication required }
+    post:
+      operationId: createAgentRun
+      summary: Queue a bounded top-level Codex run for VIC
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAgentRun" }
+      responses:
+        "202":
+          description: Codex run queued; execution begins only when the supervisor claims it
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run]
+                properties:
+                  run: { $ref: "#/components/schemas/AgentRun" }
+        "400": { description: Invalid or over-broad run request }
+        "401": { description: Device authentication required }
+  /v1/agents/events:
+    get:
+      operationId: streamAgentRunEvents
+      summary: Stream durable coordinator and subagent progress
+      parameters:
+        - in: query
+          name: after
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: header
+          name: Last-Event-ID
+          schema: { type: string }
+      responses:
+        "200":
+          description: Authenticated SSE stream of agent lifecycle, plan, command, file, and subagent events
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "401": { description: Device authentication required }
+  /v1/agents/runs/{run_id}:
+    get:
+      operationId: getAgentRun
+      summary: Inspect one Codex run, its direct children, and durable progress events
+      parameters:
+        - in: path
+          name: run_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Agent run detail and evidence }
+        "401": { description: Device authentication required }
+        "404": { description: Agent run not found }
+  /v1/agents/runs/{run_id}/cancel:
+    post:
+      operationId: cancelAgentRun
+      summary: Request cancellation of a non-terminal Codex run
+      parameters:
+        - in: path
+          name: run_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Agent run marked cancelled }
+        "401": { description: Device authentication required }
+        "404": { description: Agent run not found }
+        "409": { description: Agent run changed or is already terminal }
   /v1/tasks:
     get:
       operationId: listTasks
@@ -422,6 +929,7 @@ paths:
                 title: { type: string, minLength: 1 }
                 observable_outcome: { type: string, minLength: 1 }
                 estimated_minutes: { type: integer, minimum: 1 }
+                due_at: { type: [string, "null"], format: date-time }
                 project_id: { type: [string, "null"] }
                 parent_task_id: { type: [string, "null"] }
       responses:
@@ -510,7 +1018,35 @@ paths:
       operationId: getVicOutreachPolicy
       summary: Get quiet hours, interruption limits, and announcement preferences
       responses:
-        "200": { description: Current outreach policy }
+        "200":
+          description: Current outreach policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [policy]
+                properties:
+                  policy: { $ref: "#/components/schemas/OutreachPolicy" }
+        "401": { description: Device authentication required }
+    post:
+      operationId: updateVicOutreachPolicy
+      summary: Update quiet hours, review cadence, planning, digest, location, driving, and interruption controls
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OutreachPolicyUpdate" }
+      responses:
+        "200":
+          description: Updated outreach policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [policy]
+                properties:
+                  policy: { $ref: "#/components/schemas/OutreachPolicy" }
+        "400": { description: Invalid policy value }
         "401": { description: Device authentication required }
   /v1/outreach/{outreach_id}/actions:
     post:
@@ -655,11 +1191,101 @@ paths:
       responses:
         "200": { description: File and extracted passages deleted }
         "404": { description: File does not exist for this device }
+  /v1/artifacts:
+    get:
+      operationId: listArtifacts
+      parameters:
+        - in: query
+          name: query
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Managed artifacts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [artifacts]
+                properties:
+                  artifacts: { type: array, items: { $ref: "#/components/schemas/Artifact" } }
+  /v1/artifacts/pdfs:
+    post:
+      operationId: createPdfArtifact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePdfArtifact" }
+      responses:
+        "202": { description: PDF generation queued }
+  /v1/artifacts/events:
+    get:
+      operationId: streamArtifactEvents
+      responses:
+        "200":
+          description: Server-sent artifact lifecycle events
+          content:
+            text/event-stream: { schema: { type: string } }
+  /v1/artifacts/{artifact_id}:
+    get:
+      operationId: getArtifact
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Artifact catalog record }
+        "404": { description: Artifact not found }
+  /v1/artifacts/{artifact_id}/preview:
+    get:
+      operationId: previewArtifact
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Checksum-validated inline artifact bytes }
+        "409": { description: Artifact is not ready }
+  /v1/artifacts/{artifact_id}/download:
+    get:
+      operationId: downloadArtifact
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Checksum-validated attachment bytes }
+        "409": { description: Artifact is not ready }
+  /v1/artifacts/{artifact_id}/revisions:
+    post:
+      operationId: revisePdfArtifact
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreatePdfArtifact" }
+      responses:
+        "202": { description: Immutable PDF revision queued }
   /v1/ontology/catalog:
     get:
       operationId: getOntologyCatalog
       responses:
-        "200": { description: "Versioned canonical intents, entities, argument schemas, units, and approval requirements" }
+        "200":
+          description: "Versioned canonical intents, entities, argument schemas, units, and approval requirements"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OntologyCatalog" }
         "401": { description: Device authentication required }
   /v1/ontology/interpret:
     post:
@@ -700,7 +1326,7 @@ paths:
               required: [phrase, entity_kind, entity_id]
               properties:
                 phrase: { type: string, minLength: 1 }
-                entity_kind: { type: string, enum: [device, provider, service, document, memory, decision] }
+                entity_kind: { type: string, enum: [device, provider, service, document, artifact, task, person, project, skill, email, location, memory, decision] }
                 entity_id: { type: string }
       responses:
         "201": { description: Alias validated against the catalog and stored }
@@ -867,6 +1493,68 @@ components:
       schema: { type: string, pattern: "^Bearer .+" }
       description: Bearer credential issued during device enrollment.
   schemas:
+    OntologyCatalog:
+      type: object
+      required: [version, minimum_compatible_version, entity_kinds, intents, entities]
+      properties:
+        version: { type: integer, minimum: 2 }
+        minimum_compatible_version: { type: integer, minimum: 1 }
+        entity_kinds:
+          type: array
+          items: { type: string, enum: [device, provider, service, document, artifact, task, person, project, skill, email, location, memory, decision] }
+        intents: { type: array, items: { type: object } }
+        entities: { type: array, items: { type: object } }
+    Artifact:
+      type: object
+      required: [id, owner_id, kind, title, filename, media_type, status, progress_percent, version, created_by, created_at, updated_at]
+      properties:
+        id: { type: string }
+        owner_id: { type: string }
+        job_id: { type: [string, "null"] }
+        task_id: { type: [string, "null"] }
+        parent_artifact_id: { type: [string, "null"] }
+        kind: { type: string }
+        title: { type: string }
+        filename: { type: string }
+        media_type: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [queued, generating, validating, ready, failed] }
+        progress_percent: { type: integer, minimum: 0, maximum: 100 }
+        storage_key: { type: [string, "null"] }
+        uri: { type: string }
+        sha256: { type: [string, "null"] }
+        byte_size: { type: [integer, "null"], minimum: 0 }
+        version: { type: integer, minimum: 1 }
+        metadata: { type: object }
+        error: { type: [string, "null"] }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"] }
+    CreatePdfArtifact:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string }
+        description: { type: string }
+        filename: { type: string }
+        task_id: { type: string }
+        template: { type: string, enum: [recipe-card] }
+        spec:
+          type: object
+          required: [title, sections]
+          properties:
+            title: { type: string }
+            subtitle: { type: string }
+            sections:
+              type: array
+              items:
+                type: object
+                required: [heading, body]
+                properties:
+                  heading: { type: string }
+                  body: { type: string }
+            footer: { type: string }
     Health:
       type: object
       required: [status, gateway, speech_to_text, language_model, text_to_speech]
@@ -1032,12 +1720,12 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, conversation.floor.changed, task.changed, task.initiative.updated, task.progress.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
+          enum: [conversation.turn, conversation.floor.changed, task.changed, task.initiative.updated, task.progress.updated, task.schedule.changed, approval.proposed, approval.decided, attention.changed, attention.actioned, calendar.changed, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated, vic.review.completed, automation.executed, agent.run.updated, agent.run.queued, agent.run.starting, agent.run.running, agent.run.waiting_approval, agent.run.waiting_input, agent.run.completed, agent.run.failed, agent.run.cancelled, agent.progress.updated, agent.plan.updated, agent.command.started, agent.command.updated, agent.command.completed, agent.file.changed, agent.subagent.started, agent.subagent.updated, agent.subagent.completed, agent.approval.denied]
         payload: { type: object }
         created_at: { type: string, format: date-time }
     Task:
       type: object
-      required: [id, owner_id, title, observable_outcome, estimated_minutes, status, created_at, updated_at]
+      required: [id, owner_id, title, observable_outcome, estimated_minutes, due_at, status, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         owner_id: { type: string }
@@ -1046,9 +1734,167 @@ components:
         title: { type: string }
         observable_outcome: { type: string }
         estimated_minutes: { type: integer, minimum: 1 }
+        due_at: { type: [string, "null"], format: date-time }
         status: { type: string, enum: [proposed, ready, active, blocked, completed, cancelled] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    UpdateProposal:
+      type: object
+      required: [id, owner_id, component, current_version, proposed_version, status, release_notes, dependency_changes, api_changes, configuration_changes, skill_changes, security_changes, affected_components, rollback_version, evidence, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        component: { type: string }
+        current_version: { type: string }
+        proposed_version: { type: string }
+        status: { type: string, enum: [discovered, approved, rejected, candidate_ready, deploying, deployed, failed, rolled_back] }
+        release_notes: { type: string }
+        dependency_changes: { type: [array, object] }
+        api_changes: { type: [array, object] }
+        configuration_changes: { type: [array, object] }
+        skill_changes: { type: [array, object], description: Skill hashes and quarantine state; never activates bundled skills }
+        security_changes: { type: [array, object] }
+        affected_components: { type: [array, object] }
+        rollback_version: { type: string }
+        candidate_path: { type: [string, "null"] }
+        evidence: { type: [array, object] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AttentionItem:
+      type: object
+      required: [id, owner_id, category, source_id, title, summary, urgency, status, occurred_at, approval_required, available_actions, evidence, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        category: { type: string, enum: [email, calendar, question, approval, document, system, message, agent_work] }
+        source_id: { type: string }
+        title: { type: string }
+        summary: { type: string }
+        urgency: { type: string, enum: [routine, important, urgent] }
+        status: { type: string, enum: [open, snoozed, resolved, dismissed] }
+        task_id: { type: [string, "null"], format: uuid }
+        occurred_at: { type: string, format: date-time }
+        due_at: { type: [string, "null"], format: date-time }
+        approval_required: { type: boolean }
+        available_actions: { type: array, items: { type: string } }
+        evidence: { type: object }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UpsertAttentionItem:
+      type: object
+      required: [category, source_id, title, summary, available_actions, evidence]
+      properties:
+        category: { type: string, enum: [email, calendar, question, approval, document, system, message, agent_work] }
+        source_id: { type: string }
+        title: { type: string }
+        summary: { type: string }
+        urgency: { type: string, enum: [routine, important, urgent], default: routine }
+        task_id: { type: [string, "null"], format: uuid }
+        occurred_at: { type: string, format: date-time }
+        due_at: { type: [string, "null"], format: date-time }
+        approval_required: { type: boolean, default: false }
+        available_actions: { type: array, minItems: 1, items: { type: string } }
+        evidence: { type: object }
+    AttentionAction:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [summarize, create_task, prepare_reply, request_send_approval, request_invitation_approval, review, resolve, dismiss, snooze] }
+        task_title: { type: string }
+        observable_outcome: { type: string }
+        estimated_minutes: { type: integer, minimum: 1, maximum: 1440 }
+        draft: { type: string }
+    CalendarEventInput:
+      type: object
+      required: [source_id, title, start_at, end_at]
+      properties:
+        source_id: { type: string }
+        title: { type: string }
+        start_at: { type: string, format: date-time }
+        end_at: { type: string, format: date-time }
+        location: { type: [string, "null"] }
+        status: { type: string, enum: [confirmed, tentative, cancelled], default: confirmed }
+        response_status: { type: string, enum: [none, needs_action, accepted, declined, tentative], default: none }
+        task_id: { type: [string, "null"], format: uuid }
+        preparation_minutes: { type: integer, minimum: 0, maximum: 1440 }
+        travel_minutes: { type: integer, minimum: 0, maximum: 1440 }
+        metadata: { type: object }
+    TaskScheduleInput:
+      type: object
+      properties:
+        earliest_start_at: { type: [string, "null"], format: date-time }
+        recurrence_rule: { type: [string, "null"], description: RFC5545-style rule beginning with FREQ= }
+        location: { type: [string, "null"] }
+        preparation_minutes: { type: integer, minimum: 0, maximum: 1440 }
+        travel_minutes: { type: integer, minimum: 0, maximum: 1440 }
+        preferred_time: { type: [string, "null"], pattern: "^[0-2][0-9]:[0-5][0-9]$" }
+    DailyWorkPlanRequest:
+      type: object
+      required: [day_start, day_end]
+      properties:
+        day_start: { type: string, format: date-time }
+        day_end: { type: string, format: date-time }
+        current_location: { type: string, enum: [unknown, home, work, away, driving] }
+    DailyWorkPlan:
+      type: object
+      required: [owner_id, date, generated_at, current_location, blocks, unscheduled_task_ids, warnings]
+      properties:
+        owner_id: { type: string }
+        date: { type: string, format: date }
+        generated_at: { type: string, format: date-time }
+        current_location: { type: string }
+        blocks:
+          type: array
+          items:
+            type: object
+            required: [task_id, title, start_at, end_at, preparation_minutes, travel_minutes, reason]
+            properties:
+              task_id: { type: string, format: uuid }
+              title: { type: string }
+              start_at: { type: string, format: date-time }
+              end_at: { type: string, format: date-time }
+              location: { type: [string, "null"] }
+              preparation_minutes: { type: integer, minimum: 0 }
+              travel_minutes: { type: integer, minimum: 0 }
+              reason: { type: string }
+        unscheduled_task_ids: { type: array, items: { type: string, format: uuid } }
+        warnings: { type: array, items: { type: string } }
+    AgentRun:
+      type: object
+      required: [id, owner_id, idempotency_key, role, objective, status, provider, model, reasoning_effort, sandbox, capability_scope, requested_by, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        task_id: { type: [string, "null"], format: uuid }
+        parent_run_id: { type: [string, "null"], format: uuid }
+        idempotency_key: { type: string }
+        role: { type: string, enum: [coordinator, implementer, researcher, reviewer, tester, security] }
+        objective: { type: string, minLength: 1, maxLength: 16384 }
+        status: { type: string, enum: [queued, starting, running, waiting_approval, waiting_input, completed, failed, cancelled] }
+        provider: { type: string, const: codex }
+        model: { type: string }
+        reasoning_effort: { type: string, enum: [low, medium, high, xhigh, max, ultra] }
+        sandbox: { type: string, enum: [read-only, workspace-write] }
+        capability_scope: { type: array, maxItems: 64, items: { type: string } }
+        codex_thread_id: { type: [string, "null"] }
+        current_activity: { type: [string, "null"] }
+        result_summary: { type: [string, "null"] }
+        error: { type: [string, "null"] }
+        requested_by: { type: string }
+        created_at: { type: string, format: date-time }
+        started_at: { type: [string, "null"], format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+    CreateAgentRun:
+      type: object
+      additionalProperties: false
+      required: [objective]
+      properties:
+        task_id: { type: [string, "null"], format: uuid }
+        objective: { type: string, minLength: 1, maxLength: 16384 }
+        role: { type: string, enum: [coordinator, implementer, researcher, reviewer, tester, security], default: coordinator }
+        sandbox: { type: string, enum: [read-only, workspace-write], default: read-only }
+        idempotency_key: { type: string, minLength: 1, maxLength: 200 }
     TaskInitiative:
       type: object
       required: [task_id, job_id, status, summary, capabilities, started_actions, next_actions, approval_boundary]
@@ -1095,7 +1941,7 @@ components:
       type: object
       required: [action]
       properties:
-        action: { type: string, enum: [step.create, step.update, blocker.create, blocker.resolve, handoff.create, progress.record, artifact.attach, review.request] }
+        action: { type: string, enum: [step.create, step.update, blocker.create, blocker.resolve, handoff.create, progress.record, review.request] }
         step_id: { type: string }
         blocker_id: { type: string }
         title: { type: string }
@@ -1106,7 +1952,6 @@ components:
         kind: { type: string }
         summary: { type: string }
         description: { type: string }
-        uri: { type: string }
         evidence: { type: object }
     VicOutreach:
       type: object
@@ -1129,6 +1974,84 @@ components:
         delivered_at: { type: [string, "null"], format: date-time }
         responded_at: { type: [string, "null"], format: date-time }
         snoozed_until: { type: [string, "null"], format: date-time }
+    OutreachPolicy:
+      type: object
+      required: [owner_id, enabled, quiet_hours_start, quiet_hours_end, timezone, max_checkins_per_day, cooldown_minutes, driving_mode, spoken_headphones_only, daily_digest_enabled, do_not_disturb, current_location, daily_planning_time, morning_digest_time, evening_digest_time, scan_interval_minutes, updated_at]
+      properties:
+        owner_id: { type: string }
+        enabled: { type: boolean }
+        quiet_hours_start: { type: string, pattern: "^[0-2][0-9]:[0-5][0-9]$" }
+        quiet_hours_end: { type: string, pattern: "^[0-2][0-9]:[0-5][0-9]$" }
+        timezone: { type: string }
+        max_checkins_per_day: { type: integer, minimum: 1, maximum: 48 }
+        cooldown_minutes: { type: integer, minimum: 5, maximum: 1440 }
+        driving_mode: { type: boolean }
+        spoken_headphones_only: { type: boolean }
+        daily_digest_enabled: { type: boolean }
+        do_not_disturb: { type: boolean }
+        current_location: { type: string, enum: [unknown, home, work, away, driving] }
+        daily_planning_time: { type: string }
+        morning_digest_time: { type: string }
+        evening_digest_time: { type: string }
+        scan_interval_minutes: { type: integer, minimum: 15, maximum: 30 }
+        updated_at: { type: string, format: date-time }
+    OutreachPolicyUpdate:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        quiet_hours_start: { type: string }
+        quiet_hours_end: { type: string }
+        timezone: { type: string }
+        max_checkins_per_day: { type: integer, minimum: 1, maximum: 48 }
+        cooldown_minutes: { type: integer, minimum: 5, maximum: 1440 }
+        driving_mode: { type: boolean }
+        spoken_headphones_only: { type: boolean }
+        daily_digest_enabled: { type: boolean }
+        do_not_disturb: { type: boolean }
+        current_location: { type: string, enum: [unknown, home, work, away, driving] }
+        daily_planning_time: { type: string }
+        morning_digest_time: { type: string }
+        evening_digest_time: { type: string }
+        scan_interval_minutes: { type: integer, minimum: 15, maximum: 30 }
+    AutomationFrequencyLimit:
+      type: object
+      required: [max_runs, window_minutes]
+      properties:
+        max_runs: { type: integer, minimum: 1, maximum: 1000 }
+        window_minutes: { type: integer, minimum: 1, maximum: 43200 }
+    AutomationRule:
+      type: object
+      required: [id, owner_id, name, description, enabled, trigger, conditions, permitted_actions, frequency_limit, evidence, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        trigger: { type: object }
+        conditions: { type: object }
+        permitted_actions:
+          type: array
+          items: { type: string, enum: [notify.needs_you, digest.add, digest.deliver, model.classify, planning.prompt, review.scan] }
+        frequency_limit: { $ref: "#/components/schemas/AutomationFrequencyLimit" }
+        evidence: { type: [object, array] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    CreateAutomationRule:
+      type: object
+      required: [name, description, trigger, conditions, permitted_actions, frequency_limit, evidence]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, minLength: 1 }
+        enabled: { type: boolean, default: true }
+        trigger: { type: object }
+        conditions: { type: object }
+        permitted_actions:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [notify.needs_you, digest.add, digest.deliver, model.classify, planning.prompt, review.scan] }
+        frequency_limit: { $ref: "#/components/schemas/AutomationFrequencyLimit" }
+        evidence: { type: [object, array] }
     CreateVicOutreach:
       type: object
       required: [kind, priority, title, body, reason]
@@ -1154,7 +2077,7 @@ components:
             type: object
             required: [kind, id]
             properties:
-              kind: { type: string }
+              kind: { type: string, enum: [device, provider, service, document, artifact, task, person, project, skill, email, location, memory, decision] }
               id: { type: string }
               surface: { type: [string, "null"] }
         arguments: { type: object, additionalProperties: true }
@@ -1167,12 +2090,13 @@ components:
         source: { type: string, enum: [deterministic, approved_alias, model_fallback, user_correction] }
     InterpretationDecision:
       type: object
-      required: [id, owner_id, original_phrase, normalized_phrase, status, validation_issues, corrections, final_decision, created_at, updated_at]
+      required: [id, owner_id, original_phrase, normalized_phrase, catalog_version, status, validation_issues, validator, corrections, final_decision, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         owner_id: { type: string }
         original_phrase: { type: string }
         normalized_phrase: { type: string }
+        catalog_version: { type: integer, minimum: 1 }
         interpretation:
           anyOf:
             - { $ref: "#/components/schemas/CanonicalRequest" }
@@ -1181,6 +2105,13 @@ components:
         validation_issues:
           type: array
           items: { type: object }
+        validator:
+          type: object
+          required: [disposition, reason, issues]
+          properties:
+            disposition: { type: string, enum: [execute, ask_for_confirmation, ask_clarifying_question, reject] }
+            reason: { type: string }
+            issues: { type: array, items: { type: object } }
         corrections:
           type: array
           items: { type: object }

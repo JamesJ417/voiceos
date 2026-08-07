@@ -1,4 +1,5 @@
 mod api;
+mod artifact_worker;
 mod bootstrap;
 mod ontology_fallback;
 mod state;

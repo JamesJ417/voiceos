@@ -16,6 +16,16 @@ This package prepares an Ubuntu host without assuming a specific CPU, GPU model,
 10. Run `ops/rig/install-gateway-service.sh /absolute/path/to/repository`.
 11. Edit `/etc/voiceos/voiceos-gateway.env` before enabling the service.
 
+For an existing rig checkout, `ops/rig/apply-local-release.sh /absolute/path/to/repository`
+runs the complete quality gate, installs the Rust core, gateway, connector service,
+and safe Hermes release monitor, then restarts them and requires all three local
+health checks to pass. Gmail and Calendar stay in `credentials_required` state
+until their OAuth access-token files are placed under `/etc/voiceos/secrets`.
+Run the same command with `--preflight` as the second argument to validate Linux,
+GPU, Tailscale, Ollama, free space, and repository safety without changing the
+installation. Every applied release snapshots the previous binary and units in
+`/var/lib/voiceos/releases`; a failed restart or health check restores them.
+
 ## Optional Codex Sol tier
 
 If an existing `llm` user has `/home/llm/.local/bin/codex` and `codex login

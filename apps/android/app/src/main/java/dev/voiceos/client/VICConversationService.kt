@@ -21,6 +21,7 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
+import android.util.Log
 import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
@@ -45,6 +46,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     private var pendingApproval: ApprovalRequest? = null
     private var floorEvents: EventSubscription? = null
     private var floorCursor = 0L
+    private var minimumFloorRevision = 0L
     private var lastFloorUpdateMillis = 0L
     private val sessionId by lazy {
         val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
@@ -78,6 +80,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         override fun onError(error: Int) {
             latestPartial = null
             if (!active || paused || speaking || requestInFlight) return
+            Log.w(TAG, "speech recognizer error=$error active=$active paused=$paused")
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> handleSilence()
@@ -116,7 +119,6 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         super.onCreate()
         createNotificationChannel()
         textToSpeech = TextToSpeech(this, this)
-        startFloorEvents()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -213,6 +215,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             return
         }
         active = true
+        Log.i(TAG, "conversation session starting")
         paused = false
         stopAfterSpeech = false
         pauseAfterSpeech = false
@@ -224,11 +227,21 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             handler.post {
                 if (!active) return@post
                 result.fold(
-                    onSuccess = {
+                    onSuccess = { claimedFloor ->
+                        minimumFloorRevision = maxOf(minimumFloorRevision, claimedFloor.revision)
+                        startFloorEvents()
+                        Log.i(TAG, "conversation floor claimed at revision ${claimedFloor.revision}")
                         publish(STATE_STARTING, detail = "Conversation Mode starting")
                         scheduleListening(150L)
                     },
-                    onFailure = { failAndStop("I could not claim the VoiceOS conversation channel.") },
+                    onFailure = { error ->
+                        Log.w(TAG, "conversation floor claim failed", error)
+                        publish(
+                            STATE_STARTING,
+                            detail = "Conversation starting; cross-device handoff is temporarily unavailable",
+                        )
+                        scheduleListening(150L)
+                    },
                 )
             }
         }
@@ -258,12 +271,22 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         changeFloor("claim", "listening") { result ->
             handler.post {
                 result.fold(
-                    onSuccess = {
+                    onSuccess = { claimedFloor ->
+                        minimumFloorRevision = maxOf(minimumFloorRevision, claimedFloor.revision)
+                        startFloorEvents()
                         publish(STATE_STARTING, detail = "Resuming conversation")
                         updateNotification("Listening for you", paused = false)
                         scheduleListening(150L)
                     },
-                    onFailure = { pauseSession() },
+                    onFailure = { error ->
+                        Log.w(TAG, "conversation floor resume failed; continuing locally", error)
+                        publish(
+                            STATE_STARTING,
+                            detail = "Resuming locally; cross-device handoff is temporarily unavailable",
+                        )
+                        updateNotification("Listening for you", paused = false)
+                        scheduleListening(150L)
+                    },
                 )
             }
         }
@@ -276,6 +299,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             return
         }
         generation += 1
+        Log.i(TAG, "conversation session stopping: $detail")
         active = false
         paused = false
         speaking = false
@@ -328,11 +352,17 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
 
     private fun handleSilence() {
         silentAttempts += 1
-        if (silentAttempts >= MAX_SILENT_ATTEMPTS) {
-            speakThenStop("I haven't heard anything, so I am ending this conversation.")
-        } else {
-            publish(STATE_STARTING, detail = "Still listening")
-            scheduleListening(450L)
+        when (ConversationIdlePolicy.afterSilence(silentAttempts, SILENT_ATTEMPTS_BEFORE_PAUSE)) {
+            ConversationIdlePolicy.Action.KEEP_LISTENING -> {
+                publish(STATE_STARTING, detail = "Still listening")
+                scheduleListening(450L)
+            }
+            ConversationIdlePolicy.Action.PAUSE -> {
+                // Preserve the session and its context. A later tracked result can still
+                // arrive through VIC outreach, and the notification can resume listening.
+                pauseSession()
+                Log.i(TAG, "conversation paused after idle silence; session preserved")
+            }
         }
     }
 
@@ -541,8 +571,13 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 val value = event.payload.optJSONObject("floor") ?: return@streamEvents
                 val next = GatewayClient.parseConversationFloor(value)
                 val thisDevice = DeviceCredentials.deviceId(this)
-                if (active && next.active && next.holderDeviceId != thisDevice) {
+                if (next.holderDeviceId == thisDevice) {
+                    minimumFloorRevision = maxOf(minimumFloorRevision, next.revision)
+                    return@streamEvents
+                }
+                if (ConversationFloorPolicy.shouldYield(active, minimumFloorRevision, next, thisDevice)) {
                     handler.post {
+                        Log.i(TAG, "yielding floor at revision ${next.revision} to ${next.holderDisplayName ?: "another device"}")
                         stopSession("Conversation continued on ${next.holderDisplayName ?: "another device"}")
                     }
                 }
@@ -756,7 +791,11 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         private const val NOTIFICATION_ID = 12
         private const val UTTERANCE_ID = "vic-conversation-response"
         private const val SESSION_MAX_MILLIS = 30 * 60 * 1_000L
-        private const val MAX_SILENT_ATTEMPTS = 2
+        // On-device recognition commonly times out after a few quiet seconds. Six
+        // cycles gives a natural post-response thinking window without holding the
+        // microphone forever.
+        private const val SILENT_ATTEMPTS_BEFORE_PAUSE = 6
+        private const val TAG = "VICConversation"
 
         private val APPROVE_COMMANDS = setOf("approve", "approved", "yes approve", "confirm")
         private val DENY_COMMANDS = setOf("deny", "denied", "no deny", "reject", "cancel")
