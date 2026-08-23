@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir="${VOICEOS_PROJECT_DIR:-$HOME/Work/voiceos}"
+binary="$project_dir/target/release/vic-panel-native"
+
+systemctl --user start voiceos-hermes.service voiceos-codex.service voiceos-gateway.service
+
+if [[ ! -x "$binary" ]]; then
+  echo "Building the native VIC Panel for the first launch…"
+  cargo build --release --manifest-path "$project_dir/Cargo.toml" -p vic-panel-native
+fi
+
+exec "$binary"

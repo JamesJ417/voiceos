@@ -1,0 +1,18 @@
+window.vic-window { background: #080b0d; color: #dce5e4; }
+.kicker { color: #35e0c1; font-size: 11px; font-weight: 800; letter-spacing: 2px; }
+.page-title { color: #f4f8f7; font-size: 32px; font-weight: 600; }
+.status-pill, .memory-pill { padding: 8px 13px; border: 1px solid #263236; border-radius: 999px; color: #65e8d0; background: #111719; font-size: 11px; font-weight: 700; }
+.panel { padding: 22px; border: 1px solid #263236; border-radius: 20px; background: #111619; box-shadow: 0 16px 40px rgba(0,0,0,.28); }
+.voice-card { background: linear-gradient(145deg, #182024, #0e1315); }
+.voice-title { color: #f4f8f7; font-size: 28px; font-weight: 600; }
+.section-title { color: #f4f8f7; font-size: 23px; font-weight: 600; }
+.muted { color: #829093; line-height: 1.45; }
+.vic-orb { min-width: 118px; min-height: 118px; border: 2px solid #35e0c1; border-radius: 999px; color: #35e0c1; background: #0a1214; font-weight: 800; box-shadow: 0 0 24px rgba(53,224,193,.25); }
+.conversation-card { min-height: 680px; }
+.message { padding: 13px 15px; border: 1px solid #222d30; border-radius: 13px; background: #0b1012; }
+.message-vic { border-left: 3px solid #35e0c1; }
+.message-user { background: #151b1e; }
+.message-role { color: #35e0c1; font-size: 10px; font-weight: 800; letter-spacing: 1.5px; }
+expander title { color: #dce5e4; }
+entry { min-height: 46px; padding: 0 14px; border: 1px solid #2b393d; border-radius: 12px; background: #080c0e; color: #eef5f4; }
+.send-button { min-width: 90px; min-height: 46px; border-radius: 12px; color: #05100e; background: #35e0c1; font-weight: 800; }

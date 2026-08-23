@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/vic-panel-native",
     "services/voiceos-core",
     "services/voiceos-gateway-rs",
     "services/voiceos-ontology",

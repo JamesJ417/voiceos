@@ -152,6 +152,7 @@ chmod 0644 "$unit_dir/voiceos-wake.service"
 
 install -m 0755 "$script_dir/voiceosctl" "$bin_dir/voiceosctl"
 install -m 0755 "$script_dir/voiceos-talk" "$bin_dir/voiceos-talk"
+install -m 0755 "$script_dir/voiceos-native" "$bin_dir/voiceos-native"
 sed -e "s|@@WAKE_PYTHON@@|$wake_venv/bin/python|g" -e "s|@@REPO_ROOT@@|$repo_root|g" \
   "$script_dir/voiceos-ptt.template" >"$bin_dir/voiceos-ptt"
 chmod 0755 "$bin_dir/voiceos-ptt"
@@ -171,6 +172,18 @@ desktop_file="$applications_dir/omarchy-voice.desktop"
   printf '%s\n' 'Categories=Utility;Audio;'
   printf '%s\n' 'Keywords=VIC;voice;assistant;Hermes;Codex;'
 } >"$desktop_file"
+
+native_desktop_file="$applications_dir/omarchy-voice-native.desktop"
+{
+  printf '%s\n' '[Desktop Entry]'
+  printf '%s\n' 'Type=Application'
+  printf '%s\n' 'Name=VIC Panel Native Preview'
+  printf '%s\n' 'Comment=Native Rust interface for Omarchy Voice'
+  printf 'Exec=%s\n' "$bin_dir/voiceos-native"
+  printf '%s\n' 'Terminal=false'
+  printf '%s\n' 'Categories=Utility;Accessibility;'
+  printf '%s\n' 'StartupNotify=true'
+} >"$native_desktop_file"
 
 menu_file="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc"
 install -d -m 0755 "$(dirname "$menu_file")"
