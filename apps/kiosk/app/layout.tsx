@@ -13,16 +13,16 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Omarchy Voice Carbon Command",
-  description: "The private touchscreen command surface for Omarchy Voice.",
+  title: "VIC Panel",
+  description: "The full-screen private workspace for VIC and Omarchy Voice.",
   openGraph: {
-    title: "Omarchy Voice Carbon Command",
+    title: "VIC Panel",
     description: "Private voice intelligence. One continuous conversation.",
-    images: [{ url: "/og.png", width: 1536, height: 1024, alt: "Omarchy Voice Carbon Command" }],
+    images: [{ url: "/og.png", width: 1536, height: 1024, alt: "VIC Panel" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Omarchy Voice Carbon Command",
+    title: "VIC Panel",
     description: "Private voice intelligence. One continuous conversation.",
     images: ["/og.png"],
   },

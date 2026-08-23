@@ -160,8 +160,8 @@ desktop_file="$applications_dir/omarchy-voice.desktop"
 {
   printf '%s\n' '[Desktop Entry]'
   printf '%s\n' 'Type=Application'
-  printf '%s\n' 'Name=Omarchy Voice'
-  printf '%s\n' 'Comment=Talk to VIC through Hermes and Codex'
+  printf '%s\n' 'Name=VIC Panel'
+  printf '%s\n' 'Comment=Open the full-screen VIC workspace'
   printf 'Exec=%s\n' "$bin_dir/voiceos-talk"
   printf '%s\n' 'Icon=audio-input-microphone'
   printf '%s\n' 'Terminal=false'
@@ -191,17 +191,48 @@ if '"omarchy-voice"' not in text:
     entry = (
         f'{comma}\n  "omarchy-voice": {{\n'
         '    "icon": "󰍬",\n'
-        '    "label": "Omarchy Voice",\n'
+        '    "label": "VIC Panel",\n'
         '    "action": "voiceos-talk",\n'
-        '    "aliases": ["vic", "voice"],\n'
-        '    "description": "Talk to VIC"\n'
+        '    "aliases": ["vic", "voice", "omarchy voice"],\n'
+        '    "description": "Open the full-screen VIC workspace"\n'
         '  }\n'
     )
     path.write_text(body.rstrip() + entry + text[closing:], encoding="utf-8")
+else:
+    text = re.sub(r'("omarchy-voice"\s*:\s*\{.*?"label"\s*:\s*)"[^"]*"', r'\1"VIC Panel"', text, count=1, flags=re.S)
+    text = re.sub(r'("omarchy-voice"\s*:\s*\{.*?"description"\s*:\s*)"[^"]*"', r'\1"Open the full-screen VIC workspace"', text, count=1, flags=re.S)
+    path.write_text(text, encoding="utf-8")
 PY
 
 systemctl --user daemon-reload
 omarchy menu refresh >/dev/null
+
+hypr_config="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hyprland.lua"
+hypr_autostart="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/autostart.lua"
+if [[ -f "$hypr_config" ]] && ! grep -q 'Keep VIC Panel as a dedicated full-screen' "$hypr_config"; then
+  {
+    printf '\n%s\n' '-- Keep VIC Panel as a dedicated full-screen Omarchy workspace.'
+    printf '%s\n' 'o.window({ class = "^chrome-127.*Default$" }, {'
+    printf '%s\n' '  tag = "-default-opacity",'
+    printf '%s\n' '  tile = true,'
+    printf '%s\n' '  fullscreen = true,'
+    printf '%s\n' '  no_dim = true,'
+    printf '%s\n' '  opacity = "1 1",'
+    printf '%s\n' '})'
+  } >>"$hypr_config"
+fi
+if [[ -f "$hypr_autostart" ]] && ! grep -q 'o.launch_on_start("voiceos-talk")' "$hypr_autostart"; then
+  {
+    printf '\n%s\n' '-- Start the full-screen VIC Panel with each Omarchy desktop session.'
+    printf '%s\n' 'o.launch_on_start("voiceos-talk")'
+  } >>"$hypr_autostart"
+fi
+hyprctl reload >/dev/null
+if [[ -n "$(hyprctl configerrors)" ]]; then
+  echo "Hyprland rejected the VIC Panel window rule:" >&2
+  hyprctl configerrors >&2
+  exit 1
+fi
 
 if ((enable)); then
   systemctl --user enable voiceos-core.service voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service voiceos-wake.service

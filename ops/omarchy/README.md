@@ -74,10 +74,11 @@ voiceosctl restart
 voiceos-talk
 ```
 
-`voiceos-talk` opens Carbon Command in Google Chrome. Press **Talk**, allow microphone
+`voiceos-talk` opens VIC Panel full-screen in Google Chrome. Press **Talk**, allow microphone
 access the first time, speak, and press **Done**. Chromium performs speech
 recognition, the gateway sends the transcript to the Hermes-powered VIC agent, and
-browser speech synthesis reads VIC's answer aloud.
+the gateway returns the same Ava Neural voice used by the local Hey VIC listener.
+Browser speech synthesis remains available as a fallback if neural TTS is offline.
 
 The always-on `voiceos-wake.service` keeps wake-word detection local. Say
 **“Hey VIC”**, then speak your command. Only the post-wake utterance is transcribed

@@ -6,6 +6,9 @@ import argparse
 import json
 import os
 import re
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -276,7 +279,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                     "gateway": "ok",
                     "speech_to_text": "android-on-device",
                     "language_model": provider,
-                    "text_to_speech": "android-device",
+                    "text_to_speech": "ava-neural",
                     "audit": "sqlite",
                     "transport": "tailscale-https",
                 },
@@ -462,6 +465,11 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             if not self._require_device():
                 return
             self._handle_transcription()
+            return
+        if path == "/v1/speech/synthesize":
+            if not self._require_device():
+                return
+            self._handle_speech_synthesis()
             return
         if path == "/v1/turns/text":
             if not self._require_device():
@@ -836,6 +844,50 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 "reply_audio_url": None,
             },
         )
+
+    def _handle_speech_synthesis(self) -> None:
+        payload = self._read_json()
+        if payload is None:
+            return
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "text_required"})
+            return
+        speech = text.strip()[:4_000]
+        configured_python = os.environ.get("VOICEOS_EDGE_TTS_PYTHON", "").strip()
+        tts_python = configured_python or str(
+            Path.home() / ".local/share/voiceos/wake-venv/bin/python"
+        )
+        if not Path(tts_python).is_file():
+            tts_python = sys.executable
+        try:
+            with tempfile.TemporaryDirectory(prefix="voiceos-web-tts-") as temporary:
+                audio_path = Path(temporary) / "reply.mp3"
+                completed = subprocess.run(
+                    [
+                        tts_python, "-m", "edge_tts", "--voice",
+                        "en-US-AvaMultilingualNeural", "--text", speech,
+                        "--write-media", str(audio_path),
+                    ],
+                    capture_output=True,
+                    check=False,
+                    timeout=120,
+                )
+                if completed.returncode or not audio_path.is_file():
+                    raise RuntimeError("edge_tts_failed")
+                audio = audio_path.read_bytes()
+        except (OSError, subprocess.TimeoutExpired, RuntimeError):
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "speech_synthesis_unavailable"})
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(audio)))
+        self.send_header("Cache-Control", "no-store")
+        origin = self._allowed_cors_origin()
+        if origin is not None:
+            self._write_cors_headers(origin)
+        self.end_headers()
+        self.wfile.write(audio)
 
     def _handle_tool_execution(self) -> None:
         payload = self._read_json()

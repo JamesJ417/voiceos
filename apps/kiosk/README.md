@@ -1,6 +1,6 @@
-# Omarchy Voice Carbon Command kiosk
+# VIC Panel
 
-This responsive interface is the browser and HP touchscreen client for Omarchy Voice.
+This responsive interface is VIC's full-screen Omarchy workspace and the HP touchscreen client for Omarchy Voice.
 It connects to the existing gateway and shared server-owned conversation. The
 Command surface supports browser speech recognition, typed turns, spoken
 responses, playback speed, repeat, copy, private document upload, and approval

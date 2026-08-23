@@ -139,6 +139,7 @@ export default function Home() {
   const [floor, setFloor] = useState<ConversationFloor | null>(null);
   const recorder = useRef<MediaRecorder | null>(null);
   const microphoneStream = useRef<MediaStream | null>(null);
+  const audioPlayback = useRef<HTMLAudioElement | null>(null);
   const audioChunks = useRef<Blob[]>([]);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
@@ -384,6 +385,8 @@ export default function Home() {
 
   useEffect(() => () => {
     recorder.current?.stop();
+    audioPlayback.current?.pause();
+    audioPlayback.current = null;
     speechSynthesis.cancel();
   }, []);
 
@@ -425,7 +428,38 @@ export default function Home() {
     }
   }
 
-  function speak(text: string) {
+  async function speak(text: string) {
+    audioPlayback.current?.pause();
+    audioPlayback.current = null;
+    speechSynthesis.cancel();
+    if (gateway && text) {
+      try {
+        const headers = new Headers({ "Content-Type": "application/json" });
+        if (token) headers.set("Authorization", `Bearer ${token}`);
+        const response = await fetch(`${gateway}/v1/speech/synthesize`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ text }),
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error(`Speech HTTP ${response.status}`);
+        const url = URL.createObjectURL(await response.blob());
+        const audio = new Audio(url);
+        audioPlayback.current = audio;
+        audio.playbackRate = speechRate;
+        audio.onplay = () => setVoiceState("speaking");
+        audio.onended = () => { URL.revokeObjectURL(url); audioPlayback.current = null; setVoiceState("ready"); void changeFloor("release", "idle").catch(() => undefined); };
+        audio.onerror = () => { URL.revokeObjectURL(url); audioPlayback.current = null; speakWithBrowserVoice(text); };
+        await audio.play();
+        return;
+      } catch {
+        // Keep speech available if the host neural voice is temporarily offline.
+      }
+    }
+    speakWithBrowserVoice(text);
+  }
+
+  function speakWithBrowserVoice(text: string) {
     if (!("speechSynthesis" in window) || !text) {
       setVoiceState("ready");
       return;
@@ -488,6 +522,8 @@ export default function Home() {
     if (voiceState === "listening") {
       recorder.current?.stop();
     } else if (voiceState === "speaking") {
+      audioPlayback.current?.pause();
+      audioPlayback.current = null;
       speechSynthesis.cancel();
       setVoiceState("ready");
       void changeFloor("release", "idle").catch(() => undefined);
@@ -629,7 +665,7 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <div><p className="kicker">Carbon Command · Web</p><h1>{view === "command" ? "Command center" : view === "tasks" ? "Shared task operations" : view === "history" ? "Conversation history" : "System status"}</h1></div>
+          <div><p className="kicker">VIC Panel · Omarchy Voice</p><h1>{view === "command" ? "Talk with VIC" : view === "tasks" ? "Shared task operations" : view === "history" ? "Conversation history" : "System status"}</h1></div>
           <div className="top-actions">
             <span className={`online-pill ${connected ? "" : "offline-pill"}`}><span className={`status-dot ${connected ? "" : "offline"}`} /> {connected ? "Online" : "Offline"}</span>
             <button className="icon-button" aria-label="Open connection settings" onClick={() => setShowSettings(true)}>⚙</button>

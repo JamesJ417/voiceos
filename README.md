@@ -4,14 +4,14 @@ Omarchy Voice is a voice-first AI layer for [Omarchy](https://omarchy.org). It
 runs VIC, a persistent personal agent powered by Hermes and a remote Codex CLI
 brain, directly underneath the Omarchy desktop—no local LLM required.
 
-Talk to VIC from the compact desktop panel or the Android companion app. The
+Talk to VIC from the full-screen VIC Panel or the Android companion app. The
 Omarchy workstation owns the private gateway, conversation, permissions, tools,
 and audit history; Tailscale carries encrypted traffic between devices without
 exposing the gateway to the public internet.
 
 ## What it does
 
-- Keeps Omarchy Voice in a permanent bottom-right Hyprland tile.
+- Opens VIC Panel as a dedicated full-screen Hyprland workspace.
 - Uses a USB microphone for hands-free conversations with VIC.
 - Connects VIC to Hermes for agent orchestration and Codex for remote reasoning.
 - Extends VIC to a Pixel phone over private Tailscale HTTPS.
@@ -45,7 +45,7 @@ management, Tailscale access, and the security model.
 
 ```text
 apps/android/       Native Android client and home-screen widget
-apps/kiosk/         Carbon Command touchscreen console
+apps/kiosk/         VIC Panel web and touchscreen console
 contracts/          HTTP API contract
 docs/               Architecture and security decisions
 services/gateway/   Mock inference gateway
@@ -115,9 +115,9 @@ The default gateway URL is `http://10.0.2.2:8787`, which reaches this laptop fro
 
 Cleartext HTTP is allowed only in the debug build for initial LAN testing. The production transport will require TLS over the private Tailscale network.
 
-## Carbon Command interfaces
+## VIC Panel interfaces
 
-The Pixel client and the touchscreen console share the Carbon Command visual
+The Pixel client and the touchscreen console share the VIC Panel visual
 system: near-black carbon surfaces, restrained hex geometry, cyan-teal primary
 actions, and explicit state labels. The phone remains voice-first and displays
 secondary controls only when they apply. The responsive client in `apps/kiosk`
