@@ -294,7 +294,7 @@ def run(args: argparse.Namespace) -> None:
             if stopping:
                 break
             if not transcript:
-                speak("Yes?")
+                speak("Yes, I'm here.")
             while not stopping:
                 if transcript:
                     if ends_conversation(transcript):

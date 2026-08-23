@@ -85,6 +85,8 @@ and sent to the same VIC/Hermes conversation path; VIC's reply is spoken aloud.
 After each reply, continue speaking naturally without repeating the wake phrase.
 Say **“goodbye”** or **“stop listening”** to end the conversation, or wait 20
 seconds for it to return to wake-word mode automatically.
+If you say only **“Hey VIC”**, VIC answers **“Yes, I'm here”** before listening
+for your first request.
 
 The gateway listens only on `127.0.0.1:8787`. Use Tailscale Serve when a phone
 needs private HTTPS access; never expose port 8787 through the router or enable
