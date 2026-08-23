@@ -302,13 +302,30 @@ export default function Home() {
               const nextFloor = event.payload.floor as ConversationFloor | undefined;
               if (nextFloor) {
                 setFloor(nextFloor);
-                const thisDevice = currentDeviceId();
-                if (nextFloor.active && nextFloor.holder_device_id !== thisDevice) {
-                  recorder.current?.stop();
-                  speechSynthesis.cancel();
-                  setVoiceState("ready");
+                if (nextFloor.active) {
+                  setView("command");
+                  const thisDevice = currentDeviceId();
+                  const externalVoice = nextFloor.holder_display_name === "VIC desktop microphone" || nextFloor.holder_device_id !== thisDevice;
+                  if (externalVoice) {
+                    recorder.current?.stop();
+                    speechSynthesis.cancel();
+                  }
+                  setVoiceState(
+                    nextFloor.phase === "speaking" ? "speaking" :
+                    nextFloor.phase === "processing" ? "processing" : "listening"
+                  );
                   setLiveTranscript(nextFloor.partial_transcript ?? "");
-                  setStatusMessage(`Conversation active on ${nextFloor.holder_display_name ?? "another device"}.`);
+                  if (nextFloor.response_text) setLastResponse(nextFloor.response_text);
+                  setStatusMessage(
+                    nextFloor.phase === "speaking" ? "VIC is responding in this window." :
+                    nextFloor.phase === "processing" ? "VIC is working on your voice request." :
+                    `Listening through ${nextFloor.holder_display_name ?? "Omarchy Voice"}.`
+                  );
+                  if (nextFloor.phase === "speaking") void loadHistory();
+                } else {
+                  setVoiceState("ready");
+                  setLiveTranscript("");
+                  setStatusMessage("Voice channel ready");
                 }
               }
             }

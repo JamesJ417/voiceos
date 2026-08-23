@@ -71,6 +71,34 @@ class GatewayClient:
             self.session_id = returned_session.strip()
         return result["response_text"].strip()
 
+    def change_floor(
+        self,
+        action: str,
+        phase: str,
+        *,
+        partial_transcript: str | None = None,
+        response_text: str | None = None,
+    ) -> None:
+        payload = json.dumps({
+            "action": action,
+            "phase": phase,
+            "partial_transcript": partial_transcript,
+            "response_text": response_text,
+            "display_name": "VIC desktop microphone",
+            "ttl_seconds": 120,
+        }).encode("utf-8")
+        request = Request(
+            f"{self.base_url}/v1/conversations/active/floor",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                response.read(64 * 1024)
+        except (HTTPError, URLError, TimeoutError, OSError) as error:
+            LOG.warning("Could not publish VIC window state: %s", error)
+
 
 def ensure_model(root: Path) -> Path:
     target = root / MODEL_DIRNAME
@@ -114,7 +142,9 @@ class SherpaWakeWord:
                 raise RuntimeError(f"missing_sherpa_model_file: {pattern}")
             return str(found[0])
 
-        threshold = 0.05 + 0.4 * min(1.0, max(0.0, sensitivity))
+        # Sherpa's lower keyword threshold is more permissive, so invert the
+        # user-facing sensitivity scale: 1.0 means easiest to trigger.
+        threshold = 0.45 - 0.4 * min(1.0, max(0.0, sensitivity))
         self._spotter = sherpa_onnx.KeywordSpotter(
             tokens=str(token_file), encoder=model("encoder-*[!8].onnx"), decoder=model("decoder-*[!8].onnx"),
             joiner=model("joiner-*[!8].onnx"), keywords_file=str(self._keywords_path),
@@ -260,6 +290,37 @@ def stop_recorder(recorder: subprocess.Popen[bytes]) -> None:
         recorder.kill()
 
 
+def show_command_center() -> None:
+    """Focus the existing VIC app window, or launch it when it is not open."""
+    clients = subprocess.run(
+        ["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=5, check=False
+    )
+    try:
+        windows = json.loads(clients.stdout) if clients.returncode == 0 else []
+    except json.JSONDecodeError:
+        windows = []
+    if any(
+        isinstance(window, dict)
+        and str(window.get("class", "")).startswith("chrome-127.0.0.1__-Default")
+        for window in windows
+    ):
+        subprocess.run(
+            [
+                "hyprctl",
+                "dispatch",
+                'hl.dsp.focus({ window = "class:^chrome-127.0.0.1__-Default$" })',
+            ],
+            timeout=5,
+            check=False,
+        )
+        return
+    launcher = Path.home() / ".local/bin/voiceos-talk"
+    subprocess.Popen(
+        [str(launcher)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 def generate_speech(text: str, audio_path: Path) -> None:
     audio_path.parent.mkdir(parents=True, exist_ok=True)
     generated = subprocess.run(
@@ -342,6 +403,8 @@ def run(args: argparse.Namespace) -> None:
                         raise RuntimeError("microphone_stream_ended")
                     if wake.process(frame):
                         LOG.info("Wake word detected")
+                        show_command_center()
+                        gateway.change_floor("claim", "listening", partial_transcript="Hey VIC")
                         utterance = capture_utterance(recorder.stdout, frame)
                         transcript = command_after_wake_phrase(
                             transcribe_wav(utterance, args.whisper_model), args.phrase
@@ -364,12 +427,20 @@ def run(args: argparse.Namespace) -> None:
                         LOG.info("Conversation ended by voice command")
                         break
                     LOG.info("Submitting conversation turn")
+                    gateway.change_floor("update", "processing", partial_transcript=transcript)
                     try:
-                        speak(submit_with_progress(gateway, transcript, args.speech_cache))
+                        reply = submit_with_progress(gateway, transcript, args.speech_cache)
+                        gateway.change_floor(
+                            "update", "speaking", partial_transcript=transcript,
+                            response_text=reply,
+                        )
+                        speak(reply)
                     except RuntimeError as error:
                         LOG.error("Voice turn failed: %s", error)
                         speak_cached(args.speech_cache, "error")
                         break
+
+                gateway.change_floor("update", "listening")
 
                 recorder = capture_process(args.source)
                 assert recorder.stdout is not None
@@ -386,6 +457,7 @@ def run(args: argparse.Namespace) -> None:
                 if not usable_transcript(transcript):
                     LOG.info("Ignored empty or background-audio transcript: %r", transcript)
                     break
+            gateway.change_floor("release", "idle")
     finally:
         wake.close()
 
@@ -399,7 +471,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-root", type=Path, default=Path.home() / ".local/share/voiceos/wakewords")
     parser.add_argument("--speech-cache", type=Path, default=Path.home() / ".local/share/voiceos/audio")
     parser.add_argument("--source", default=None, help="PipeWire source node name or serial; defaults to the current source")
-    parser.add_argument("--sensitivity", type=float, default=0.5)
+    parser.add_argument("--sensitivity", type=float, default=0.65)
     parser.add_argument("--conversation-timeout", type=float, default=20.0,
                         help="Seconds to wait for each follow-up before requiring Hey VIC again")
     return parser.parse_args(argv)

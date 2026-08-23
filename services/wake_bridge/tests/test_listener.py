@@ -15,16 +15,21 @@ from services.wake_bridge.listener import (
 
 class _GatewayHandler(BaseHTTPRequestHandler):
     requests: list[dict[str, object]] = []
+    paths: list[str] = []
 
     def do_POST(self) -> None:  # noqa: N802
         size = int(self.headers["Content-Length"])
         self.__class__.requests.append(json.loads(self.rfile.read(size)))
-        body = json.dumps(
-            {
-                "session_id": "voice-session-2",
-                "response_text": "Brick & Copper opens at eleven.",
-            }
-        ).encode()
+        self.__class__.paths.append(self.path)
+        if self.path.endswith("/floor"):
+            body = json.dumps({"floor": {"active": True}}).encode()
+        else:
+            body = json.dumps(
+                {
+                    "session_id": "voice-session-2",
+                    "response_text": "Brick & Copper opens at eleven.",
+                }
+            ).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -50,6 +55,7 @@ class GatewayClientTest(unittest.TestCase):
 
     def setUp(self) -> None:
         _GatewayHandler.requests.clear()
+        _GatewayHandler.paths.clear()
 
     def test_submit_text_uses_and_preserves_the_voice_session(self) -> None:
         client = GatewayClient(f"http://127.0.0.1:{self.server.server_port}", "voice-session-1")
@@ -65,6 +71,15 @@ class GatewayClientTest(unittest.TestCase):
             }],
             _GatewayHandler.requests,
         )
+
+    def test_change_floor_publishes_shared_window_state(self) -> None:
+        client = GatewayClient(f"http://127.0.0.1:{self.server.server_port}", "voice-session-1")
+
+        client.change_floor("claim", "listening", partial_transcript="Hey VIC")
+
+        self.assertEqual(["/v1/conversations/active/floor"], _GatewayHandler.paths)
+        self.assertEqual("VIC desktop microphone", _GatewayHandler.requests[0]["display_name"])
+        self.assertEqual("Hey VIC", _GatewayHandler.requests[0]["partial_transcript"])
 
 
 class WakePhraseTest(unittest.TestCase):
