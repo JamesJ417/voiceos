@@ -1778,11 +1778,6 @@ def create_server(
     selected_coordinator = coordinator or TurnCoordinator(project_root=project_root)
     owns_audit_store = audit_store is None
     selected_audit = audit_store or AuditStore(_audit_path(project_root))
-    selected_coordinator.router.set_activity_sink(
-        lambda session_id, event: _publish_agent_activity(
-            selected_audit, session_id, event
-        )
-    )
     selected_admin_token = admin_token or os.environ.get("VOICEOS_ADMIN_TOKEN", "").strip() or None
     selected_require_auth = (
         require_device_auth
@@ -1793,6 +1788,16 @@ def create_server(
         memory_url
         if memory_url is not None
         else os.environ.get("VOICEOS_MEMORY_URL", "").strip() or None
+    )
+    selected_coordinator.router.set_activity_sink(
+        lambda session_id, event: _publish_agent_activity(
+            selected_audit, session_id, event
+        )
+    )
+    selected_coordinator.router.set_completion_sink(
+        lambda session_id, message_id, report: _import_hermes_completion(
+            selected_audit, selected_memory_url, session_id, message_id, report
+        )
     )
     if selected_memory_url:
         selected_coordinator.tools.register_task_tools(
@@ -1913,6 +1918,54 @@ def _publish_agent_activity(
             "status": "running" if phase == "subagent.start" else "completed",
             "label": str(detail or "Hermes research subagent")[:300],
             "detail": "Dispatched by VIC" if phase == "subagent.start" else "Work returned to VIC",
+            "session_id": session_id,
+            "runtime": "hermes",
+        },
+    )
+
+
+def _import_hermes_completion(
+    audit_store: AuditStore,
+    memory_url: str | None,
+    session_id: str,
+    message_id: int,
+    report: str,
+) -> None:
+    if not audit_store.import_hermes_completion(
+        session_id=session_id, message_id=message_id, report=report
+    ):
+        return
+    if memory_url:
+        body = json.dumps(
+            {
+                "conversation_id": session_id,
+                "response_text": report,
+                "provider": "hermes-subagent",
+                "device_id": "hermes-background-worker",
+                "request_id": f"hermes-message:{message_id}",
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            with urlopen(
+                Request(
+                    f"{memory_url}/internal/v1/conversations/commit",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                ),
+                timeout=2.0,
+            ) as response:
+                response.read()
+        except (HTTPError, URLError, TimeoutError):
+            pass
+    audit_store.publish_client_event(
+        "agent.worker.updated",
+        {
+            "worker_id": f"hermes-message-{message_id}",
+            "status": "completed",
+            "label": "Hermes background report received",
+            "detail": report[:500],
             "session_id": session_id,
             "runtime": "hermes",
         },

@@ -112,6 +112,12 @@ class AuditStore:
                 );
                 CREATE INDEX IF NOT EXISTS client_events_created_idx
                     ON client_events(event_id, created_at);
+                CREATE TABLE IF NOT EXISTS hermes_completion_imports (
+                    session_id TEXT NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    PRIMARY KEY(session_id, message_id)
+                );
                 """
             )
             columns = {
@@ -351,6 +357,42 @@ class AuditStore:
                 },
             )
             return int(cursor.lastrowid)
+
+    def import_hermes_completion(
+        self, *, session_id: str, message_id: int, report: str
+    ) -> bool:
+        """Store one Hermes background report exactly once in VIC's durable thread."""
+        with self._lock, self._connection:
+            inserted = self._connection.execute(
+                "INSERT OR IGNORE INTO hermes_completion_imports "
+                "(session_id, message_id, imported_at) VALUES (?, ?, ?)",
+                (session_id, message_id, _now()),
+            )
+            if inserted.rowcount != 1:
+                return False
+            cursor = self._connection.execute(
+                """
+                INSERT INTO turns (
+                    session_id, transcript, response_text, provider,
+                    tool_requests_json, approvals_json, results_json, errors_json,
+                    processing_ms, input_tokens, output_tokens, cost_usd, created_at
+                ) VALUES (?, ?, ?, ?, '[]', '[]', '[]', '[]', 0, NULL, NULL, 0, ?)
+                """,
+                (session_id, "Hermes background worker completed", report,
+                 "hermes-subagent", _now()),
+            )
+            self._append_client_event_locked(
+                "conversation.turn",
+                {
+                    "turn_id": int(cursor.lastrowid),
+                    "session_id": session_id,
+                    "transcript": "Hermes background worker completed",
+                    "response_text": report,
+                    "provider": "hermes-subagent",
+                    "processing_ms": 0,
+                },
+            )
+            return True
 
     def record_event(
         self,

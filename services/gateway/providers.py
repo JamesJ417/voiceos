@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -308,11 +309,19 @@ class HermesProvider:
         self.skill_worker_url = skill_worker_url.rstrip("/")
         self.skill_worker_token_file = skill_worker_token_file.strip()
         self.activity_sink: Callable[[str | None, dict[str, object]], None] | None = None
+        self.completion_sink: Callable[[str, int, str], None] | None = None
+        self._completion_watchers: set[str] = set()
+        self._watchers_lock = threading.Lock()
 
     def set_activity_sink(
         self, sink: Callable[[str | None, dict[str, object]], None] | None
     ) -> None:
         self.activity_sink = sink
+
+    def set_completion_sink(
+        self, sink: Callable[[str, int, str], None] | None
+    ) -> None:
+        self.completion_sink = sink
 
     @property
     def configured(self) -> bool:
@@ -419,6 +428,7 @@ class HermesProvider:
             body["model"] = self.model
         if conversation_id:
             body["session_id"] = conversation_id
+        baseline_message_id = self._latest_message_id(conversation_id, api_key)
         result = self._request_json(
             "/v1/runs",
             api_key,
@@ -470,6 +480,10 @@ class HermesProvider:
                         "subagent.start", "subagent.complete",
                     }:
                         self.activity_sink(conversation_id, safe_event)
+                    if event_name == "subagent.start" and conversation_id:
+                        self._start_completion_watcher(
+                            conversation_id, api_key, baseline_message_id
+                        )
                     if event_name == "approval.request":
                         self._notify_skill_scan(run_id)
                         command = str(safe_event.get("command", "")).strip()
@@ -513,6 +527,72 @@ class HermesProvider:
             except ProviderUnavailable:
                 raise ProviderUnavailable(f"Hermes event stream failed: {error}") from error
         return self._poll_run(run_id, api_key)
+
+    def _latest_message_id(self, session_id: str | None, api_key: str) -> int:
+        if not session_id:
+            return 0
+        try:
+            result = self._request_json(
+                f"/api/sessions/{session_id}/messages?order=latest&limit=1", api_key
+            )
+        except ProviderUnavailable:
+            return 0
+        messages = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(messages, list) or not messages:
+            return 0
+        return max((_optional_int(item.get("id")) or 0 for item in messages if isinstance(item, dict)), default=0)
+
+    def _start_completion_watcher(
+        self, session_id: str, api_key: str, after_message_id: int
+    ) -> None:
+        with self._watchers_lock:
+            if session_id in self._completion_watchers:
+                return
+            self._completion_watchers.add(session_id)
+        threading.Thread(
+            target=self._watch_completions,
+            args=(session_id, api_key, after_message_id),
+            name=f"hermes-completions-{session_id[:8]}",
+            daemon=True,
+        ).start()
+
+    def _watch_completions(
+        self, session_id: str, api_key: str, cursor: int
+    ) -> None:
+        idle_polls = 0
+        try:
+            while idle_polls < 360:
+                try:
+                    result = self._request_json(
+                        f"/api/sessions/{session_id}/messages?order=latest&limit=100",
+                        api_key,
+                    )
+                    messages = result.get("data") if isinstance(result, dict) else []
+                    newest = cursor
+                    found = False
+                    for message in messages if isinstance(messages, list) else []:
+                        if not isinstance(message, dict):
+                            continue
+                        message_id = _optional_int(message.get("id")) or 0
+                        newest = max(newest, message_id)
+                        content = message.get("content")
+                        if (
+                            message_id > cursor
+                            and message.get("role") == "user"
+                            and isinstance(content, str)
+                            and re.match(r"^\[ASYNC DELEGATION .+ COMPLETE", content.strip())
+                        ):
+                            found = True
+                            if self.completion_sink:
+                                self.completion_sink(session_id, message_id, content.strip())
+                    cursor = newest
+                    idle_polls = 0 if found else idle_polls + 1
+                except ProviderUnavailable:
+                    idle_polls += 1
+                time.sleep(5)
+        finally:
+            with self._watchers_lock:
+                self._completion_watchers.discard(session_id)
 
     def _poll_run(self, run_id: str, api_key: str) -> ProviderResponse:
         import time
@@ -670,6 +750,11 @@ class ProviderRouter:
         self, sink: Callable[[str | None, dict[str, object]], None] | None
     ) -> None:
         self._hermes.set_activity_sink(sink)
+
+    def set_completion_sink(
+        self, sink: Callable[[str, int, str], None] | None
+    ) -> None:
+        self._hermes.set_completion_sink(sink)
 
     def respond(
         self,
