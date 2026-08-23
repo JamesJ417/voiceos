@@ -43,6 +43,7 @@ The installer creates:
 - `~/.config/systemd/user/voiceos-hermes.service`
 - `~/.config/systemd/user/voiceos-codex.service`
 - `~/.config/systemd/user/voiceos-ui.service`
+- `~/.config/systemd/user/voiceos-wake.service`
 - `~/.config/voiceos/gateway.env`
 - `~/.config/voiceos/hermes-api.key`
 - `~/.local/state/voiceos/` for private state
@@ -77,6 +78,10 @@ voiceos-talk
 access the first time, speak, and press **Done**. Chromium performs speech
 recognition, the gateway sends the transcript to the Hermes-powered VIC agent, and
 browser speech synthesis reads VIC's answer aloud.
+
+The always-on `voiceos-wake.service` keeps wake-word detection local. Say
+**“Hey VIC”**, then speak your command. Only the post-wake utterance is transcribed
+and sent to the same VIC/Hermes conversation path; VIC's reply is spoken aloud.
 
 The gateway listens only on `127.0.0.1:8787`. Use Tailscale Serve when a phone
 needs private HTTPS access; never expose port 8787 through the router or enable

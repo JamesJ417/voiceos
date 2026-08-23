@@ -37,7 +37,7 @@ else
   failed=1
 fi
 
-for unit in voiceos-core voiceos-hermes voiceos-codex voiceos-gateway voiceos-ui; do
+for unit in voiceos-core voiceos-hermes voiceos-codex voiceos-gateway voiceos-ui voiceos-wake; do
   if systemctl --user is-active --quiet "$unit.service"; then
     printf 'PASS  %-18s active\n' "$unit"
   else

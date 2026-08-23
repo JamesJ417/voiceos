@@ -1,0 +1,5 @@
+edge-tts==7.2.7
+numpy==2.5.2
+pypinyin==0.55.0
+sentencepiece==0.2.1
+sherpa-onnx==1.13.6

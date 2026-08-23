@@ -65,6 +65,13 @@ if [[ -z "$npm_bin" ]]; then
 fi
 npm_dir="$(dirname "$npm_bin")"
 
+wake_venv="${XDG_DATA_HOME:-$HOME/.local/share}/voiceos/wake-venv"
+if [[ ! -x "$wake_venv/bin/python" ]]; then
+  "$python_bin" -m venv "$wake_venv"
+fi
+"$wake_venv/bin/python" -m pip install --disable-pip-version-check \
+  --requirement "$repo_root/services/wake_bridge/requirements.txt"
+
 rust_gateway="$repo_root/target/release/voiceos-gateway"
 if [[ ! -x "$rust_gateway" ]]; then
   cargo_bin="$(command -v cargo || true)"
@@ -134,11 +141,14 @@ sed -e "s|@@REPO_ROOT@@|$repo_root|g" -e "s|@@NPM@@|$npm_bin|g" \
   "$script_dir/voiceos-ui.service.template" >"$unit_dir/voiceos-ui.service"
 sed -e "s|@@REPO_ROOT@@|$repo_root|g" -e "s|@@RUST_GATEWAY@@|$rust_gateway|g" \
   "$script_dir/voiceos-core.service.template" >"$unit_dir/voiceos-core.service"
+sed -e "s|@@REPO_ROOT@@|$repo_root|g" -e "s|@@WAKE_PYTHON@@|$wake_venv/bin/python|g" \
+  "$script_dir/voiceos-wake.service.template" >"$unit_dir/voiceos-wake.service"
 chmod 0644 "$unit_dir/voiceos-gateway.service"
 chmod 0644 "$unit_dir/voiceos-hermes.service"
 chmod 0644 "$unit_dir/voiceos-codex.service"
 chmod 0644 "$unit_dir/voiceos-ui.service"
 chmod 0644 "$unit_dir/voiceos-core.service"
+chmod 0644 "$unit_dir/voiceos-wake.service"
 
 install -m 0755 "$script_dir/voiceosctl" "$bin_dir/voiceosctl"
 install -m 0755 "$script_dir/voiceos-talk" "$bin_dir/voiceos-talk"
@@ -194,7 +204,7 @@ systemctl --user daemon-reload
 omarchy menu refresh >/dev/null
 
 if ((enable)); then
-  systemctl --user enable voiceos-core.service voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service
+  systemctl --user enable voiceos-core.service voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service voiceos-wake.service
   systemctl --user restart voiceos-core.service
   for _ in {1..40}; do
     if curl --fail --silent http://127.0.0.1:8790/v1/health >/dev/null; then
@@ -203,7 +213,7 @@ if ((enable)); then
     sleep 0.25
   done
   curl --fail --silent --show-error http://127.0.0.1:8790/v1/health >/dev/null
-  systemctl --user restart voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service
+  systemctl --user restart voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service voiceos-wake.service
   "$bin_dir/voiceosctl" wait
 else
   echo "Omarchy Voice integration installed but not started."

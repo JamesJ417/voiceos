@@ -1,0 +1,26 @@
+[Unit]
+Description=Omarchy Voice local Hey VIC listener
+After=pipewire.service wireplumber.service voiceos-gateway.service
+Wants=voiceos-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=@@REPO_ROOT@@
+Environment=HOME=%h
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=@@WAKE_PYTHON@@ -m services.wake_bridge.listener --phrase "hey vic"
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=%h/.local/share/voiceos %h/.local/state/voiceos
+
+[Install]
+WantedBy=default.target
