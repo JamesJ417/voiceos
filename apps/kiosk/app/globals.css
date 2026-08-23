@@ -156,6 +156,12 @@ button { font: inherit; }
 .message-label { display: flex; justify-content: space-between; gap: 15px; color: var(--muted); font-size: 11px; }
 .message-label strong { color: var(--teal); text-transform: uppercase; letter-spacing: 0.14em; }
 .message p { margin: 9px 0 0; line-height: 1.5; color: #dce5e4; }
+.message-reply-toggle { width: 100%; margin: 9px 0 0; padding: 0; border: 0; color: #dce5e4; background: transparent; text-align: left; cursor: pointer; }
+.message-reply-toggle span { display: block; white-space: pre-wrap; line-height: 1.5; }
+.message-reply-toggle small { display: block; margin-top: 8px; color: var(--teal); font: 700 9px/1 var(--font-geist-mono), monospace; letter-spacing: .08em; text-transform: uppercase; }
+.message-reply-toggle:hover small, .message-reply-toggle:focus-visible small { color: #8ff7e3; }
+.message-reply-toggle:focus-visible { outline: 1px solid var(--teal); outline-offset: 6px; border-radius: 4px; }
+.message-collapsed { border-color: rgba(116, 139, 138, .2); }
 .conversation-actions { display: flex; gap: 9px; margin-top: 16px; }
 .conversation-actions button { min-width: 130px; min-height: 48px; padding: 0 16px; border: 1px solid var(--line); border-radius: 13px; color: var(--muted); background: rgba(18,23,26,0.9); cursor: pointer; }
 .conversation-actions button:hover, .conversation-actions button:focus-visible { color: var(--teal); border-color: rgba(53,224,193,0.5); outline: none; }
@@ -316,6 +322,9 @@ button { font: inherit; }
   .wide-panel, .task-board, .skill-proposals-panel, .provider-panel.wide, .health-panel.wide, .system-note { min-height: 0; padding: 12px; }
   .history-list, .task-grid, .skill-proposal-list, .system-layout { margin-top: 8px; gap: 7px; }
 }
+
+/* An explicitly opened reply must never inherit viewport clipping rules. */
+.message.message-expanded { max-height: none; overflow: visible; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; } }
 
 /* VIC's animated presence stays inside the dedicated Omarchy Voice tile. */

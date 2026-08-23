@@ -694,6 +694,10 @@ export default function Home() {
 
   const copy = voiceCopy[voiceState];
   const recentMessages = useMemo(() => messages.slice(-4), [messages]);
+  const latestVicMessageId = useMemo(
+    () => [...messages].reverse().find((message) => message.role === "VIC")?.id,
+    [messages],
+  );
   const thisDeviceId = typeof window === "undefined" ? null : localStorage.getItem(STORAGE.deviceId);
   const floorIsRemote = Boolean(floor?.active && floor.holder_device_id && floor.holder_device_id !== thisDeviceId);
   const vicOverlayExpanded = overlayExpanded || voiceState !== "ready";
@@ -740,7 +744,7 @@ export default function Home() {
 
             <section className="conversation-panel panel">
               <div className="panel-heading"><div><p className="kicker">Continuous conversation</p><h2>Current thread</h2></div><span className="memory-pill">Memory active</span></div>
-              <div className="conversation-list">{recentMessages.length ? recentMessages.map((message) => <MessageCard key={message.id} message={message} />) : <EmptyState text="Your phone and web conversations will appear here." />}</div>
+              <div className="conversation-list">{recentMessages.length ? recentMessages.map((message) => <MessageCard key={message.id} message={message} latestVic={message.id === latestVicMessageId} />) : <EmptyState text="Your phone and web conversations will appear here." />}</div>
               <div className={`agent-activity ${agentActivity.length ? "has-activity" : "activity-idle"}`} aria-label="VIC live activity"><div className="agent-activity-title"><span className="thinking-pulse" /><strong>VIC activity</strong><small>Live progress, not private chain-of-thought</small></div>{agentActivity.length ? agentActivity.slice(0, 6).map((activity) => { const isTool = activity.phase.startsWith("tool."); const completed = activity.phase.endsWith("completed"); return <div className={`agent-activity-row ${isTool ? "tool-execution" : ""} ${completed ? "activity-complete" : "activity-running"}`} key={activity.id}>{isTool && <span className="tool-scan" aria-hidden="true" />}<span className="activity-glyph">{isTool ? "⌘" : activity.phase.startsWith("subagent.") ? "◇" : "✦"}</span><p><strong>{activity.label}</strong>{activity.detail && <small>{activity.detail}</small>}</p>{isTool && <span className="execution-state">{completed ? "done" : "called"}</span>}</div>; }) : <div className="activity-empty"><span className="activity-glyph">⌘</span><p><strong>{voiceState === "processing" ? "Connecting to Hermes…" : "Execution rail ready"}</strong><small>Tool calls and worker progress will appear here.</small></p><span className="execution-state">{voiceState === "processing" ? "waiting" : "idle"}</span></div>}</div>
               {agentWorkers.length > 0 && <section className="agent-worker-panel" aria-label="VIC background workers"><div className="agent-worker-heading"><span>◇</span><strong>Hermes subagents</strong><small>{agentWorkers.filter((worker) => worker.status === "running" || worker.status === "queued").length} active</small></div><div className="agent-worker-list">{agentWorkers.map((worker) => <div className={`agent-worker worker-${worker.status}`} key={worker.id}><span className={`status-dot ${worker.status === "failed" ? "offline" : ""}`} /><div><strong>{worker.label}</strong><small>{worker.detail ?? "Dispatched by VIC"}</small></div><span className="worker-state">{worker.status}</span></div>)}</div></section>}
               {pendingApproval && <div className="approval-card"><div><p className="kicker">Approval required</p><strong>{pendingApproval.tool}</strong><small>{pendingApproval.tool === "rig.root_command" ? "Administrative approval is restricted to the enrolled Pixel." : "VIC will not run this tool without your decision."}</small></div><button className="deny" onClick={() => void decideApproval(false)}>Deny</button><button className="approve" disabled={pendingApproval.tool === "rig.root_command"} onClick={() => void decideApproval(true)}>{pendingApproval.tool === "rig.root_command" ? "Approve on Pixel" : "Approve"}</button></div>}
@@ -760,7 +764,7 @@ export default function Home() {
           </div>
         )}
 
-        {view === "history" && <section className="wide-panel panel"><div className="panel-heading"><div><p className="kicker">Persistent timeline</p><h2>Shared conversation with VIC</h2></div><button className="secondary-button" onClick={() => void loadHistory()}>Refresh</button></div><div className="history-list">{messages.length ? messages.map((message) => <MessageCard key={message.id} message={message} />) : <EmptyState text="No conversation history is available yet." />}</div></section>}
+        {view === "history" && <section className="wide-panel panel"><div className="panel-heading"><div><p className="kicker">Persistent timeline</p><h2>Shared conversation with VIC</h2></div><button className="secondary-button" onClick={() => void loadHistory()}>Refresh</button></div><div className="history-list">{messages.length ? messages.map((message) => <MessageCard key={message.id} message={message} latestVic={message.id === latestVicMessageId} />) : <EmptyState text="No conversation history is available yet." />}</div></section>}
 
         {view === "tasks" && <TaskBoard tasks={tasks} activity={agentActivity} filter={taskFilter} onFilter={setTaskFilter} onRefresh={() => void loadTasks()} onStart={async (input) => {
           setStatusMessage(`Starting VIC on ${input.title}…`);
@@ -800,8 +804,22 @@ function NavButton({ active, icon, label, onClick }: { active: boolean; icon: st
   return <button className={active ? "active" : ""} onClick={onClick}><span aria-hidden="true">{icon}</span>{label}</button>;
 }
 
-function MessageCard({ message }: { message: Message }) {
-  return <article className={`message ${message.role === "You" ? "user" : "assistant"}`}><div className="message-label"><strong>{message.role}</strong><span>{message.meta}</span></div><p>{message.body}</p></article>;
+function firstSentence(text: string) {
+  const normalized = text.trim();
+  const sentence = normalized.match(/^.*?[.!?](?=\s|$)/s)?.[0];
+  if (sentence) return sentence.trim();
+  const firstLine = normalized.split(/\n+/)[0]?.trim() || normalized;
+  return firstLine.length > 180 ? `${firstLine.slice(0, 177).trimEnd()}…` : firstLine;
+}
+
+function MessageCard({ message, latestVic = false }: { message: Message; latestVic?: boolean }) {
+  const collapsible = message.role === "VIC" && !latestVic && firstSentence(message.body) !== message.body.trim();
+  const [expanded, setExpanded] = useState(false);
+  const showFullReply = latestVic || !collapsible || expanded;
+  return <article className={`message ${message.role === "You" ? "user" : "assistant"} ${collapsible ? "message-collapsible" : ""} ${showFullReply ? "message-expanded" : "message-collapsed"}`}>
+    <div className="message-label"><strong>{message.role}</strong><span>{message.meta}</span></div>
+    {collapsible ? <button className="message-reply-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}><span>{showFullReply ? message.body : firstSentence(message.body)}</span><small>{expanded ? "Show less" : "View full reply"}</small></button> : <p>{message.body}</p>}
+  </article>;
 }
 
 function EmptyState({ text }: { text: string }) {
