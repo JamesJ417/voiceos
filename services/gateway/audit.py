@@ -468,6 +468,13 @@ class AuditStore:
             for row in rows
         ]
 
+    def latest_client_event_id(self) -> int:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT COALESCE(MAX(event_id), 0) FROM client_events"
+            ).fetchone()
+        return int(row[0]) if row is not None else 0
+
     def _append_client_event_locked(self, event_type: str, payload: dict[str, Any]) -> int:
         cursor = self._connection.execute(
             "INSERT INTO client_events(event_type, payload_json, created_at) VALUES (?, ?, ?)",

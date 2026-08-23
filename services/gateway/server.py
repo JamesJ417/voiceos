@@ -305,6 +305,8 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             if not self._require_device():
                 return
             after = _event_cursor(parsed.query, self.headers.get("Last-Event-ID"))
+            if parse_qs(parsed.query).get("tail", [""])[0].casefold() == "true" and after == 0:
+                after = max(0, self.gateway.audit_store.latest_client_event_id() - 200)
             events = self.gateway.audit_store.list_client_events(after, 200)
             self._json(
                 HTTPStatus.OK,
