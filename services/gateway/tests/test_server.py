@@ -353,6 +353,49 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual("Hello gateway", payload["transcript"])
         self.assertEqual("mock", payload["provider"])
 
+    def test_text_turn_replays_local_session_history_without_memory_service(self) -> None:
+        class ContinuityRouter:
+            default_name = "hermes"
+            contexts: list[str | None] = []
+            conversation_ids: list[str | None] = []
+
+            def respond(self, text: str, provider=None, tools=None, context=None, conversation_id=None):
+                del text, provider, tools
+                self.contexts.append(context)
+                self.conversation_ids.append(conversation_id)
+                return ProviderResponse(text="VIC reply", provider="hermes")
+
+        original_memory_url = self.server.memory_url
+        original_router = self.server.coordinator.router
+        router = ContinuityRouter()
+        self.server.memory_url = ""
+        self.server.coordinator.router = router  # type: ignore[assignment]
+        try:
+            first = json.dumps(
+                {"session_id": "local-continuity-test", "text": "My favorite color is cobalt."}
+            ).encode()
+            second = json.dumps(
+                {"session_id": "local-continuity-test", "text": "What color did I just name?"}
+            ).encode()
+            self.assertEqual(
+                200,
+                self.request("POST", "/v1/turns/text", first, content_type="application/json")[0],
+            )
+            self.assertEqual(
+                200,
+                self.request("POST", "/v1/turns/text", second, content_type="application/json")[0],
+            )
+            self.assertIsNone(router.contexts[0])
+            self.assertIn("My favorite color is cobalt.", router.contexts[1] or "")
+            self.assertIn("VIC reply", router.contexts[1] or "")
+            self.assertEqual(
+                ["local-continuity-test", "local-continuity-test"],
+                router.conversation_ids,
+            )
+        finally:
+            self.server.memory_url = original_memory_url
+            self.server.coordinator.router = original_router
+
     def test_text_turn_rejects_non_string_provider_hint(self) -> None:
         body = json.dumps({"text": "Hello gateway", "provider": 42}).encode()
         status, payload = self.request(

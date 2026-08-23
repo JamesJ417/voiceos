@@ -378,6 +378,21 @@ class AuditStore:
             ).fetchall()
         return [_turn_row(row) for row in rows]
 
+    def list_session_turns(self, session_id: str, limit: int = 12) -> list[dict[str, Any]]:
+        """Return a bounded session transcript in chronological order."""
+
+        safe_limit = min(max(limit, 1), 24)
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM (
+                    SELECT * FROM turns WHERE session_id = ? ORDER BY id DESC LIMIT ?
+                ) ORDER BY id ASC
+                """,
+                (session_id, safe_limit),
+            ).fetchall()
+        return [_turn_row(row) for row in rows]
+
     def list_events(self, limit: int = 100) -> list[dict[str, Any]]:
         safe_limit = min(max(limit, 1), 500)
         with self._lock:
