@@ -700,7 +700,7 @@ export default function Home() {
   );
   const thisDeviceId = typeof window === "undefined" ? null : localStorage.getItem(STORAGE.deviceId);
   const floorIsRemote = Boolean(floor?.active && floor.holder_device_id && floor.holder_device_id !== thisDeviceId);
-  const vicOverlayExpanded = overlayExpanded || voiceState !== "ready";
+  const vicOverlayExpanded = overlayExpanded;
 
   return (
     <main className="shell">
