@@ -116,6 +116,12 @@ button { font: inherit; }
 .agent-activity-title strong { color: var(--cyan); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
 .agent-activity-title small { color: var(--muted); font-size: 9px; text-align: right; }
 .thinking-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 10px rgba(69,207,228,.8); animation: activity-pulse 1.1s ease-in-out infinite; }
+.activity-idle .thinking-pulse { background: #536267; box-shadow: none; animation: none; }
+.activity-empty { display: grid; grid-template-columns: 24px minmax(0,1fr) auto; gap: 8px; align-items: center; min-height: 42px; padding: 7px 9px; border: 1px dashed rgba(141,155,157,.22); border-radius: 9px; }
+.activity-empty p { display: grid; gap: 2px; margin: 0; }
+.activity-empty strong { color: #b9c5c4; font-size: 10px; }
+.activity-empty small { color: var(--muted); font-size: 9px; }
+.activity-empty .activity-glyph { color: #657275; font-family: var(--font-geist-mono), monospace; }
 .agent-activity-row { position: relative; display: grid; grid-template-columns: 18px 1fr; gap: 7px; min-width: 0; color: var(--cyan); }
 .agent-activity-row p { display: grid; min-width: 0; gap: 2px; margin: 0; }
 .agent-activity-row strong, .agent-activity-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
