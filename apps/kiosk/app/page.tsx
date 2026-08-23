@@ -254,6 +254,12 @@ export default function Home() {
   }, [gateway, token, refreshStatus]);
 
   useEffect(() => {
+    if (!gateway || connected) return;
+    const reconnect = window.setInterval(() => void refreshStatus(), 3_000);
+    return () => window.clearInterval(reconnect);
+  }, [connected, gateway, refreshStatus]);
+
+  useEffect(() => {
     if (!gateway || !token) return;
     const timer = window.setInterval(() => void loadFloor().catch(() => undefined), 15_000);
     return () => window.clearInterval(timer);
