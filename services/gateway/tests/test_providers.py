@@ -196,6 +196,11 @@ class FakeHermesAsyncHandler(BaseHTTPRequestHandler):
         if self.path == f"/v1/runs/{self.run_id}/events":
             events = [
                 {
+                    "type": "tool.started",
+                    "tool": "terminal",
+                    "preview": "systemctl restart voiceos",
+                },
+                {
                     "type": "approval.request",
                     "command": "systemctl restart voiceos",
                     "description": "Restart VoiceOS",
@@ -253,6 +258,8 @@ class HermesAsyncProviderTest(unittest.TestCase):
         provider = HermesProvider(
             f"http://127.0.0.1:{self.server.server_port}", api_key="test-secret"
         )
+        activity: list[tuple[str | None, dict[str, object]]] = []
+        provider.set_activity_sink(lambda session_id, event: activity.append((session_id, event)))
         response = provider.respond("Restart VoiceOS", conversation_id="owner-1")
         self.assertEqual(
             {"reasoning_effort": "medium"},
@@ -262,6 +269,8 @@ class HermesAsyncProviderTest(unittest.TestCase):
         self.assertEqual("hermes.systemctl", response.approvals[0].tool)
         self.assertIn("VIC wants to run", response.text)
         self.assertEqual("systemctl restart voiceos", response.approvals[0].arguments["command"])
+        self.assertEqual("owner-1", activity[0][0])
+        self.assertEqual("tool.started", activity[0][1]["type"])
         completed = provider.complete_approval(FakeHermesAsyncHandler.run_id, approve=True)
         self.assertEqual("once", FakeHermesAsyncHandler.approval_choice)
         self.assertEqual("Restart decision recorded", completed.text)

@@ -1797,6 +1797,12 @@ def create_server(
     selected_coordinator = coordinator or TurnCoordinator(project_root=project_root)
     owns_audit_store = audit_store is None
     selected_audit = audit_store or AuditStore(_audit_path(project_root))
+    selected_coordinator.router.set_activity_sink(
+        lambda session_id, event: selected_audit.publish_client_event(
+            "agent.activity.updated",
+            _safe_agent_activity(session_id, event),
+        )
+    )
     selected_admin_token = admin_token or os.environ.get("VOICEOS_ADMIN_TOKEN", "").strip() or None
     selected_require_auth = (
         require_device_auth
@@ -1868,6 +1874,30 @@ def _audit_path(project_root: Path) -> Path:
     configured = os.environ.get("VOICEOS_DATA_DIR", "").strip()
     data_dir = Path(configured).expanduser() if configured else project_root / "work" / "gateway-data"
     return data_dir / "audit.sqlite3"
+
+
+def _safe_agent_activity(
+    session_id: str | None, event: dict[str, object]
+) -> dict[str, object]:
+    """Convert Hermes events into bounded user-facing progress, never hidden chain-of-thought."""
+    event_name = str(event.get("event", event.get("type", "activity")))
+    labels = {
+        "reasoning.available": "VIC is evaluating the request",
+        "tool.started": "VIC started a tool",
+        "tool.completed": "VIC finished a tool",
+        "subagent.start": "VIC delegated background work",
+        "subagent.complete": "A VIC worker finished",
+    }
+    detail = event.get("summary") or event.get("description") or event.get("tool")
+    return {
+        "session_id": session_id,
+        "phase": event_name,
+        "label": labels.get(event_name, "VIC is working"),
+        "detail": str(detail)[:500] if detail else None,
+        "tool": str(event.get("tool", ""))[:160] or None,
+        "subagent_id": str(event.get("subagent_id", ""))[:160] or None,
+        "timestamp": event.get("timestamp"),
+    }
 
 
 def _checkin_date() -> str:

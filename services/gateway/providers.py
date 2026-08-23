@@ -8,7 +8,7 @@ import re
 import socket
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -306,6 +306,12 @@ class HermesProvider:
         self.use_async_runs = use_async_runs
         self.skill_worker_url = skill_worker_url.rstrip("/")
         self.skill_worker_token_file = skill_worker_token_file.strip()
+        self.activity_sink: Callable[[str | None, dict[str, object]], None] | None = None
+
+    def set_activity_sink(
+        self, sink: Callable[[str | None, dict[str, object]], None] | None
+    ) -> None:
+        self.activity_sink = sink
 
     @property
     def configured(self) -> bool:
@@ -440,6 +446,11 @@ class HermesProvider:
                     safe_event = _bounded_event(event)
                     events.append(safe_event)
                     event_name = safe_event.get("event", safe_event.get("type"))
+                    if self.activity_sink and event_name in {
+                        "reasoning.available", "tool.started", "tool.completed",
+                        "subagent.start", "subagent.complete",
+                    }:
+                        self.activity_sink(conversation_id, safe_event)
                     if event_name == "approval.request":
                         self._notify_skill_scan(run_id)
                         command = str(safe_event.get("command", "")).strip()
@@ -635,6 +646,11 @@ class ProviderRouter:
     @property
     def default_name(self) -> str:
         return self.default_provider.name
+
+    def set_activity_sink(
+        self, sink: Callable[[str | None, dict[str, object]], None] | None
+    ) -> None:
+        self._hermes.set_activity_sink(sink)
 
     def respond(
         self,

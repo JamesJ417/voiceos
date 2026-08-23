@@ -35,6 +35,7 @@ type CanonicalMessage = {
 
 type Approval = { request_id: string; tool: string; expires_at_unix?: number };
 type AgentWorker = { id: string; status: string; label: string; detail?: string };
+type AgentActivity = { id: string; phase: string; label: string; detail?: string };
 type Provider = { name: string; configured?: boolean; role?: string };
 type GatewayHealth = {
   status?: string;
@@ -127,6 +128,7 @@ export default function Home() {
   const [lastResponse, setLastResponse] = useState("");
   const [pendingApproval, setPendingApproval] = useState<Approval | null>(null);
   const [agentWorkers, setAgentWorkers] = useState<AgentWorker[]>([]);
+  const [agentActivity, setAgentActivity] = useState<AgentActivity[]>([]);
   const [skillProposals, setSkillProposals] = useState<SkillProposal[]>([]);
   const [skills, setSkills] = useState<SkillProposal[]>([]);
   const [skillUsages, setSkillUsages] = useState<SkillUsage[]>([]);
@@ -353,6 +355,16 @@ export default function Home() {
               };
               setAgentWorkers((current) => [worker, ...current.filter((item) => item.id !== worker.id)].slice(0, 4));
               setStatusMessage(worker.status === "running" ? `VIC worker active · ${worker.label}` : `VIC worker ${worker.status} · ${worker.label}`);
+            }
+            if (event.type === "agent.activity.updated") {
+              const activity = {
+                id: `${event.id}-${String(event.payload.phase ?? "activity")}`,
+                phase: String(event.payload.phase ?? "activity"),
+                label: String(event.payload.label ?? "VIC is working"),
+                detail: typeof event.payload.detail === "string" ? event.payload.detail : undefined,
+              };
+              setAgentActivity((current) => [activity, ...current].slice(0, 6));
+              setStatusMessage(activity.detail ? `${activity.label} · ${activity.detail}` : activity.label);
             }
             if (event.type === "approval.proposed") {
               setPendingApproval({
@@ -719,6 +731,7 @@ export default function Home() {
             <section className="conversation-panel panel">
               <div className="panel-heading"><div><p className="kicker">Continuous conversation</p><h2>Current thread</h2></div><span className="memory-pill">Memory active</span></div>
               <div className="conversation-list">{recentMessages.length ? recentMessages.map((message) => <MessageCard key={message.id} message={message} />) : <EmptyState text="Your phone and web conversations will appear here." />}</div>
+              {agentActivity.length > 0 && <div className="agent-activity" aria-label="VIC live activity"><div className="agent-activity-title"><span className="thinking-pulse" /><strong>VIC activity</strong><small>Live progress, not private chain-of-thought</small></div>{agentActivity.slice(0, 3).map((activity) => { const isTool = activity.phase.startsWith("tool."); const completed = activity.phase.endsWith("completed"); return <div className={`agent-activity-row ${isTool ? "tool-execution" : ""} ${completed ? "activity-complete" : "activity-running"}`} key={activity.id}>{isTool && <span className="tool-scan" aria-hidden="true" />}<span className="activity-glyph">{isTool ? "⌘" : activity.phase.startsWith("subagent.") ? "◇" : "✦"}</span><p><strong>{activity.label}</strong>{activity.detail && <small>{activity.detail}</small>}</p>{isTool && <span className="execution-state">{completed ? "done" : "running"}</span>}</div>; })}</div>}
               {agentWorkers.length > 0 && <div className="agent-worker-list" aria-label="VIC background workers">{agentWorkers.map((worker) => <div className="agent-worker" key={worker.id}><span className={`status-dot ${worker.status === "failed" ? "offline" : ""}`} /><div><strong>{worker.label}</strong><small>{worker.status}{worker.detail ? ` · ${worker.detail}` : ""}</small></div></div>)}</div>}
               {pendingApproval && <div className="approval-card"><div><p className="kicker">Approval required</p><strong>{pendingApproval.tool}</strong><small>{pendingApproval.tool === "rig.root_command" ? "Administrative approval is restricted to the enrolled Pixel." : "VIC will not run this tool without your decision."}</small></div><button className="deny" onClick={() => void decideApproval(false)}>Deny</button><button className="approve" disabled={pendingApproval.tool === "rig.root_command"} onClick={() => void decideApproval(true)}>{pendingApproval.tool === "rig.root_command" ? "Approve on Pixel" : "Approve"}</button></div>}
               <button className="skill-review-callout" onClick={() => setView("system")}><span><strong>Skill proposals</strong><small>{skillProposals.length ? `${skillProposals.length} waiting for evidence review` : "No proposals waiting. Omarchy Voice never enables a generated skill silently."}</small></span><span aria-hidden="true">Review →</span></button>

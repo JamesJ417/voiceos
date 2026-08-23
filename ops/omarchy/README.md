@@ -96,6 +96,10 @@ VIC Panel status instead of a repeated spoken holding message. Ordinary chat
 uses the low-latency Luna model, and VIC Panel synthesizes Ava Neural speech
 one sentence ahead so long answers begin playing sooner.
 
+VIC Panel also renders Hermes activity as a safe live progress trace. It shows
+reasoning phases, animated tool execution, and delegated worker state without
+exposing private chain-of-thought or sensitive tool output.
+
 The gateway listens only on `127.0.0.1:8787`. Use Tailscale Serve when a phone
 needs private HTTPS access; never expose port 8787 through the router or enable
 Tailscale Funnel.
