@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "@@REPO_ROOT@@"
+exec "@@WAKE_PYTHON@@" -m services.wake_bridge.push_to_talk "$@"

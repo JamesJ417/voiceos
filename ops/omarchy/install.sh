@@ -152,6 +152,9 @@ chmod 0644 "$unit_dir/voiceos-wake.service"
 
 install -m 0755 "$script_dir/voiceosctl" "$bin_dir/voiceosctl"
 install -m 0755 "$script_dir/voiceos-talk" "$bin_dir/voiceos-talk"
+sed -e "s|@@WAKE_PYTHON@@|$wake_venv/bin/python|g" -e "s|@@REPO_ROOT@@|$repo_root|g" \
+  "$script_dir/voiceos-ptt.template" >"$bin_dir/voiceos-ptt"
+chmod 0755 "$bin_dir/voiceos-ptt"
 install -m 0755 "$script_dir/doctor.sh" "$bin_dir/omarchy-voice-doctor"
 
 applications_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
