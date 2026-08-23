@@ -1,4 +1,5 @@
 mod auth;
+mod client;
 mod conversations;
 mod documents;
 mod error;
@@ -19,6 +20,7 @@ use crate::state::AppState;
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health::health))
+        .route("/v1/client/bootstrap", get(client::bootstrap))
         .route("/v1/events", get(events::stream))
         .route("/v1/events/recovery", get(events::recovery))
         .route("/v1/turns/text", post(turns::turn))
