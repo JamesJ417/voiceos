@@ -5,7 +5,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from services.wake_bridge.listener import GatewayClient, command_after_wake_phrase
+from services.wake_bridge.listener import GatewayClient, command_after_wake_phrase, ends_conversation
 
 
 class _GatewayHandler(BaseHTTPRequestHandler):
@@ -71,3 +71,8 @@ class WakePhraseTest(unittest.TestCase):
 
     def test_leaves_command_without_wake_phrase_alone(self) -> None:
         self.assertEqual("open the browser", command_after_wake_phrase("open the browser", "hey vic"))
+
+    def test_recognizes_conversation_stop_phrases(self) -> None:
+        self.assertTrue(ends_conversation("Stop listening, VIC."))
+        self.assertTrue(ends_conversation("Goodbye"))
+        self.assertFalse(ends_conversation("Stop the music"))

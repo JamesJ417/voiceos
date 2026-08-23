@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import hashlib
 import json
 import logging
@@ -151,6 +152,42 @@ def capture_utterance(stream, initial: bytes, maximum_seconds: float = 12.0) -> 
     return b"".join(frames)
 
 
+def capture_followup(
+    stream, wait_seconds: float, maximum_seconds: float = 12.0, stop_requested=lambda: False
+) -> bytes | None:
+    """Wait for follow-up speech, retaining a short pre-roll and stopping on silence."""
+    deadline = time.monotonic() + wait_seconds
+    pre_roll: deque[bytes] = deque(maxlen=4)
+    frames: list[bytes] = []
+    speech_started = False
+    quiet_frames = 0
+    speech_started_at = 0.0
+    while not speech_started or time.monotonic() - speech_started_at < maximum_seconds:
+        if stop_requested():
+            return None
+        if not speech_started and time.monotonic() >= deadline:
+            return None
+        frame = stream.read(FRAME_SAMPLES * 2)
+        if len(frame) != FRAME_SAMPLES * 2:
+            raise RuntimeError("microphone_stream_ended")
+        rms = float(np.sqrt(np.mean(np.frombuffer(frame, dtype=np.int16).astype(np.float32) ** 2)))
+        if not speech_started:
+            pre_roll.append(frame)
+            if rms > 420:
+                speech_started = True
+                speech_started_at = time.monotonic()
+                frames.extend(pre_roll)
+            continue
+        frames.append(frame)
+        if rms > 420:
+            quiet_frames = 0
+        else:
+            quiet_frames += 1
+            if quiet_frames >= 14:
+                break
+    return b"".join(frames)
+
+
 def transcribe_wav(audio: bytes, model: Path) -> str:
     with tempfile.TemporaryDirectory(prefix="voiceos-wake-") as temporary:
         wav_path = Path(temporary) / "turn.wav"
@@ -178,6 +215,29 @@ def command_after_wake_phrase(transcript: str, phrase: str) -> str:
         if heard == expected:
             words = words[len(phrase_words) :]
     return " ".join(words).strip()
+
+
+def ends_conversation(transcript: str) -> bool:
+    normalized = " ".join(
+        word.strip(".,!?;:").casefold() for word in transcript.strip().split()
+    )
+    return normalized in {
+        "goodbye",
+        "bye vic",
+        "goodbye vic",
+        "stop listening",
+        "stop listening vic",
+        "that's all",
+        "that is all",
+    }
+
+
+def stop_recorder(recorder: subprocess.Popen[bytes]) -> None:
+    recorder.terminate()
+    try:
+        recorder.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        recorder.kill()
 
 
 def speak(text: str) -> None:
@@ -210,12 +270,15 @@ def run(args: argparse.Namespace) -> None:
     LOG.info("Listening locally for %r on %s", args.phrase, args.source or "the default microphone")
     try:
         while not stopping:
+            transcript = ""
             recorder = capture_process(args.source)
             assert recorder.stdout is not None
             try:
                 while not stopping:
                     frame = recorder.stdout.read(FRAME_SAMPLES * 2)
                     if len(frame) != FRAME_SAMPLES * 2:
+                        if stopping:
+                            break
                         raise RuntimeError("microphone_stream_ended")
                     if wake.process(frame):
                         LOG.info("Wake word detected")
@@ -223,20 +286,39 @@ def run(args: argparse.Namespace) -> None:
                         transcript = command_after_wake_phrase(
                             transcribe_wav(utterance, args.whisper_model), args.phrase
                         )
-                        if transcript:
-                            LOG.info("Submitting voice turn")
-                            reply = gateway.submit_text(transcript)
-                            speak(reply)
-                        else:
-                            LOG.info("No speech detected after wake word")
                         wake.reset()
                         break
             finally:
-                recorder.terminate()
+                stop_recorder(recorder)
+
+            if stopping:
+                break
+            if not transcript:
+                speak("Yes?")
+            while not stopping:
+                if transcript:
+                    if ends_conversation(transcript):
+                        speak("Okay. Say Hey VIC when you need me.")
+                        LOG.info("Conversation ended by voice command")
+                        break
+                    LOG.info("Submitting conversation turn")
+                    speak(gateway.submit_text(transcript))
+
+                recorder = capture_process(args.source)
+                assert recorder.stdout is not None
                 try:
-                    recorder.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    recorder.kill()
+                    audio = capture_followup(
+                        recorder.stdout, args.conversation_timeout, stop_requested=lambda: stopping
+                    )
+                finally:
+                    stop_recorder(recorder)
+                if audio is None:
+                    LOG.info("Conversation timed out; returning to wake-word mode")
+                    break
+                transcript = transcribe_wav(audio, args.whisper_model)
+                if not transcript:
+                    LOG.info("Follow-up audio had no transcript")
+                    break
     finally:
         wake.close()
 
@@ -250,6 +332,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model-root", type=Path, default=Path.home() / ".local/share/voiceos/wakewords")
     parser.add_argument("--source", default=None, help="PipeWire source node name or serial; defaults to the current source")
     parser.add_argument("--sensitivity", type=float, default=0.5)
+    parser.add_argument("--conversation-timeout", type=float, default=20.0,
+                        help="Seconds to wait for each follow-up before requiring Hey VIC again")
     return parser.parse_args(argv)
 
 
