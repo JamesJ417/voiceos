@@ -359,6 +359,53 @@ impl ConversationStore {
         .collect()
     }
 
+    /// Read the owner's durable event ledger across every stream. This is the
+    /// canonical cursor used by desktop and mobile clients to resume after a
+    /// disconnect without polling each task or conversation independently.
+    pub fn execution_events_after(
+        &self,
+        owner_id: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<ExecutionEvent>, StoreError> {
+        require_text("owner_id", owner_id)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT event_id, owner_id, stream_id, event_type, actor, payload_json, occurred_at
+             FROM execution_events
+             WHERE owner_id=?1 AND event_id>?2
+             ORDER BY event_id
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![owner_id.trim(), after.max(0), limit.clamp(1, 1_000)],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )?;
+        rows.map(|row| {
+            let row = row?;
+            Ok(ExecutionEvent {
+                id: row.0,
+                owner_id: row.1,
+                stream_id: row.2,
+                event_type: row.3,
+                actor: row.4,
+                payload: serde_json::from_str(&row.5)?,
+                occurred_at: row.6,
+            })
+        })
+        .collect()
+    }
+
     pub fn propose_skill(
         &self,
         owner_id: &str,
@@ -1009,4 +1056,39 @@ fn skill_usage_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SkillUsage> {
         reviewed_at: row.get(13)?,
         reviewed_by: row.get(14)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::ConversationStore;
+
+    #[test]
+    fn resumes_execution_events_across_streams_with_one_cursor() {
+        let store = ConversationStore::in_memory().unwrap();
+        let first = store
+            .append_execution_event("owner", "task-a", "task.changed", "vic", json!({"n": 1}))
+            .unwrap();
+        let second = store
+            .append_execution_event(
+                "owner",
+                "conversation-a",
+                "conversation.floor.changed",
+                "vic",
+                json!({"n": 2}),
+            )
+            .unwrap();
+        store
+            .append_execution_event("other-owner", "task-b", "task.changed", "vic", json!({}))
+            .unwrap();
+
+        let resumed = store
+            .execution_events_after("owner", first.id, 200)
+            .unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].id, second.id);
+        assert_eq!(resumed[0].stream_id, "conversation-a");
+        assert_eq!(resumed[0].payload, json!({"n": 2}));
+    }
 }
