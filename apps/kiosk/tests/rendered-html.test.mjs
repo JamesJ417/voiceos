@@ -22,5 +22,6 @@ test("server-renders the Carbon Command surface", async () => {
   assert.match(html, /Model providers/);
   assert.match(html, /Skill proposals/);
   assert.match(html, /never enables a generated skill silently/i);
+  assert.match(html, /VIC desktop presence/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
 });

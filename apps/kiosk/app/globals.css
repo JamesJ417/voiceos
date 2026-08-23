@@ -245,6 +245,99 @@ button { font: inherit; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; } }
 
+/* VIC's animated presence stays inside the dedicated Omarchy Voice tile. */
+.vic-overlay {
+  --vic-glow: var(--teal);
+  position: fixed; z-index: 18; right: 18px; bottom: 18px;
+  display: flex; align-items: center; justify-content: center; gap: 20px;
+  pointer-events: none;
+}
+.vic-overlay.state-listening { --vic-glow: var(--amber); }
+.vic-overlay.state-processing { --vic-glow: var(--cyan); }
+.vic-overlay.state-speaking { --vic-glow: #9d8cff; }
+.vic-overlay.state-error { --vic-glow: var(--red); }
+.vic-overlay.expanded {
+  left: 240px; right: 50%; top: 112px; bottom: 28px; padding: 24px;
+  flex-direction: column; gap: 12px;
+  background:
+    radial-gradient(circle at 42% 50%, color-mix(in srgb, var(--vic-glow) 15%, transparent), transparent 34%),
+    rgba(3, 6, 8, .82);
+  backdrop-filter: blur(12px) saturate(1.15); border-radius: 24px;
+}
+.vic-orb {
+  position: relative; width: 190px; aspect-ratio: 1; flex: 0 0 auto;
+  display: grid; place-items: center; border: 0; border-radius: 50%;
+  color: var(--white); background: transparent; cursor: pointer; pointer-events: auto;
+  filter: drop-shadow(0 0 24px color-mix(in srgb, var(--vic-glow) 52%, transparent));
+}
+.vic-overlay.collapsed .vic-orb { width: 76px; }
+.vic-orb::before, .vic-orb::after {
+  content: ""; position: absolute; inset: 8%; border: 1px solid color-mix(in srgb, var(--vic-glow) 68%, transparent);
+  border-radius: 46% 54% 52% 48%; transform: rotate(18deg);
+  box-shadow: inset 0 0 22px color-mix(in srgb, var(--vic-glow) 12%, transparent);
+}
+.vic-orb::after { inset: 1%; opacity: .42; transform: rotate(-32deg); border-style: dashed; }
+.vic-orb-core {
+  position: relative; width: 57%; aspect-ratio: 1; display: block; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--vic-glow) 76%, white 8%); border-radius: 44% 56% 48% 52%;
+  background:
+    linear-gradient(115deg, transparent 35%, color-mix(in srgb, var(--vic-glow) 22%, transparent) 49%, transparent 63%),
+    radial-gradient(circle at 50% 42%, color-mix(in srgb, var(--vic-glow) 24%, #071012), #071012 68%);
+  box-shadow: inset 0 0 28px color-mix(in srgb, var(--vic-glow) 24%, transparent), 0 0 18px color-mix(in srgb, var(--vic-glow) 35%, transparent);
+}
+.vic-orb-core::after {
+  content: ""; position: absolute; inset: 0;
+  background: repeating-linear-gradient(0deg, transparent 0 5px, color-mix(in srgb, var(--vic-glow) 9%, transparent) 6px 7px);
+}
+.vic-orb-core i { position: absolute; z-index: 2; display: block; background: var(--vic-glow); box-shadow: 0 0 9px var(--vic-glow); }
+.vic-orb-core i:nth-child(1), .vic-orb-core i:nth-child(2) { width: 16%; height: 5%; top: 41%; border-radius: 100%; }
+.vic-orb-core i:nth-child(1) { left: 23%; transform: rotate(7deg); }
+.vic-orb-core i:nth-child(2) { right: 23%; transform: rotate(-7deg); }
+.vic-orb-core i:nth-child(3) { width: 25%; height: 3%; left: 37.5%; top: 66%; border-radius: 100%; opacity: .75; }
+.vic-orb-state {
+  position: absolute; bottom: -2px; padding: 4px 9px; border: 1px solid color-mix(in srgb, var(--vic-glow) 45%, transparent);
+  border-radius: 999px; color: var(--vic-glow); background: #070b0d;
+  font-size: 8px; font-weight: 760; letter-spacing: .16em; text-transform: uppercase;
+}
+.vic-wave { position: absolute; bottom: 29px; display: flex; align-items: end; gap: 3px; height: 25px; }
+.vic-wave i { width: 3px; height: 25%; border-radius: 4px; background: var(--vic-glow); box-shadow: 0 0 6px var(--vic-glow); }
+.vic-overlay.state-speaking .vic-wave i { animation: vic-wave .62s ease-in-out infinite alternate; }
+.vic-wave i:nth-child(2) { animation-delay: -.38s !important; }
+.vic-wave i:nth-child(3) { animation-delay: -.15s !important; }
+.vic-wave i:nth-child(4) { animation-delay: -.48s !important; }
+.vic-wave i:nth-child(5) { animation-delay: -.27s !important; }
+.vic-overlay.state-listening .vic-orb::before { animation: vic-listen 1.15s ease-in-out infinite; }
+.vic-overlay.state-processing .vic-orb::before { animation: vic-orbit 2.1s linear infinite; }
+.vic-overlay.state-processing .vic-orb::after { animation: vic-orbit 3.3s linear infinite reverse; }
+.vic-overlay.state-speaking .vic-orb-core i:nth-child(3) { animation: vic-mouth .42s ease-in-out infinite alternate; }
+.vic-overlay-card {
+  width: min(390px, 92%); padding: 20px; pointer-events: auto;
+  border: 1px solid color-mix(in srgb, var(--vic-glow) 34%, transparent); border-radius: 20px;
+  background: linear-gradient(145deg, rgba(16, 23, 27, .96), rgba(7, 11, 13, .98));
+  box-shadow: 0 24px 70px rgba(0,0,0,.45), inset 0 1px rgba(255,255,255,.04);
+}
+.vic-overlay-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.vic-overlay-heading p { margin: 0 0 5px; color: var(--vic-glow); font-size: 10px; font-weight: 800; letter-spacing: .22em; }
+.vic-overlay-heading strong { font-size: 21px; }
+.vic-overlay-heading button { border: 0; color: var(--muted); background: transparent; font-size: 24px; cursor: pointer; }
+.vic-caption { min-height: 55px; margin: 15px 0; color: #dce5e4; line-height: 1.5; }
+.vic-overlay-action { width: 100%; min-height: 42px; border: 1px solid color-mix(in srgb, var(--vic-glow) 44%, transparent); border-radius: 11px; color: var(--vic-glow); background: color-mix(in srgb, var(--vic-glow) 9%, transparent); cursor: pointer; }
+@keyframes vic-listen { 50% { transform: rotate(18deg) scale(1.08); opacity: .58; } }
+@keyframes vic-orbit { to { transform: rotate(378deg); } }
+@keyframes vic-mouth { to { height: 9%; top: 63%; border-radius: 40%; } }
+@keyframes vic-wave { to { height: 100%; } }
+
+@media (min-width: 700px) and (max-height: 600px) {
+  .vic-overlay { right: 10px; bottom: 10px; gap: 12px; }
+  .vic-overlay.expanded { left: 76px; right: 59%; top: 85px; bottom: 10px; padding: 10px; border-radius: 14px; }
+  .vic-orb { width: 122px; }
+  .vic-overlay.collapsed .vic-orb { width: 58px; }
+  .vic-overlay-card { width: min(330px, 94%); padding: 12px; }
+  .vic-overlay-heading strong { font-size: 17px; }
+  .vic-caption { max-height: 52px; min-height: 30px; overflow: hidden; margin: 8px 0; font-size: 10px; }
+  .vic-wave { bottom: 23px; }
+}
+
 .state-error { --state-color: var(--red); }
 .status-dot.offline { background: var(--red); box-shadow: 0 0 12px rgba(239, 107, 115, 0.5); }
 .offline-pill { color: var(--red); border-color: rgba(239, 107, 115, 0.28); }

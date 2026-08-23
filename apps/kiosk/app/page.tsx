@@ -131,6 +131,7 @@ export default function Home() {
   const [tasks, setTasks] = useState<TaskDetail[]>([]);
   const [taskFilter, setTaskFilter] = useState<"all" | "needs_me" | "vic_working" | "review">("all");
   const [showSettings, setShowSettings] = useState(false);
+  const [overlayExpanded, setOverlayExpanded] = useState(false);
   const [enrollmentCode, setEnrollmentCode] = useState("");
   const [speechRate, setSpeechRate] = useState(1.25);
   const [floor, setFloor] = useState<ConversationFloor | null>(null);
@@ -264,21 +265,23 @@ export default function Home() {
   }, [connected, gateway, refreshStatus]);
 
   useEffect(() => {
-    if (!gateway || !token) return;
+    if (!gateway) return;
     const timer = window.setInterval(() => void loadFloor().catch(() => undefined), 15_000);
     return () => window.clearInterval(timer);
   }, [gateway, token, loadFloor]);
 
   useEffect(() => {
-    if (!gateway || !token) return;
+    if (!gateway) return;
     const controller = new AbortController();
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
     const connect = async () => {
       try {
         const after = Number(localStorage.getItem(STORAGE.eventCursor) ?? "0");
+        const eventHeaders: Record<string, string> = { Accept: "text/event-stream" };
+        if (token) eventHeaders.Authorization = `Bearer ${token}`;
         const response = await fetch(`${gateway}/v1/events?after=${Number.isFinite(after) ? after : 0}`, {
-          headers: { Accept: "text/event-stream", Authorization: `Bearer ${token}` },
+          headers: eventHeaders,
           cache: "no-store",
           signal: controller.signal,
         });
@@ -597,6 +600,7 @@ export default function Home() {
   const recentMessages = useMemo(() => messages.slice(-4), [messages]);
   const thisDeviceId = typeof window === "undefined" ? null : localStorage.getItem(STORAGE.deviceId);
   const floorIsRemote = Boolean(floor?.active && floor.holder_device_id && floor.holder_device_id !== thisDeviceId);
+  const vicOverlayExpanded = overlayExpanded || voiceState !== "ready";
 
   return (
     <main className="shell">
@@ -666,6 +670,19 @@ export default function Home() {
       </section>
 
       {showSettings && <SettingsDialog gateway={gateway} enrollmentCode={enrollmentCode} setEnrollmentCode={setEnrollmentCode} onSaveGateway={saveGateway} onEnroll={enroll} onClose={() => setShowSettings(false)} hasToken={Boolean(token)} onForget={() => { localStorage.removeItem(STORAGE.token); localStorage.removeItem(STORAGE.deviceId); setToken(""); setConnected(false); setStatusMessage("Browser enrollment removed."); }} />}
+
+      <aside className={`vic-overlay state-${voiceState} ${vicOverlayExpanded ? "expanded" : "collapsed"}`} aria-label="VIC desktop presence">
+        <button className="vic-orb" onClick={() => setOverlayExpanded((current) => !current)} aria-expanded={vicOverlayExpanded} aria-label={vicOverlayExpanded ? "Collapse VIC desktop presence" : "Open VIC desktop presence"}>
+          <span className="vic-orb-core" aria-hidden="true"><i /><i /><i /></span>
+          <span className="vic-wave" aria-hidden="true"><i /><i /><i /><i /><i /></span>
+          <span className="vic-orb-state">{voiceState}</span>
+        </button>
+        {vicOverlayExpanded && <div className="vic-overlay-card">
+          <div className="vic-overlay-heading"><div><p>VIC</p><strong>{copy.title}</strong></div><button onClick={() => setOverlayExpanded(false)} aria-label="Collapse VIC desktop presence">×</button></div>
+          <p className="vic-caption" aria-live="polite">{liveTranscript || lastResponse || "I’m here when you need me."}</p>
+          <button className="vic-overlay-action" onClick={handleTalk}>{copy.action}</button>
+        </div>}
+      </aside>
     </main>
   );
 }
