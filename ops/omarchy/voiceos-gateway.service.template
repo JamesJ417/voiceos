@@ -1,7 +1,7 @@
 [Unit]
 Description=Omarchy Voice personal AI gateway
-After=network-online.target voiceos-hermes.service voiceos-codex.service
-Wants=network-online.target voiceos-hermes.service voiceos-codex.service
+After=network-online.target voiceos-core.service voiceos-hermes.service voiceos-codex.service
+Wants=network-online.target voiceos-core.service voiceos-hermes.service voiceos-codex.service
 
 [Service]
 Type=simple

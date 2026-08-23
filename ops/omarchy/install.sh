@@ -65,6 +65,16 @@ if [[ -z "$npm_bin" ]]; then
 fi
 npm_dir="$(dirname "$npm_bin")"
 
+rust_gateway="$repo_root/target/release/voiceos-gateway"
+if [[ ! -x "$rust_gateway" ]]; then
+  cargo_bin="$(command -v cargo || true)"
+  if [[ -z "$cargo_bin" ]]; then
+    echo "The task service is not built. Run ops/omarchy/setup.sh first." >&2
+    exit 1
+  fi
+  "$cargo_bin" build --release --locked --manifest-path "$repo_root/Cargo.toml" -p voiceos-gateway
+fi
+
 if [[ ! -d "$repo_root/apps/kiosk/node_modules" ]]; then
   "$npm_bin" ci --prefix "$repo_root/apps/kiosk"
 fi
@@ -84,6 +94,24 @@ if [[ ! -f "$config_dir/gateway.env" ]]; then
     "$script_dir/gateway.env.example" >"$config_dir/gateway.env"
   chmod 0600 "$config_dir/gateway.env"
 fi
+"$python_bin" - "$config_dir/gateway.env" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8").splitlines()
+key = "VOICEOS_MEMORY_URL"
+replacement = f"{key}=http://127.0.0.1:8790"
+found = False
+for index, line in enumerate(lines):
+    if line.startswith(f"{key}="):
+        found = True
+        if not line.partition("=")[2].strip():
+            lines[index] = replacement
+if not found:
+    lines.append(replacement)
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
 if [[ ! -f "$config_dir/hermes-api.key" ]]; then
   umask 077
   python3 -c 'import secrets; print(secrets.token_hex(32))' >"$config_dir/hermes-api.key"
@@ -104,10 +132,13 @@ sed -e "s|@@REPO_ROOT@@|$repo_root|g" -e "s|@@PYTHON@@|$python_bin|g" \
 sed -e "s|@@REPO_ROOT@@|$repo_root|g" -e "s|@@NPM@@|$npm_bin|g" \
   -e "s|@@NODE_PATH@@|$npm_dir|g" \
   "$script_dir/voiceos-ui.service.template" >"$unit_dir/voiceos-ui.service"
+sed -e "s|@@REPO_ROOT@@|$repo_root|g" -e "s|@@RUST_GATEWAY@@|$rust_gateway|g" \
+  "$script_dir/voiceos-core.service.template" >"$unit_dir/voiceos-core.service"
 chmod 0644 "$unit_dir/voiceos-gateway.service"
 chmod 0644 "$unit_dir/voiceos-hermes.service"
 chmod 0644 "$unit_dir/voiceos-codex.service"
 chmod 0644 "$unit_dir/voiceos-ui.service"
+chmod 0644 "$unit_dir/voiceos-core.service"
 
 install -m 0755 "$script_dir/voiceosctl" "$bin_dir/voiceosctl"
 install -m 0755 "$script_dir/voiceos-talk" "$bin_dir/voiceos-talk"
@@ -163,7 +194,16 @@ systemctl --user daemon-reload
 omarchy menu refresh >/dev/null
 
 if ((enable)); then
-  systemctl --user enable --now voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service
+  systemctl --user enable voiceos-core.service voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service
+  systemctl --user restart voiceos-core.service
+  for _ in {1..40}; do
+    if curl --fail --silent http://127.0.0.1:8790/v1/health >/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  curl --fail --silent --show-error http://127.0.0.1:8790/v1/health >/dev/null
+  systemctl --user restart voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service
   "$bin_dir/voiceosctl" wait
 else
   echo "Omarchy Voice integration installed but not started."

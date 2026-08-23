@@ -37,7 +37,7 @@ else
   failed=1
 fi
 
-for unit in voiceos-hermes voiceos-codex voiceos-gateway voiceos-ui; do
+for unit in voiceos-core voiceos-hermes voiceos-codex voiceos-gateway voiceos-ui; do
   if systemctl --user is-active --quiet "$unit.service"; then
     printf 'PASS  %-18s active\n' "$unit"
   else
@@ -45,6 +45,20 @@ for unit in voiceos-hermes voiceos-codex voiceos-gateway voiceos-ui; do
     failed=1
   fi
 done
+
+if curl --fail --silent http://127.0.0.1:8790/v1/health >/dev/null; then
+  printf 'PASS  %-18s healthy\n' "task authority"
+else
+  printf 'FAIL  %-18s unavailable\n' "task authority"
+  failed=1
+fi
+
+if curl --fail --silent http://127.0.0.1:8787/v1/tasks?limit=1 >/dev/null; then
+  printf 'PASS  %-18s available to VIC\n' "task board"
+else
+  printf 'FAIL  %-18s unavailable to VIC\n' "task board"
+  failed=1
+fi
 
 if curl --fail --silent http://127.0.0.1:8787/v1/health >/dev/null; then
   printf 'PASS  %-18s healthy\n' "gateway"

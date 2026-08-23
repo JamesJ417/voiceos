@@ -85,6 +85,12 @@ step "Building the Omarchy Voice interface"
 npm ci --prefix "$repo_root/apps/kiosk"
 npm run build --prefix "$repo_root/apps/kiosk"
 
+step "Building the Omarchy Voice task and memory service"
+if ! command -v cargo >/dev/null; then
+  mise use --global rust@stable
+fi
+cargo build --release --locked --manifest-path "$repo_root/Cargo.toml" -p voiceos-gateway
+
 if ((non_interactive == 0)); then
   if ! codex login status >/dev/null 2>&1; then
     step "Sign in to Codex with your ChatGPT account"

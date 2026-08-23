@@ -39,6 +39,7 @@ omarchy-voice-doctor
 The installer creates:
 
 - `~/.config/systemd/user/voiceos-gateway.service`
+- `~/.config/systemd/user/voiceos-core.service`
 - `~/.config/systemd/user/voiceos-hermes.service`
 - `~/.config/systemd/user/voiceos-codex.service`
 - `~/.config/systemd/user/voiceos-ui.service`
@@ -56,6 +57,11 @@ an authenticated loopback API, and Hermes publicly identifies itself as VIC.
 The authenticated Codex CLI remains available through a private Unix socket. Codex is
 ephemeral, answer-only, read-only, and has its command, web, app, hook, and
 subagent tools disabled; permissioned system actions remain in the gateway.
+
+`voiceos-core.service` is the loopback-only authority for VIC's task board,
+conversation memory, ontology, and private documents. On first start it imports
+the legacy gateway audit history idempotently, so installing task support does
+not discard earlier conversations.
 
 ## Operate
 
