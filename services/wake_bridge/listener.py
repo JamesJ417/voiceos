@@ -16,6 +16,7 @@ import time
 import urllib.request
 import uuid
 import wave
+import threading
 from pathlib import Path
 from typing import Sequence
 from urllib.error import HTTPError, URLError
@@ -29,6 +30,20 @@ MODEL_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/
 MODEL_DIRNAME = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
 MODEL_SHA256 = "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
 LOG = logging.getLogger(__name__)
+QUIET_FRAMES_TO_END = 8  # about 0.64 seconds
+IGNORED_TRANSCRIPTS = {
+    "[blank_audio]",
+    "[blank audio]",
+    "(dramatic music)",
+    "(music)",
+    "[music]",
+}
+CACHED_SPEECH = {
+    "ack": "Yes, I'm here.",
+    "progress": "One moment. I'm working on that.",
+    "goodbye": "Okay. Say Hey VIC when you need me.",
+    "error": "I hit a delay. Please try that again.",
+}
 
 
 class GatewayClient:
@@ -147,7 +162,7 @@ def capture_utterance(stream, initial: bytes, maximum_seconds: float = 12.0) -> 
             quiet_frames = 0
         elif speech_started:
             quiet_frames += 1
-            if quiet_frames >= 14:  # about 1.1 seconds of post-speech quiet
+            if quiet_frames >= QUIET_FRAMES_TO_END:
                 break
     return b"".join(frames)
 
@@ -183,7 +198,7 @@ def capture_followup(
             quiet_frames = 0
         else:
             quiet_frames += 1
-            if quiet_frames >= 14:
+            if quiet_frames >= QUIET_FRAMES_TO_END:
                 break
     return b"".join(frames)
 
@@ -232,6 +247,11 @@ def ends_conversation(transcript: str) -> bool:
     }
 
 
+def usable_transcript(transcript: str) -> bool:
+    normalized = " ".join(transcript.strip().casefold().split())
+    return bool(normalized) and normalized not in IGNORED_TRANSCRIPTS
+
+
 def stop_recorder(recorder: subprocess.Popen[bytes]) -> None:
     recorder.terminate()
     try:
@@ -240,25 +260,65 @@ def stop_recorder(recorder: subprocess.Popen[bytes]) -> None:
         recorder.kill()
 
 
+def generate_speech(text: str, audio_path: Path) -> None:
+    audio_path.parent.mkdir(parents=True, exist_ok=True)
+    generated = subprocess.run(
+        [sys.executable, "-m", "edge_tts", "--voice", "en-US-AvaMultilingualNeural",
+         "--text", text[:4_000], "--write-media", str(audio_path)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    if generated.returncode or not audio_path.is_file():
+        raise RuntimeError("tts_generation_failed")
+
+
+def play_audio(audio_path: Path) -> None:
+    played = subprocess.run(["pw-play", str(audio_path)], timeout=180, check=False)
+    if played.returncode:
+        raise RuntimeError("tts_playback_failed")
+
+
+def ensure_speech_cache(cache_dir: Path) -> None:
+    for name, text in CACHED_SPEECH.items():
+        path = cache_dir / f"{name}.mp3"
+        if not path.is_file():
+            generate_speech(text, path)
+
+
+def speak_cached(cache_dir: Path, name: str) -> None:
+    play_audio(cache_dir / f"{name}.mp3")
+
+
 def speak(text: str) -> None:
     if not text:
         return
     with tempfile.TemporaryDirectory(prefix="voiceos-tts-") as temporary:
         audio_path = Path(temporary) / "reply.mp3"
-        generated = subprocess.run(
-            [sys.executable, "-m", "edge_tts", "--voice", "en-US-AvaMultilingualNeural", "--text", text[:4_000], "--write-media", str(audio_path)],
-            capture_output=True, text=True, timeout=120, check=False,
-        )
-        if generated.returncode or not audio_path.is_file():
-            raise RuntimeError("tts_generation_failed")
-        played = subprocess.run(["pw-play", str(audio_path)], timeout=180, check=False)
-        if played.returncode:
-            raise RuntimeError("tts_playback_failed")
+        generate_speech(text, audio_path)
+        play_audio(audio_path)
+
+
+def submit_with_progress(gateway: GatewayClient, transcript: str, cache_dir: Path) -> str:
+    finished = threading.Event()
+
+    def announce_delay() -> None:
+        if not finished.wait(3.0):
+            speak_cached(cache_dir, "progress")
+
+    announcer = threading.Thread(target=announce_delay, daemon=True)
+    announcer.start()
+    started = time.monotonic()
+    try:
+        return gateway.submit_text(transcript)
+    finally:
+        finished.set()
+        announcer.join(timeout=10)
+        LOG.info("VIC response completed in %.2f seconds", time.monotonic() - started)
 
 
 def run(args: argparse.Namespace) -> None:
     wake = SherpaWakeWord(args.phrase, ensure_model(args.model_root), args.sensitivity)
     gateway = GatewayClient(args.gateway_url, args.session_id)
+    ensure_speech_cache(args.speech_cache)
     stopping = False
 
     def stop(*_: object) -> None:
@@ -286,6 +346,8 @@ def run(args: argparse.Namespace) -> None:
                         transcript = command_after_wake_phrase(
                             transcribe_wav(utterance, args.whisper_model), args.phrase
                         )
+                        if not usable_transcript(transcript):
+                            transcript = ""
                         wake.reset()
                         break
             finally:
@@ -294,15 +356,20 @@ def run(args: argparse.Namespace) -> None:
             if stopping:
                 break
             if not transcript:
-                speak("Yes, I'm here.")
+                speak_cached(args.speech_cache, "ack")
             while not stopping:
                 if transcript:
                     if ends_conversation(transcript):
-                        speak("Okay. Say Hey VIC when you need me.")
+                        speak_cached(args.speech_cache, "goodbye")
                         LOG.info("Conversation ended by voice command")
                         break
                     LOG.info("Submitting conversation turn")
-                    speak(gateway.submit_text(transcript))
+                    try:
+                        speak(submit_with_progress(gateway, transcript, args.speech_cache))
+                    except RuntimeError as error:
+                        LOG.error("Voice turn failed: %s", error)
+                        speak_cached(args.speech_cache, "error")
+                        break
 
                 recorder = capture_process(args.source)
                 assert recorder.stdout is not None
@@ -316,8 +383,8 @@ def run(args: argparse.Namespace) -> None:
                     LOG.info("Conversation timed out; returning to wake-word mode")
                     break
                 transcript = transcribe_wav(audio, args.whisper_model)
-                if not transcript:
-                    LOG.info("Follow-up audio had no transcript")
+                if not usable_transcript(transcript):
+                    LOG.info("Ignored empty or background-audio transcript: %r", transcript)
                     break
     finally:
         wake.close()
@@ -330,6 +397,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--session-id", default="wake:omarchy-desktop")
     parser.add_argument("--whisper-model", type=Path, default=Path.home() / ".local/share/voiceos/models/ggml-base.en.bin")
     parser.add_argument("--model-root", type=Path, default=Path.home() / ".local/share/voiceos/wakewords")
+    parser.add_argument("--speech-cache", type=Path, default=Path.home() / ".local/share/voiceos/audio")
     parser.add_argument("--source", default=None, help="PipeWire source node name or serial; defaults to the current source")
     parser.add_argument("--sensitivity", type=float, default=0.5)
     parser.add_argument("--conversation-timeout", type=float, default=20.0,

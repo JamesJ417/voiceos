@@ -397,6 +397,9 @@ class HermesProvider:
         body: dict[str, object] = {
             "input": text,
             "instructions": system_prompt,
+            "model_options": {
+                "reasoning_effort": "medium" if _should_use_agent_runtime(text) else "low",
+            },
         }
         # "hermes" is our provider slot name, not necessarily an Ollama model.
         # Omitting that sentinel lets Hermes use its own configured default.

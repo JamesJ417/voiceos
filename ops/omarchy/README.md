@@ -88,6 +88,11 @@ seconds for it to return to wake-word mode automatically.
 If you say only **“Hey VIC”**, VIC answers **“Yes, I'm here”** before listening
 for your first request.
 
+Wake acknowledgement and progress prompts are cached locally for immediate
+playback. Ordinary conversation uses low reasoning latency, while action and
+tool requests retain medium reasoning. For longer requests VIC announces that
+it is working instead of remaining silent.
+
 The gateway listens only on `127.0.0.1:8787`. Use Tailscale Serve when a phone
 needs private HTTPS access; never expose port 8787 through the router or enable
 Tailscale Funnel.

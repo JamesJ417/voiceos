@@ -5,7 +5,12 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from services.wake_bridge.listener import GatewayClient, command_after_wake_phrase, ends_conversation
+from services.wake_bridge.listener import (
+    GatewayClient,
+    command_after_wake_phrase,
+    ends_conversation,
+    usable_transcript,
+)
 
 
 class _GatewayHandler(BaseHTTPRequestHandler):
@@ -76,3 +81,8 @@ class WakePhraseTest(unittest.TestCase):
         self.assertTrue(ends_conversation("Stop listening, VIC."))
         self.assertTrue(ends_conversation("Goodbye"))
         self.assertFalse(ends_conversation("Stop the music"))
+
+    def test_rejects_whisper_background_audio_markers(self) -> None:
+        self.assertFalse(usable_transcript("[BLANK_AUDIO]"))
+        self.assertFalse(usable_transcript("(dramatic music)"))
+        self.assertTrue(usable_transcript("What is the weather?"))

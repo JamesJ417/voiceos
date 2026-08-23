@@ -174,12 +174,14 @@ class HermesProviderTest(unittest.TestCase):
 
 class FakeHermesAsyncHandler(BaseHTTPRequestHandler):
     approval_choice: str | None = None
+    request_payload: dict[str, object] | None = None
     run_id = "run_0123456789abcdef0123456789abcdef"
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length) or b"{}")
         if self.path == "/v1/runs":
+            type(self).request_payload = payload
             self._json(202, {"run_id": self.run_id, "status": "started"})
             return
         if self.path == f"/v1/runs/{self.run_id}/approval":
@@ -250,6 +252,10 @@ class HermesAsyncProviderTest(unittest.TestCase):
             f"http://127.0.0.1:{self.server.server_port}", api_key="test-secret"
         )
         response = provider.respond("Restart VoiceOS", conversation_id="owner-1")
+        self.assertEqual(
+            {"reasoning_effort": "medium"},
+            FakeHermesAsyncHandler.request_payload["model_options"],  # type: ignore[index]
+        )
         self.assertEqual(FakeHermesAsyncHandler.run_id, response.approvals[0].provider_run_id)
         self.assertEqual("hermes.systemctl", response.approvals[0].tool)
         self.assertIn("VIC wants to run", response.text)
@@ -258,6 +264,16 @@ class HermesAsyncProviderTest(unittest.TestCase):
         self.assertEqual("once", FakeHermesAsyncHandler.approval_choice)
         self.assertEqual("Restart decision recorded", completed.text)
         self.assertEqual(4, completed.input_tokens)
+
+    def test_ordinary_chat_uses_low_reasoning(self) -> None:
+        provider = HermesProvider(
+            f"http://127.0.0.1:{self.server.server_port}", api_key="test-secret"
+        )
+        provider.respond("How are you today?", conversation_id="owner-1")
+        self.assertEqual(
+            {"reasoning_effort": "low"},
+            FakeHermesAsyncHandler.request_payload["model_options"],  # type: ignore[index]
+        )
 
 class CodexBridgeProviderTest(unittest.TestCase):
     @patch("services.gateway.providers.AF_UNIX", 1)
