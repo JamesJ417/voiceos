@@ -576,3 +576,43 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
   .approval-card small { display: none; }
   .approval-card button { min-height: 30px; padding: 0 8px; }
 }
+
+/* Fullscreen is the window boundary, not a content crop. Every screen can
+   scroll to its final card while the navigation rail remains fixed in place. */
+@media (min-width: 700px) {
+  .workspace {
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-color: rgba(53, 224, 193, .55) rgba(18, 23, 26, .7);
+    scrollbar-width: thin;
+  }
+  .workspace::-webkit-scrollbar { width: 10px; }
+  .workspace::-webkit-scrollbar-track { background: rgba(18, 23, 26, .7); }
+  .workspace::-webkit-scrollbar-thumb { border: 2px solid rgba(18, 23, 26, .7); border-radius: 999px; background: rgba(53, 224, 193, .55); }
+}
+
+@media (min-width: 1261px) and (min-height: 700px) {
+  .dashboard-grid { height: auto; grid-template-rows: auto auto; padding-bottom: 2px; }
+  .voice-panel { height: auto; min-height: 690px; }
+  .conversation-panel { height: auto; min-height: 690px; }
+  .conversation-list { overflow: visible; }
+  .conversation-list .message:nth-last-child(n+3) { display: block; }
+  .message { max-height: none; overflow: visible; }
+  .message p { display: block; overflow: visible; }
+  .agent-activity { max-height: none; overflow: visible; }
+  .provider-panel, .health-panel { height: auto; min-height: 240px; }
+  .provider-row:nth-child(n+2) { display: grid; }
+  .metric:nth-child(n+3) { display: grid; }
+}
+
+@media (min-width: 700px) and (max-height: 600px) {
+  .workspace { overflow-y: auto; }
+  .dashboard-grid { height: auto; grid-template-rows: auto; }
+  .voice-panel, .conversation-panel { height: auto; min-height: calc(100vh - 30px); }
+  .conversation-list { overflow: visible; }
+  .conversation-list .message:nth-last-child(n+3) { display: block; }
+  .message { max-height: none; overflow: visible; }
+  .message p { display: block; overflow: visible; -webkit-line-clamp: unset; }
+  .agent-activity { max-height: none; overflow: visible; }
+  .provider-panel:not(.wide), .health-panel:not(.wide) { display: block; min-height: 220px; }
+}
