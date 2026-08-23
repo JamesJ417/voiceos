@@ -34,6 +34,7 @@ type CanonicalMessage = {
 };
 
 type Approval = { request_id: string; tool: string; expires_at_unix?: number };
+type AgentWorker = { id: string; status: string; label: string; detail?: string };
 type Provider = { name: string; configured?: boolean; role?: string };
 type GatewayHealth = {
   status?: string;
@@ -125,6 +126,7 @@ export default function Home() {
   const [liveTranscript, setLiveTranscript] = useState("");
   const [lastResponse, setLastResponse] = useState("");
   const [pendingApproval, setPendingApproval] = useState<Approval | null>(null);
+  const [agentWorkers, setAgentWorkers] = useState<AgentWorker[]>([]);
   const [skillProposals, setSkillProposals] = useState<SkillProposal[]>([]);
   const [skills, setSkills] = useState<SkillProposal[]>([]);
   const [skillUsages, setSkillUsages] = useState<SkillUsage[]>([]);
@@ -339,6 +341,16 @@ export default function Home() {
             if (event.type === "task.initiative.updated") {
               const detail = typeof event.payload.response_text === "string" ? event.payload.response_text : "VIC advanced a task.";
               setStatusMessage(detail);
+            }
+            if (event.type === "agent.worker.updated") {
+              const worker = {
+                id: String(event.payload.worker_id ?? event.id),
+                status: String(event.payload.status ?? "running"),
+                label: String(event.payload.label ?? "VIC background worker"),
+                detail: typeof event.payload.detail === "string" ? event.payload.detail : undefined,
+              };
+              setAgentWorkers((current) => [worker, ...current.filter((item) => item.id !== worker.id)].slice(0, 4));
+              setStatusMessage(worker.status === "running" ? `VIC worker active · ${worker.label}` : `VIC worker ${worker.status} · ${worker.label}`);
             }
             if (event.type === "approval.proposed") {
               setPendingApproval({
@@ -645,6 +657,7 @@ export default function Home() {
             <section className="conversation-panel panel">
               <div className="panel-heading"><div><p className="kicker">Continuous conversation</p><h2>Current thread</h2></div><span className="memory-pill">Memory active</span></div>
               <div className="conversation-list">{recentMessages.length ? recentMessages.map((message) => <MessageCard key={message.id} message={message} />) : <EmptyState text="Your phone and web conversations will appear here." />}</div>
+              {agentWorkers.length > 0 && <div className="agent-worker-list" aria-label="VIC background workers">{agentWorkers.map((worker) => <div className="agent-worker" key={worker.id}><span className={`status-dot ${worker.status === "failed" ? "offline" : ""}`} /><div><strong>{worker.label}</strong><small>{worker.status}{worker.detail ? ` · ${worker.detail}` : ""}</small></div></div>)}</div>}
               {pendingApproval && <div className="approval-card"><div><p className="kicker">Approval required</p><strong>{pendingApproval.tool}</strong><small>{pendingApproval.tool === "rig.root_command" ? "Administrative approval is restricted to the enrolled Pixel." : "VIC will not run this tool without your decision."}</small></div><button className="deny" onClick={() => void decideApproval(false)}>Deny</button><button className="approve" disabled={pendingApproval.tool === "rig.root_command"} onClick={() => void decideApproval(true)}>{pendingApproval.tool === "rig.root_command" ? "Approve on Pixel" : "Approve"}</button></div>}
               <button className="skill-review-callout" onClick={() => setView("system")}><span><strong>Skill proposals</strong><small>{skillProposals.length ? `${skillProposals.length} waiting for evidence review` : "No proposals waiting. Omarchy Voice never enables a generated skill silently."}</small></span><span aria-hidden="true">Review →</span></button>
               <div className="conversation-actions">

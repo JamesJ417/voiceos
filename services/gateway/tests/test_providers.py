@@ -169,6 +169,8 @@ class HermesProviderTest(unittest.TestCase):
         self.assertIn("You are VIC", payload["messages"][0]["content"])
         self.assertIn("Hermes is your runtime, not your public name", payload["messages"][0]["content"])
         self.assertIn("answer directly without inspecting or creating skills", payload["messages"][0]["content"])
+        self.assertIn("delegate_task with background=true", payload["messages"][0]["content"])
+        self.assertIn("keep the foreground conversation available", payload["messages"][0]["content"])
         self.assertIn("Recent VoiceOS turns", payload["messages"][0]["content"])
 
 

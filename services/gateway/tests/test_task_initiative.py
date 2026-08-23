@@ -79,9 +79,49 @@ class TaskInitiativeWorkerTest(unittest.TestCase):
         self.assertIn("untrusted user data", gateway.coordinator.prompt)
         self.assertEqual("completed", calls[1][1]["status"])
         self.assertEqual(1, len(gateway.audit_store.turns))
-        self.assertEqual("task.initiative.updated", gateway.audit_store.events[0][0])
-        self.assertEqual("vic.outreach.created", gateway.audit_store.events[1][0])
+        event_names = [name for name, _ in gateway.audit_store.events]
+        self.assertIn("agent.worker.updated", event_names)
+        self.assertIn("task.initiative.updated", event_names)
+        self.assertIn("vic.outreach.created", event_names)
         self.assertEqual("check_in", calls[2][1]["priority"])
+
+    def test_records_structured_hermes_progress_on_the_task_board(self) -> None:
+        class ProgressCoordinator(_Coordinator):
+            def respond(self, text: str, **_: object) -> CoordinatedResponse:
+                self.prompt = text
+                return CoordinatedResponse(
+                    text=(
+                        "I identified the website URL and approved menu as the next inputs.\n\n"
+                        "```voiceos-task-update\n"
+                        '{"actions":[{"action":"progress.record","summary":"Identified the website URL and approved menu as the next required inputs.","evidence":{"source":"vic-analysis"}},{"action":"blocker.create","description":"Website URL and approved Sunday brunch menu have not been provided.","owner":"user"}]}\n'
+                        "```"
+                    ),
+                    provider="hermes",
+                )
+
+        gateway = _Gateway()
+        gateway.coordinator = ProgressCoordinator()
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        def post(url: str, payload: dict[str, object]) -> dict[str, object]:
+            calls.append((url, payload))
+            if url.endswith("/claim"):
+                return {"claimed": True}
+            if url.endswith("/v1/outreach"):
+                return {"outreach": {"id": "outreach-1", **payload}}
+            return {"recorded": True}
+
+        task = {"id": "task-1", "title": "Update the website", "observable_outcome": "Website is current"}
+        initiative = {"job_id": "job-1", "capabilities": ["task.next_actions"]}
+        with patch("services.gateway.server._post_json", side_effect=post):
+            VoiceOSServer._run_task_initiative(gateway, task, initiative, "pixel")  # type: ignore[arg-type]
+
+        task_updates = [payload for url, payload in calls if url.endswith("/internal/v1/tasks/actions")]
+        self.assertEqual(2, len(task_updates))
+        self.assertEqual("task-1", task_updates[0]["task_id"])
+        self.assertEqual("progress.record", task_updates[0]["action"])
+        self.assertEqual("blocker.create", task_updates[1]["action"])
+        self.assertNotIn("voiceos-task-update", gateway.audit_store.turns[0]["response_text"])
 
     def test_does_nothing_when_another_worker_already_claimed_job(self) -> None:
         gateway = _Gateway()

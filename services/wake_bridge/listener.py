@@ -16,7 +16,6 @@ import time
 import urllib.request
 import uuid
 import wave
-import threading
 from pathlib import Path
 from typing import Sequence
 from urllib.error import HTTPError, URLError
@@ -40,7 +39,6 @@ IGNORED_TRANSCRIPTS = {
 }
 CACHED_SPEECH = {
     "ack": "Yes, I'm here.",
-    "progress": "One moment. I'm working on that.",
     "goodbye": "Okay. Say Hey VIC when you need me.",
     "error": "I hit a delay. Please try that again.",
 }
@@ -358,21 +356,11 @@ def speak(text: str) -> None:
         play_audio(audio_path)
 
 
-def submit_with_progress(gateway: GatewayClient, transcript: str, cache_dir: Path) -> str:
-    finished = threading.Event()
-
-    def announce_delay() -> None:
-        if not finished.wait(3.0):
-            speak_cached(cache_dir, "progress")
-
-    announcer = threading.Thread(target=announce_delay, daemon=True)
-    announcer.start()
+def submit_timed(gateway: GatewayClient, transcript: str) -> str:
     started = time.monotonic()
     try:
         return gateway.submit_text(transcript)
     finally:
-        finished.set()
-        announcer.join(timeout=10)
         LOG.info("VIC response completed in %.2f seconds", time.monotonic() - started)
 
 
@@ -429,7 +417,7 @@ def run(args: argparse.Namespace) -> None:
                     LOG.info("Submitting conversation turn")
                     gateway.change_floor("update", "processing", partial_transcript=transcript)
                     try:
-                        reply = submit_with_progress(gateway, transcript, args.speech_cache)
+                        reply = submit_timed(gateway, transcript)
                         gateway.change_floor(
                             "update", "speaking", partial_transcript=transcript,
                             response_text=reply,

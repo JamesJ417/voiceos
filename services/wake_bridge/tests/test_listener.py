@@ -6,6 +6,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from services.wake_bridge.listener import (
+    CACHED_SPEECH,
     GatewayClient,
     command_after_wake_phrase,
     ends_conversation,
@@ -83,6 +84,10 @@ class GatewayClientTest(unittest.TestCase):
 
 
 class WakePhraseTest(unittest.TestCase):
+    def test_speech_cache_has_no_canned_working_message(self) -> None:
+        self.assertNotIn("progress", CACHED_SPEECH)
+        self.assertFalse(any("working on that" in text.casefold() for text in CACHED_SPEECH.values()))
+
     def test_removes_wake_phrase_from_command(self) -> None:
         self.assertEqual(
             "what is on my task list",
