@@ -1887,8 +1887,17 @@ def _safe_agent_activity(
         "tool.completed": "VIC finished a tool",
         "subagent.start": "VIC delegated background work",
         "subagent.complete": "A VIC worker finished",
+        "response.drafting": "VIC is composing the response",
     }
-    detail = event.get("summary") or event.get("description") or event.get("tool")
+    if event_name == "tool.started":
+        detail = event.get("preview") or event.get("tool")
+    elif event_name == "tool.completed":
+        duration = event.get("duration")
+        timing = f" in {duration:.2f}s" if isinstance(duration, (int, float)) else ""
+        outcome = "failed" if event.get("error") else "completed"
+        detail = f"{event.get('tool', 'tool')} {outcome}{timing}"
+    else:
+        detail = event.get("summary") or event.get("description") or event.get("tool")
     return {
         "session_id": session_id,
         "phase": event_name,

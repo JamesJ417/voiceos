@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -429,6 +430,8 @@ class HermesProvider:
         if not isinstance(run_id, str) or not re.fullmatch(r"run_[0-9a-f]{32}", run_id):
             raise ProviderUnavailable("Hermes returned an invalid run ID")
         events: list[dict[str, object]] = []
+        draft_preview = ""
+        last_draft_emit = 0.0
         request = Request(
             f"{self.base_url}/v1/runs/{run_id}/events",
             headers={"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"},
@@ -446,6 +449,22 @@ class HermesProvider:
                     safe_event = _bounded_event(event)
                     events.append(safe_event)
                     event_name = safe_event.get("event", safe_event.get("type"))
+                    if event_name == "message.delta" and self.activity_sink:
+                        delta = safe_event.get("delta")
+                        if isinstance(delta, str):
+                            draft_preview = (draft_preview + delta)[-500:]
+                            now = time.monotonic()
+                            if now - last_draft_emit >= 0.45:
+                                self.activity_sink(
+                                    conversation_id,
+                                    {"event": "response.drafting", "summary": draft_preview.strip()},
+                                )
+                                last_draft_emit = now
+                    elif event_name == "reasoning.available" and self.activity_sink and draft_preview.strip():
+                        self.activity_sink(
+                            conversation_id,
+                            {"event": "response.drafting", "summary": draft_preview.strip()},
+                        )
                     if self.activity_sink and event_name in {
                         "reasoning.available", "tool.started", "tool.completed",
                         "subagent.start", "subagent.complete",

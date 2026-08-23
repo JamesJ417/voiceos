@@ -35,7 +35,7 @@ type CanonicalMessage = {
 
 type Approval = { request_id: string; tool: string; expires_at_unix?: number };
 type AgentWorker = { id: string; status: string; label: string; detail?: string };
-type AgentActivity = { id: string; phase: string; label: string; detail?: string };
+type AgentActivity = { id: string; phase: string; label: string; detail?: string; taskId?: string };
 type Provider = { name: string; configured?: boolean; role?: string };
 type GatewayHealth = {
   status?: string;
@@ -70,6 +70,7 @@ type TaskDetail = {
   steps: TaskStep[];
   blockers: Array<{ id: string; description: string; owner: string; status: string }>;
   artifacts: Array<{ id: string; kind: string; uri: string; description: string }>;
+  activity: Array<{ id?: string; event_type: string; payload: Record<string, unknown>; occurred_at: string }>;
 };
 
 const STORAGE = {
@@ -345,6 +346,7 @@ export default function Home() {
             if (event.type === "task.initiative.updated") {
               const detail = typeof event.payload.response_text === "string" ? event.payload.response_text : "VIC advanced a task.";
               setStatusMessage(detail);
+              void loadTasks();
             }
             if (event.type === "agent.worker.updated") {
               const worker = {
@@ -357,13 +359,20 @@ export default function Home() {
               setStatusMessage(worker.status === "running" ? `VIC worker active · ${worker.label}` : `VIC worker ${worker.status} · ${worker.label}`);
             }
             if (event.type === "agent.activity.updated") {
+              const activitySession = String(event.payload.session_id ?? "");
               const activity = {
                 id: `${event.id}-${String(event.payload.phase ?? "activity")}`,
                 phase: String(event.payload.phase ?? "activity"),
                 label: String(event.payload.label ?? "VIC is working"),
                 detail: typeof event.payload.detail === "string" ? event.payload.detail : undefined,
+                taskId: activitySession.startsWith("task:") ? activitySession.slice(5) : undefined,
               };
-              setAgentActivity((current) => [activity, ...current].slice(0, 6));
+              setAgentActivity((current) => {
+                const prior = activity.phase === "response.drafting"
+                  ? current.filter((item) => item.phase !== "response.drafting")
+                  : current;
+                return [activity, ...prior].slice(0, 8);
+              });
               setStatusMessage(activity.detail ? `${activity.label} · ${activity.detail}` : activity.label);
             }
             if (event.type === "approval.proposed") {
@@ -732,7 +741,7 @@ export default function Home() {
             <section className="conversation-panel panel">
               <div className="panel-heading"><div><p className="kicker">Continuous conversation</p><h2>Current thread</h2></div><span className="memory-pill">Memory active</span></div>
               <div className="conversation-list">{recentMessages.length ? recentMessages.map((message) => <MessageCard key={message.id} message={message} />) : <EmptyState text="Your phone and web conversations will appear here." />}</div>
-              <div className={`agent-activity ${agentActivity.length ? "has-activity" : "activity-idle"}`} aria-label="VIC live activity"><div className="agent-activity-title"><span className="thinking-pulse" /><strong>VIC activity</strong><small>Live progress, not private chain-of-thought</small></div>{agentActivity.length ? agentActivity.slice(0, 3).map((activity) => { const isTool = activity.phase.startsWith("tool."); const completed = activity.phase.endsWith("completed"); return <div className={`agent-activity-row ${isTool ? "tool-execution" : ""} ${completed ? "activity-complete" : "activity-running"}`} key={activity.id}>{isTool && <span className="tool-scan" aria-hidden="true" />}<span className="activity-glyph">{isTool ? "⌘" : activity.phase.startsWith("subagent.") ? "◇" : "✦"}</span><p><strong>{activity.label}</strong>{activity.detail && <small>{activity.detail}</small>}</p>{isTool && <span className="execution-state">{completed ? "done" : "running"}</span>}</div>; }) : <div className="activity-empty"><span className="activity-glyph">⌘</span><p><strong>{voiceState === "processing" ? "Connecting to Hermes…" : "Execution rail ready"}</strong><small>Tool calls and worker progress will appear here.</small></p><span className="execution-state">{voiceState === "processing" ? "waiting" : "idle"}</span></div>}</div>
+              <div className={`agent-activity ${agentActivity.length ? "has-activity" : "activity-idle"}`} aria-label="VIC live activity"><div className="agent-activity-title"><span className="thinking-pulse" /><strong>VIC activity</strong><small>Live progress, not private chain-of-thought</small></div>{agentActivity.length ? agentActivity.slice(0, 6).map((activity) => { const isTool = activity.phase.startsWith("tool."); const completed = activity.phase.endsWith("completed"); return <div className={`agent-activity-row ${isTool ? "tool-execution" : ""} ${completed ? "activity-complete" : "activity-running"}`} key={activity.id}>{isTool && <span className="tool-scan" aria-hidden="true" />}<span className="activity-glyph">{isTool ? "⌘" : activity.phase.startsWith("subagent.") ? "◇" : "✦"}</span><p><strong>{activity.label}</strong>{activity.detail && <small>{activity.detail}</small>}</p>{isTool && <span className="execution-state">{completed ? "done" : "called"}</span>}</div>; }) : <div className="activity-empty"><span className="activity-glyph">⌘</span><p><strong>{voiceState === "processing" ? "Connecting to Hermes…" : "Execution rail ready"}</strong><small>Tool calls and worker progress will appear here.</small></p><span className="execution-state">{voiceState === "processing" ? "waiting" : "idle"}</span></div>}</div>
               {agentWorkers.length > 0 && <div className="agent-worker-list" aria-label="VIC background workers">{agentWorkers.map((worker) => <div className="agent-worker" key={worker.id}><span className={`status-dot ${worker.status === "failed" ? "offline" : ""}`} /><div><strong>{worker.label}</strong><small>{worker.status}{worker.detail ? ` · ${worker.detail}` : ""}</small></div></div>)}</div>}
               {pendingApproval && <div className="approval-card"><div><p className="kicker">Approval required</p><strong>{pendingApproval.tool}</strong><small>{pendingApproval.tool === "rig.root_command" ? "Administrative approval is restricted to the enrolled Pixel." : "VIC will not run this tool without your decision."}</small></div><button className="deny" onClick={() => void decideApproval(false)}>Deny</button><button className="approve" disabled={pendingApproval.tool === "rig.root_command"} onClick={() => void decideApproval(true)}>{pendingApproval.tool === "rig.root_command" ? "Approve on Pixel" : "Approve"}</button></div>}
               <button className="skill-review-callout" onClick={() => setView("system")}><span><strong>Skill proposals</strong><small>{skillProposals.length ? `${skillProposals.length} waiting for evidence review` : "No proposals waiting. Omarchy Voice never enables a generated skill silently."}</small></span><span aria-hidden="true">Review →</span></button>
@@ -753,7 +762,13 @@ export default function Home() {
 
         {view === "history" && <section className="wide-panel panel"><div className="panel-heading"><div><p className="kicker">Persistent timeline</p><h2>Shared conversation with VIC</h2></div><button className="secondary-button" onClick={() => void loadHistory()}>Refresh</button></div><div className="history-list">{messages.length ? messages.map((message) => <MessageCard key={message.id} message={message} />) : <EmptyState text="No conversation history is available yet." />}</div></section>}
 
-        {view === "tasks" && <TaskBoard tasks={tasks} filter={taskFilter} onFilter={setTaskFilter} onRefresh={() => void loadTasks()} />}
+        {view === "tasks" && <TaskBoard tasks={tasks} activity={agentActivity} filter={taskFilter} onFilter={setTaskFilter} onRefresh={() => void loadTasks()} onStart={async (input) => {
+          setStatusMessage(`Starting VIC on ${input.title}…`);
+          await request("/v1/tasks", { method: "POST", body: JSON.stringify(input) });
+          setTaskFilter("vic_working");
+          await loadTasks();
+          setStatusMessage(`VIC started working on ${input.title}. Progress will appear on the task.`);
+        }} />}
 
         {view === "system" && <div className="system-layout"><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its Omarchy Voice device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside Omarchy Voice.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
       </section>
@@ -793,10 +808,23 @@ function EmptyState({ text }: { text: string }) {
   return <div className="empty-state"><span aria-hidden="true">⬡</span><p>{text}</p></div>;
 }
 
-function TaskBoard({ tasks, filter, onFilter, onRefresh }: { tasks: TaskDetail[]; filter: "all" | "needs_me" | "vic_working" | "review"; onFilter: (value: "all" | "needs_me" | "vic_working" | "review") => void; onRefresh: () => void }) {
+function TaskBoard({ tasks, activity, filter, onFilter, onRefresh, onStart }: { tasks: TaskDetail[]; activity: AgentActivity[]; filter: "all" | "needs_me" | "vic_working" | "review"; onFilter: (value: "all" | "needs_me" | "vic_working" | "review") => void; onRefresh: () => void; onStart: (input: { title: string; observable_outcome: string; estimated_minutes: number }) => Promise<void> }) {
+  const [title, setTitle] = useState("");
+  const [outcome, setOutcome] = useState("");
+  const [minutes, setMinutes] = useState(20);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState("");
   const visible = tasks.filter((task) => filter === "all" || task.progress.lane === filter);
   const count = (lane: TaskDetail["progress"]["lane"]) => tasks.filter((task) => task.progress.lane === lane).length;
-  return <section className="task-board panel"><div className="panel-heading"><div><p className="kicker">Human + agent execution</p><h2>Task responsibility board</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><div className="task-rollups"><button className={filter === "needs_me" ? "active" : ""} onClick={() => onFilter("needs_me")}><span>Needs me</span><strong>{count("needs_me")}</strong></button><button className={filter === "vic_working" ? "active" : ""} onClick={() => onFilter("vic_working")}><span>VIC working</span><strong>{count("vic_working")}</strong></button><button className={filter === "review" ? "active" : ""} onClick={() => onFilter("review")}><span>Ready for review</span><strong>{count("review")}</strong></button><button className={filter === "all" ? "active" : ""} onClick={() => onFilter("all")}><span>All open</span><strong>{tasks.length}</strong></button></div><div className="task-grid">{visible.length ? visible.map((detail) => <article className={`task-card lane-${detail.progress.lane}`} key={detail.task.id}><div className="task-card-head"><span>{detail.progress.lane.replaceAll("_", " ")}</span><strong>{detail.progress.total_steps ? `${detail.progress.completed_steps}/${detail.progress.total_steps} steps` : "No steps"}</strong></div><h3>{detail.task.title}</h3><p>{detail.task.observable_outcome}</p><div className="task-handoff"><small>{detail.progress.lane === "vic_working" ? "VIC NEXT ACTION" : detail.progress.lane === "review" ? "READY FOR REVIEW" : "YOUR NEXT ACTION"}</small><strong>{detail.progress.lane === "vic_working" ? detail.progress.next_vic_action || "Continue safe work" : detail.progress.next_user_action || "Review with VIC"}</strong></div><div className="task-steps">{detail.steps.slice(0, 5).map((step) => <div key={step.id}><span>{step.status === "completed" ? "✓" : "○"}</span><p>{step.title}</p><small>{step.owner}</small></div>)}</div><footer><span>VIC {detail.progress.vic_status.replaceAll("_", " ")}</span><span>{detail.progress.open_blockers} blockers</span><span>{detail.artifacts.length} artifacts</span></footer></article>) : <EmptyState text="No tasks are in this responsibility lane." />}</div></section>;
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!title.trim() || !outcome.trim() || starting) return;
+    setStarting(true); setStartError("");
+    try { await onStart({ title: title.trim(), observable_outcome: outcome.trim(), estimated_minutes: minutes }); setTitle(""); setOutcome(""); setMinutes(20); }
+    catch (error) { setStartError(errorText(error)); }
+    finally { setStarting(false); }
+  };
+  return <section className="task-board panel"><div className="panel-heading"><div><p className="kicker">Human + agent execution</p><h2>Task responsibility board</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><form className="task-intake" onSubmit={submit}><div><label htmlFor="task-title">What should VIC work on?</label><input id="task-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Build the customer follow-up workflow" /></div><div><label htmlFor="task-outcome">What does done look like?</label><input id="task-outcome" value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder="A tested workflow is ready for my review" /></div><div className="task-duration"><label htmlFor="task-minutes">Estimate</label><input id="task-minutes" type="number" min="1" max="1440" value={minutes} onChange={(event) => setMinutes(Math.max(1, Number(event.target.value) || 1))} /><span>min</span></div><button disabled={starting || !title.trim() || !outcome.trim()}>{starting ? "Starting…" : "Start task with VIC"}</button>{startError && <p className="task-intake-error">{startError}</p>}</form><p className="task-intake-note">VIC begins safe research, drafting, planning, or project inspection immediately. Approvals remain required for external or consequential actions.</p><div className="task-rollups"><button className={filter === "needs_me" ? "active" : ""} onClick={() => onFilter("needs_me")}><span>Needs me</span><strong>{count("needs_me")}</strong></button><button className={filter === "vic_working" ? "active" : ""} onClick={() => onFilter("vic_working")}><span>VIC working</span><strong>{count("vic_working")}</strong></button><button className={filter === "review" ? "active" : ""} onClick={() => onFilter("review")}><span>Ready for review</span><strong>{count("review")}</strong></button><button className={filter === "all" ? "active" : ""} onClick={() => onFilter("all")}><span>All open</span><strong>{tasks.length}</strong></button></div><div className="task-grid">{visible.length ? visible.map((detail) => { const live = activity.filter((item) => item.taskId === detail.task.id).slice(0, 3); const recorded = detail.activity?.filter((item) => item.event_type === "task.progress.recorded").slice(-3).reverse() ?? []; return <article className={`task-card lane-${detail.progress.lane}`} key={detail.task.id}><div className="task-card-head"><span>{detail.progress.lane.replaceAll("_", " ")}</span><strong>{detail.progress.total_steps ? `${detail.progress.completed_steps}/${detail.progress.total_steps} steps` : "No steps"}</strong></div><h3>{detail.task.title}</h3><p>{detail.task.observable_outcome}</p><div className="task-handoff"><small>{detail.progress.lane === "vic_working" ? "VIC NEXT ACTION" : detail.progress.lane === "review" ? "READY FOR REVIEW" : "YOUR NEXT ACTION"}</small><strong>{detail.progress.lane === "vic_working" ? detail.progress.next_vic_action || "Continue safe work" : detail.progress.next_user_action || "Review with VIC"}</strong></div>{(live.length > 0 || recorded.length > 0) && <div className="task-updates"><small>PROGRESS UPDATES</small>{live.map((item) => <div className="task-update live" key={item.id}><span className="thinking-pulse" /><p><strong>{item.label}</strong>{item.detail && <small>{item.detail}</small>}</p></div>)}{live.length === 0 && recorded.map((item, index) => <div className="task-update" key={item.id ?? `${item.occurred_at}-${index}`}><span>✓</span><p>{String(item.payload.summary ?? "VIC recorded progress")}</p></div>)}</div>}<div className="task-steps">{detail.steps.slice(0, 5).map((step) => <div key={step.id}><span>{step.status === "completed" ? "✓" : "○"}</span><p>{step.title}</p><small>{step.owner}</small></div>)}</div><footer><span>VIC {detail.progress.vic_status.replaceAll("_", " ")}</span><span>{detail.progress.open_blockers} blockers</span><span>{detail.artifacts.length} artifacts</span></footer></article>; }) : <EmptyState text="No tasks are in this responsibility lane." />}</div></section>;
 }
 
 function SkillProposalPanel({ proposals, onDecision, onRefresh }: { proposals: SkillProposal[]; onDecision: (proposal: SkillProposal, approve: boolean) => void; onRefresh: () => void }) {

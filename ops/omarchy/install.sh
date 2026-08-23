@@ -214,12 +214,50 @@ if [[ -f "$hypr_config" ]] && ! grep -q 'Keep VIC Panel as a dedicated full-scre
     printf '\n%s\n' '-- Keep VIC Panel as a dedicated full-screen Omarchy workspace.'
     printf '%s\n' 'o.window({ class = "^chrome-127.*Default$" }, {'
     printf '%s\n' '  tag = "-default-opacity",'
+    printf '%s\n' '  workspace = "name:vic-panel silent",'
     printf '%s\n' '  tile = true,'
     printf '%s\n' '  fullscreen = true,'
+    printf '%s\n' '  fullscreen_state = "2 2",'
     printf '%s\n' '  no_dim = true,'
     printf '%s\n' '  opacity = "1 1",'
     printf '%s\n' '})'
   } >>"$hypr_config"
+elif [[ -f "$hypr_config" ]] && ! grep -q 'workspace = "name:vic-panel silent"' "$hypr_config"; then
+  "$python_bin" - "$hypr_config" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+marker = "-- Keep VIC Panel as a dedicated full-screen Omarchy workspace."
+before, separator, after = text.partition(marker)
+if separator and 'workspace = "name:vic-panel silent"' not in after:
+    after = after.replace(
+        '  tag = "-default-opacity",',
+        '  tag = "-default-opacity",\n  workspace = "name:vic-panel silent",',
+        1,
+    )
+    path.write_text(before + separator + after, encoding="utf-8")
+PY
+fi
+if [[ -f "$hypr_config" ]] && grep -q 'Keep VIC Panel as a dedicated full-screen' "$hypr_config" \
+  && ! grep -q 'fullscreen_state = "2 2"' "$hypr_config"; then
+  "$python_bin" - "$hypr_config" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+marker = "-- Keep VIC Panel as a dedicated full-screen Omarchy workspace."
+before, separator, after = text.partition(marker)
+if separator and 'fullscreen_state = "2 2"' not in after:
+    after = after.replace(
+        "  fullscreen = true,",
+        '  fullscreen = true,\n  fullscreen_state = "2 2",',
+        1,
+    )
+    path.write_text(before + separator + after, encoding="utf-8")
+PY
 fi
 if [[ -f "$hypr_autostart" ]] && ! grep -q 'o.launch_on_start("voiceos-talk")' "$hypr_autostart"; then
   {

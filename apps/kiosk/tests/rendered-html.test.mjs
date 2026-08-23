@@ -12,13 +12,13 @@ async function render() {
   );
 }
 
-test("server-renders the Carbon Command surface", async () => {
+test("server-renders the VIC Panel surface", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /<title>Omarchy Voice Carbon Command<\/title>/i);
-  assert.match(html, /Carbon Command/);
-  assert.match(html, /Command center/);
+  assert.match(html, /<title>VIC Panel<\/title>/i);
+  assert.match(html, /VIC Panel · Omarchy Voice/);
+  assert.match(html, /Talk with VIC/);
   assert.match(html, /Model providers/);
   assert.match(html, /Skill proposals/);
   assert.match(html, /never enables a generated skill silently/i);
