@@ -1931,6 +1931,7 @@ def _import_hermes_completion(
     message_id: int,
     report: str,
 ) -> None:
+    report = _clean_hermes_completion_report(report)
     if not audit_store.import_hermes_completion(
         session_id=session_id, message_id=message_id, report=report
     ):
@@ -1970,6 +1971,45 @@ def _import_hermes_completion(
             "runtime": "hermes",
         },
     )
+
+
+def _clean_hermes_completion_report(report: str) -> str:
+    """Remove Hermes transport metadata while retaining each worker's answer."""
+    marker = re.compile(
+        r"^---\s+(?P<result>[✓✗])\s+TASK\s+(?P<number>\d+)/(?:\d+):.*?"
+        r"\(status=(?P<status>[^,\)]+).*?\)\s+---\s*$",
+        re.MULTILINE,
+    )
+    matches = list(marker.finditer(report))
+    if not matches:
+        return report.strip()
+    sections: list[str] = []
+    total = len(matches)
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < total else len(report)
+        answer = report[start:end].strip()
+        if not answer:
+            answer = "The worker returned no written report."
+        answer = _plain_chat_text(answer)
+        state = "Completed" if match.group("result") == "✓" else "Failed"
+        sections.append(
+            f"Worker {match.group('number')} — {state}\n\n{answer}"
+        )
+    heading = "Hermes subagent report" if total == 1 else "Hermes subagent reports"
+    return f"{heading}\n\n" + "\n\n".join(sections)
+
+
+def _plain_chat_text(text: str) -> str:
+    """Convert common Markdown artifacts into readable panel text."""
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-*]\s+", "• ", text, flags=re.MULTILINE)
+    text = re.sub(r"```(?:[A-Za-z0-9_+.-]+)?\s*", "", text)
+    text = text.replace("```", "")
+    text = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda match: match.group(1) or match.group(2), text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _checkin_date() -> str:

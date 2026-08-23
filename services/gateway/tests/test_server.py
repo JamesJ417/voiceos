@@ -11,10 +11,47 @@ from pathlib import Path
 from services.gateway.audit import AuditStore
 from services.gateway.enrollment_qr import build_enrollment_uri
 from services.gateway.providers import ProviderResponse
-from services.gateway.server import _render_conversation_context, create_server
+from services.gateway.server import (
+    _clean_hermes_completion_report,
+    _render_conversation_context,
+    create_server,
+)
 
 
 class GatewayTest(unittest.TestCase):
+    def test_cleans_hermes_completion_transport_envelope(self) -> None:
+        raw = """[ASYNC DELEGATION BATCH COMPLETE — deleg_1234]
+Transport explanation.
+
+Dispatched: yesterday
+Context you provided: internal prompt
+Role: leaf   Model: ?   Total duration: 2s
+
+--- ✓ TASK 1/1: Research something.  (status=completed, api_calls=2, 1.8s) ---
+## Outcome
+The useful finding is here.
+"""
+        self.assertEqual(
+            "Hermes subagent report\n\n"
+            "Worker 1 — Completed\n\n"
+            "Outcome\nThe useful finding is here.",
+            _clean_hermes_completion_report(raw),
+        )
+
+    def test_cleans_multiple_hermes_worker_answers(self) -> None:
+        raw = """[ASYNC DELEGATION BATCH COMPLETE — deleg_1234]
+--- ✓ TASK 1/2: First.  (status=completed, api_calls=1) ---
+First result.
+--- ✗ TASK 2/2: Second.  (status=failed, api_calls=1) ---
+Second result.
+"""
+        cleaned = _clean_hermes_completion_report(raw)
+        self.assertIn("Hermes subagent reports", cleaned)
+        self.assertIn("Worker 1 — Completed\n\nFirst result.", cleaned)
+        self.assertIn("Worker 2 — Failed\n\nSecond result.", cleaned)
+        self.assertNotIn("ASYNC DELEGATION", cleaned)
+        self.assertNotIn("api_calls", cleaned)
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.temporary_directory = tempfile.TemporaryDirectory()

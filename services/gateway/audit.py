@@ -378,7 +378,7 @@ class AuditStore:
                     processing_ms, input_tokens, output_tokens, cost_usd, created_at
                 ) VALUES (?, ?, ?, ?, '[]', '[]', '[]', '[]', 0, NULL, NULL, 0, ?)
                 """,
-                (session_id, "Hermes background worker completed", report,
+                (session_id, "Subagent report", report,
                  "hermes-subagent", _now()),
             )
             self._append_client_event_locked(
@@ -386,7 +386,7 @@ class AuditStore:
                 {
                     "turn_id": int(cursor.lastrowid),
                     "session_id": session_id,
-                    "transcript": "Hermes background worker completed",
+                    "transcript": "Subagent report",
                     "response_text": report,
                     "provider": "hermes-subagent",
                     "processing_ms": 0,
