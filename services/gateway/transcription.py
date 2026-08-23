@@ -12,6 +12,9 @@ class TranscriptionUnavailable(RuntimeError):
     pass
 
 
+WHISPER_THREADS = min(8, max(4, os.cpu_count() or 4))
+
+
 def transcribe(audio: bytes, content_type: str) -> str:
     model = Path(os.environ.get("VOICEOS_WHISPER_MODEL", "")).expanduser()
     if not model.is_file():
@@ -36,7 +39,7 @@ def transcribe(audio: bytes, content_type: str) -> str:
         recognized = subprocess.run(
             [
                 "/usr/bin/whisper-cli", "--model", str(model), "--file", str(normalized),
-                "--language", "en", "--no-timestamps", "--no-prints", "--threads", "4",
+                "--language", "en", "--no-timestamps", "--no-prints", "--threads", str(WHISPER_THREADS),
             ],
             capture_output=True,
             text=True,

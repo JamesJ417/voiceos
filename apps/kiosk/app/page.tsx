@@ -140,6 +140,7 @@ export default function Home() {
   const recorder = useRef<MediaRecorder | null>(null);
   const microphoneStream = useRef<MediaStream | null>(null);
   const audioPlayback = useRef<HTMLAudioElement | null>(null);
+  const speechGeneration = useRef(0);
   const audioChunks = useRef<Blob[]>([]);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
@@ -429,34 +430,58 @@ export default function Home() {
   }
 
   async function speak(text: string) {
+    const generation = ++speechGeneration.current;
+    let spokeNeural = false;
     audioPlayback.current?.pause();
     audioPlayback.current = null;
     speechSynthesis.cancel();
     if (gateway && text) {
       try {
-        const headers = new Headers({ "Content-Type": "application/json" });
-        if (token) headers.set("Authorization", `Bearer ${token}`);
-        const response = await fetch(`${gateway}/v1/speech/synthesize`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ text }),
-          cache: "no-store",
-        });
-        if (!response.ok) throw new Error(`Speech HTTP ${response.status}`);
-        const url = URL.createObjectURL(await response.blob());
-        const audio = new Audio(url);
-        audioPlayback.current = audio;
-        audio.playbackRate = speechRate;
-        audio.onplay = () => setVoiceState("speaking");
-        audio.onended = () => { URL.revokeObjectURL(url); audioPlayback.current = null; setVoiceState("ready"); void changeFloor("release", "idle").catch(() => undefined); };
-        audio.onerror = () => { URL.revokeObjectURL(url); audioPlayback.current = null; speakWithBrowserVoice(text); };
-        await audio.play();
+        const chunks = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g)?.map((part) => part.trim()).filter(Boolean) ?? [text];
+        let nextAudio = fetchNeuralSpeech(chunks[0]);
+        setVoiceState("speaking");
+        for (let index = 0; index < chunks.length; index += 1) {
+          const audioUrl = await nextAudio;
+          if (generation !== speechGeneration.current) return;
+          nextAudio = index + 1 < chunks.length ? fetchNeuralSpeech(chunks[index + 1]) : Promise.resolve(null);
+          await playNeuralAudio(audioUrl);
+          spokeNeural = true;
+        }
+        audioPlayback.current = null;
+        setVoiceState("ready");
+        void changeFloor("release", "idle").catch(() => undefined);
         return;
       } catch {
         // Keep speech available if the host neural voice is temporarily offline.
       }
     }
+    if (spokeNeural) {
+      setVoiceState("ready");
+      void changeFloor("release", "idle").catch(() => undefined);
+      return;
+    }
     speakWithBrowserVoice(text);
+  }
+
+  async function fetchNeuralSpeech(text: string) {
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (token) headers.set("Authorization", `Bearer ${token}`);
+    const response = await fetch(`${gateway}/v1/speech/synthesize`, { method: "POST", headers, body: JSON.stringify({ text }), cache: "no-store" });
+    if (!response.ok) throw new Error(`Speech HTTP ${response.status}`);
+    return URL.createObjectURL(await response.blob());
+  }
+
+  function playNeuralAudio(url: string | null) {
+    if (!url) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const audio = new Audio(url);
+      audioPlayback.current = audio;
+      audio.playbackRate = speechRate;
+      audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+      audio.onpause = () => { URL.revokeObjectURL(url); resolve(); };
+      audio.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Neural speech playback failed")); };
+      void audio.play().catch(reject);
+    });
   }
 
   function speakWithBrowserVoice(text: string) {
@@ -522,6 +547,7 @@ export default function Home() {
     if (voiceState === "listening") {
       recorder.current?.stop();
     } else if (voiceState === "speaking") {
+      speechGeneration.current += 1;
       audioPlayback.current?.pause();
       audioPlayback.current = null;
       speechSynthesis.cancel();

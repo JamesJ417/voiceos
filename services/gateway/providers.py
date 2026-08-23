@@ -400,10 +400,12 @@ class HermesProvider:
         body: dict[str, object] = {
             "input": text,
             "instructions": system_prompt,
-            "model_options": {
-                "reasoning_effort": "medium" if _should_use_agent_runtime(text) else "low",
-            },
+            "model_options": {},
         }
+        agent_runtime = _should_use_agent_runtime(text)
+        body["model_options"] = {"reasoning_effort": "medium" if agent_runtime else "low"}
+        if self.model.casefold() == "hermes" and not agent_runtime:
+            body["model"] = os.environ.get("VOICEOS_FAST_CHAT_MODEL", "gpt-5.6-luna")
         # "hermes" is our provider slot name, not necessarily an Ollama model.
         # Omitting that sentinel lets Hermes use its own configured default.
         if self.model.casefold() != "hermes":

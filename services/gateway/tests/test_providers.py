@@ -276,6 +276,7 @@ class HermesAsyncProviderTest(unittest.TestCase):
             {"reasoning_effort": "low"},
             FakeHermesAsyncHandler.request_payload["model_options"],  # type: ignore[index]
         )
+        self.assertEqual("gpt-5.6-luna", FakeHermesAsyncHandler.request_payload["model"])
 
 class CodexBridgeProviderTest(unittest.TestCase):
     @patch("services.gateway.providers.AF_UNIX", 1)

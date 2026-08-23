@@ -7,6 +7,7 @@ from collections import deque
 import hashlib
 import json
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -29,7 +30,8 @@ MODEL_URL = "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/
 MODEL_DIRNAME = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
 MODEL_SHA256 = "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a"
 LOG = logging.getLogger(__name__)
-QUIET_FRAMES_TO_END = 8  # about 0.64 seconds
+QUIET_FRAMES_TO_END = 5  # about 0.40 seconds
+WHISPER_THREADS = min(8, max(4, os.cpu_count() or 4))
 IGNORED_TRANSCRIPTS = {
     "[blank_audio]",
     "[blank audio]",
@@ -240,7 +242,7 @@ def transcribe_wav(audio: bytes, model: Path) -> str:
             output.setframerate(SAMPLE_RATE)
             output.writeframes(audio)
         result = subprocess.run(
-            ["whisper-cli", "--model", str(model), "--file", str(wav_path), "--language", "en", "--no-timestamps", "--no-prints", "--threads", "4"],
+            ["whisper-cli", "--model", str(model), "--file", str(wav_path), "--language", "en", "--no-timestamps", "--no-prints", "--threads", str(WHISPER_THREADS)],
             capture_output=True, text=True, timeout=120, check=False,
         )
     if result.returncode:

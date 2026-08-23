@@ -11,6 +11,8 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=@@WAKE_PYTHON@@ -m services.wake_bridge.listener --phrase "hey vic"
 Restart=on-failure
 RestartSec=3
+CPUWeight=200
+IOWeight=200
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

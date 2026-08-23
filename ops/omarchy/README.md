@@ -92,7 +92,9 @@ for your first request.
 Wake acknowledgement and error prompts are cached locally for immediate
 playback. Ordinary conversation uses low reasoning latency, while action and
 tool requests retain medium reasoning. Longer work is surfaced through live
-Command Center status instead of a repeated spoken holding message.
+VIC Panel status instead of a repeated spoken holding message. Ordinary chat
+uses the low-latency Luna model, and VIC Panel synthesizes Ava Neural speech
+one sentence ahead so long answers begin playing sooner.
 
 The gateway listens only on `127.0.0.1:8787`. Use Tailscale Serve when a phone
 needs private HTTPS access; never expose port 8787 through the router or enable
