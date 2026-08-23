@@ -760,25 +760,6 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                         "detail": tool_result.get("detail"),
                     },
                 )
-        for result in coordinated.results:
-            events = result.get("events") if isinstance(result, dict) else None
-            if not isinstance(events, list):
-                continue
-            for event in events:
-                if not isinstance(event, dict):
-                    continue
-                event_name = str(event.get("event", event.get("type", "")))
-                if event_name not in {"subagent.start", "subagent.complete"}:
-                    continue
-                self.gateway.audit_store.publish_client_event(
-                    "agent.worker.updated",
-                    {
-                        "worker_id": event.get("subagent_id"),
-                        "status": "running" if event_name == "subagent.start" else "completed",
-                        "label": event.get("summary") or "VIC research worker",
-                        "session_id": session_id,
-                    },
-                )
         self._commit_conversation_memory(
             memory_conversation_id, coordinated.text, coordinated.provider, request_id
         )
@@ -1798,9 +1779,8 @@ def create_server(
     owns_audit_store = audit_store is None
     selected_audit = audit_store or AuditStore(_audit_path(project_root))
     selected_coordinator.router.set_activity_sink(
-        lambda session_id, event: selected_audit.publish_client_event(
-            "agent.activity.updated",
-            _safe_agent_activity(session_id, event),
+        lambda session_id, event: _publish_agent_activity(
+            selected_audit, session_id, event
         )
     )
     selected_admin_token = admin_token or os.environ.get("VOICEOS_ADMIN_TOKEN", "").strip() or None
@@ -1907,6 +1887,36 @@ def _safe_agent_activity(
         "subagent_id": str(event.get("subagent_id", ""))[:160] or None,
         "timestamp": event.get("timestamp"),
     }
+
+
+def _publish_agent_activity(
+    audit_store: AuditStore,
+    session_id: str | None,
+    event: dict[str, object],
+) -> None:
+    """Publish live Hermes activity and promote subagents to visible worker cards."""
+    safe = _safe_agent_activity(session_id, event)
+    audit_store.publish_client_event("agent.activity.updated", safe)
+    phase = str(safe.get("phase", ""))
+    if phase not in {"subagent.start", "subagent.complete"}:
+        return
+    supplied_id = safe.get("subagent_id") or event.get("agent_id") or event.get("id")
+    fallback_seed = f"{session_id or 'vic'}:hermes-subagent"
+    worker_id = str(supplied_id).strip() if supplied_id else str(
+        uuid.uuid5(uuid.NAMESPACE_URL, fallback_seed)
+    )
+    detail = safe.get("detail")
+    audit_store.publish_client_event(
+        "agent.worker.updated",
+        {
+            "worker_id": worker_id[:160],
+            "status": "running" if phase == "subagent.start" else "completed",
+            "label": str(detail or "Hermes research subagent")[:300],
+            "detail": "Dispatched by VIC" if phase == "subagent.start" else "Work returned to VIC",
+            "session_id": session_id,
+            "runtime": "hermes",
+        },
+    )
 
 
 def _checkin_date() -> str:
