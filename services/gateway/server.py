@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from services.gateway.audit import AuditStore
 from services.gateway.coordinator import CoordinatedResponse, TurnCoordinator
 from services.gateway.enrollment_qr import build_enrollment_uri
+from services.gateway.transcription import TranscriptionUnavailable, transcribe
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 MAX_TEXT_BYTES = 64 * 1024
@@ -416,6 +417,11 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 return
             self._handle_audio_turn()
             return
+        if path == "/v1/transcriptions":
+            if not self._require_device():
+                return
+            self._handle_transcription()
+            return
         if path == "/v1/turns/text":
             if not self._require_device():
                 return
@@ -605,6 +611,24 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 "reply_audio_url": None,
             },
         )
+
+    def _handle_transcription(self) -> None:
+        content_length = self._content_length()
+        if content_length is None:
+            return
+        if content_length <= 0:
+            self._json(HTTPStatus.BAD_REQUEST, {"error": "empty_audio"})
+            return
+        if content_length > MAX_AUDIO_BYTES:
+            self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "audio_too_large"})
+            return
+        audio = self.rfile.read(content_length)
+        try:
+            transcript = transcribe(audio, self.headers.get("Content-Type", "audio/webm"))
+        except TranscriptionUnavailable as error:
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": str(error)})
+            return
+        self._json(HTTPStatus.OK, {"transcript": transcript})
 
     def _handle_text_turn(self) -> None:
         started = time.perf_counter()

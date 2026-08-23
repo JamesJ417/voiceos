@@ -44,7 +44,7 @@ class CodexBridgeCommandTest(unittest.TestCase):
         self.assertEqual({"HOME": "/home/llm"}, run.call_args.kwargs["env"])
         self.assertNotIn("Use Codex to review this.", command)
         self.assertIn("Use Codex to review this.", run.call_args.kwargs["input"])
-        self.assertIn("VoiceOS Master Charter", run.call_args.kwargs["input"])
+        self.assertIn("Omarchy Voice Master Charter", run.call_args.kwargs["input"])
 
 
 if __name__ == "__main__":

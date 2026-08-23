@@ -1,4 +1,4 @@
-name: VoiceOS quality gates
+name: Omarchy Voice quality gates
 
 on:
   push:

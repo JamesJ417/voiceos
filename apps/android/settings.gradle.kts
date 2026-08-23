@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "VoiceOS"
+rootProject.name = "Omarchy Voice"
 include(":app")

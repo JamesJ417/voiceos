@@ -1,4 +1,4 @@
-"""Load the versioned VoiceOS master charter shared by every provider."""
+"""Load the versioned Omarchy Voice master charter shared by every provider."""
 
 from __future__ import annotations
 
@@ -17,5 +17,5 @@ def master_system_prompt() -> str:
     )
     prompt = path.read_text(encoding="utf-8").strip()
     if not prompt:
-        raise RuntimeError(f"VoiceOS master prompt is empty: {path}")
+        raise RuntimeError(f"Omarchy Voice master prompt is empty: {path}")
     return prompt

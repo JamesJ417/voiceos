@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -102,13 +103,36 @@ class TurnCoordinator:
                 self._tool_response(self.tools.execute(call.name, call.arguments))
                 for call in provider_response.tool_calls
             ]
+            approvals = [approval for response in responses for approval in response.approvals]
+            errors = [error for response in responses for error in response.errors]
+            results = [result for response in responses for result in response.results]
+            response_text = " ".join(response.text for response in responses)
+            if results and not approvals and not errors:
+                try:
+                    synthesis = self.router.respond(
+                        (
+                            "Answer the user's original request using the verified tool results below. "
+                            "Explain what the evidence means and directly address any requested recommendation. "
+                            "Do not request another tool and do not merely repeat a generic status summary.\n\n"
+                            f"Original request: {text}\n"
+                            f"Verified tool results: {json.dumps(results, separators=(',', ':'))}"
+                        ),
+                        provider=provider_response.provider,
+                        tools=[],
+                        context=document_context,
+                        conversation_id=conversation_id,
+                    )
+                    if synthesis.text.strip():
+                        response_text = synthesis.text.strip()
+                except ProviderUnavailable:
+                    pass
             return CoordinatedResponse(
-                text=" ".join(response.text for response in responses),
+                text=response_text,
                 provider=f"{provider_response.provider}+tools",
                 tool_calls=[call for response in responses for call in response.tool_calls],
-                approvals=[approval for response in responses for approval in response.approvals],
-                results=[result for response in responses for result in response.results],
-                errors=[error for response in responses for error in response.errors],
+                approvals=approvals,
+                results=results,
+                errors=errors,
                 evidence=responses[0].evidence if len(responses) == 1 else None,
                 input_tokens=provider_response.input_tokens,
                 output_tokens=provider_response.output_tokens,

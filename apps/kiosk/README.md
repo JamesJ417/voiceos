@@ -1,6 +1,6 @@
-# VoiceOS Carbon Command kiosk
+# Omarchy Voice Carbon Command kiosk
 
-This responsive interface is the browser and HP touchscreen client for VoiceOS.
+This responsive interface is the browser and HP touchscreen client for Omarchy Voice.
 It connects to the existing gateway and shared server-owned conversation. The
 Command surface supports browser speech recognition, typed turns, spoken
 responses, playback speed, repeat, copy, private document upload, and approval

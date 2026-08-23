@@ -124,6 +124,25 @@ class ToolBroker:
                     "additionalProperties": False,
                 },
             )
+        if os.environ.get("VOICEOS_COMPUTER_ACCESS") == "1":
+            self._specs["computer.run"] = ToolSpec(
+                "computer.run",
+                "Run an exact argv as the signed-in desktop user after explicit approval. Use absolute executable and working-directory paths; shell text is not accepted.",
+                "confirm",
+                False,
+                {
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 128},
+                        "cwd": {"type": "string"},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
+                        "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    },
+                    "required": ["argv", "cwd", "reason"],
+                    "additionalProperties": False,
+                },
+            )
+            self._functions["computer.run"] = self._computer_run
         self._model_aliases = {
             spec.name.replace(".", "_"): spec.name for spec in self._specs.values()
         }
@@ -294,6 +313,24 @@ class ToolBroker:
             if not isinstance(rollback, str) or not rollback.strip() or len(rollback) > 4_000:
                 return "rollback_information_required"
             return None
+        if name == "computer.run":
+            if set(arguments) - {"argv", "cwd", "timeout_seconds", "reason"}:
+                return "arguments_not_allowlisted"
+            argv = arguments.get("argv")
+            cwd = arguments.get("cwd")
+            timeout = arguments.get("timeout_seconds", 60)
+            reason = arguments.get("reason")
+            if not isinstance(argv, list) or not argv or any(not isinstance(item, str) or not item for item in argv):
+                return "valid_argv_required"
+            if not Path(argv[0]).is_absolute():
+                return "absolute_executable_required"
+            if not isinstance(cwd, str) or not Path(cwd).is_absolute():
+                return "absolute_cwd_required"
+            if not isinstance(timeout, int) or not 1 <= timeout <= 300:
+                return "timeout_out_of_range"
+            if not isinstance(reason, str) or not reason.strip():
+                return "reason_required"
+            return None
         if name.startswith("task."):
             return _validate_task_tool(name, arguments)
         if name == "outreach.create":
@@ -318,6 +355,29 @@ class ToolBroker:
             Path(os.environ.get("VOICEOS_ROOT_BROKER_KEY", "/etc/voiceos/root-broker.key")),
         )
         return client.execute(request_id, arguments)
+
+    def _computer_run(self, arguments: dict[str, object]) -> dict[str, object]:
+        argv = arguments["argv"]
+        cwd = arguments["cwd"]
+        timeout = arguments.get("timeout_seconds", 60)
+        assert isinstance(argv, list) and all(isinstance(item, str) for item in argv)
+        assert isinstance(cwd, str) and isinstance(timeout, int)
+        completed = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env={key: value for key, value in os.environ.items() if key not in {"VOICEOS_ADMIN_TOKEN"}},
+        )
+        output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+        return {
+            "argv": argv,
+            "cwd": cwd,
+            "exit_code": completed.returncode,
+            "output": output[-20_000:],
+        }
 
     def _system_health(self, arguments: dict[str, object]) -> dict[str, object]:
         _require_no_arguments(arguments)

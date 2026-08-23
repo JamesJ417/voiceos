@@ -49,6 +49,7 @@
     { "method": "POST", "path": "/v1/approvals/decide", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "POST", "path": "/v1/sessions", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "POST", "path": "/v1/turns/audio", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
+    { "method": "POST", "path": "/v1/transcriptions", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "POST", "path": "/v1/turns/text", "current_implementation": "python-native", "target_owner": "rust-control-plane" },
     { "method": "POST", "path": "/v1/speech/sessions", "current_implementation": "python-proxy-speech", "target_owner": "rust-control-plane", "backend": "speech-worker" },
     { "method": "POST", "path": "/v1/retrieval/web", "current_implementation": "python-proxy-crawl4ai", "target_owner": "rust-control-plane", "backend": "crawl4ai-adapter" }

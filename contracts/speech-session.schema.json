@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://voiceos.local/contracts/speech-session.schema.json",
-  "title": "VoiceOS full-duplex speech session",
+  "title": "Omarchy Voice full-duplex speech session",
   "type": "object",
   "required": ["session_id", "conversation_id", "input_sample_rate_hz", "output_sample_rate_hz", "codec", "transport_protocol", "protocol_version", "backend", "stream_path", "connection_deadline_unix"],
   "properties": {

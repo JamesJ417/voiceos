@@ -16,7 +16,7 @@ test("server-renders the Carbon Command surface", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /<title>VoiceOS Carbon Command<\/title>/i);
+  assert.match(html, /<title>Omarchy Voice Carbon Command<\/title>/i);
   assert.match(html, /Carbon Command/);
   assert.match(html, /Command center/);
   assert.match(html, /Model providers/);

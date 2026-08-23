@@ -1,0 +1,25 @@
+[Unit]
+Description=Omarchy Voice personal AI gateway
+After=network-online.target voiceos-hermes.service voiceos-codex.service
+Wants=network-online.target voiceos-hermes.service voiceos-codex.service
+
+[Service]
+Type=simple
+WorkingDirectory=@@REPO_ROOT@@
+EnvironmentFile=%h/.config/voiceos/gateway.env
+ExecStart=@@PYTHON@@ -m services.gateway.server --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=%h
+
+[Install]
+WantedBy=default.target

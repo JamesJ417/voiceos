@@ -77,7 +77,7 @@ class VoiceWidgetProvider : AppWidgetProvider() {
                     }
                 }
             return RemoteViews(context.packageName, R.layout.voice_widget).apply {
-                setTextViewText(R.id.widget_status, "VoiceOS • $status")
+                setTextViewText(R.id.widget_status, "Omarchy Voice • $status")
                 setTextViewText(R.id.widget_gateway, GatewaySettings.displayName(context))
                 setTextViewText(
                     R.id.widget_task_summary,

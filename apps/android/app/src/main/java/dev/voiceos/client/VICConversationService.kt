@@ -209,7 +209,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             return
         }
         if (DeviceCredentials.token(this).isNullOrBlank()) {
-            failAndStop("VoiceOS device enrollment is required before starting a conversation.")
+            failAndStop("Omarchy Voice device enrollment is required before starting a conversation.")
             return
         }
         active = true
@@ -228,7 +228,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                         publish(STATE_STARTING, detail = "Conversation Mode starting")
                         scheduleListening(150L)
                     },
-                    onFailure = { failAndStop("I could not claim the VoiceOS conversation channel.") },
+                    onFailure = { failAndStop("I could not claim the Omarchy Voice conversation channel.") },
                 )
             }
         }
@@ -392,7 +392,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                     },
                     onFailure = { error ->
                         speakThenStop(
-                            "I couldn't reach VoiceOS. ${error.message.orEmpty()}".trim()
+                            "I couldn't reach Omarchy Voice. ${error.message.orEmpty()}".trim()
                         )
                     },
                 )

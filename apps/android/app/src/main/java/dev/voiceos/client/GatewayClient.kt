@@ -885,7 +885,7 @@ object GatewayClient {
             .put("priority", "check_in")
             .put("title", "VIC wants to talk")
             .put("body", "The proactive check-in system is connected. Tap Talk now to begin a conversation with me.")
-            .put("reason", "Working-model delivery test requested from the VoiceOS app")
+            .put("reason", "Working-model delivery test requested from the Omarchy Voice app")
             .put("dedupe_key", "android-working-model-${System.currentTimeMillis()}")
             .put("actions", org.json.JSONArray(listOf("talk_now", "show_progress", "later", "dismiss")))
             .toString().toByteArray(Charsets.UTF_8)

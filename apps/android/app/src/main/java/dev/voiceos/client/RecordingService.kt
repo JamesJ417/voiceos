@@ -185,7 +185,7 @@ class RecordingService : Service() {
         )
         return Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mic)
-            .setContentTitle("VoiceOS")
+            .setContentTitle("Omarchy Voice")
             .setContentText(text)
             .setContentIntent(openApp)
             .setOngoing(true)
@@ -199,7 +199,7 @@ class RecordingService : Service() {
             "Voice sessions",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Shows when VoiceOS is using the microphone"
+            description = "Shows when Omarchy Voice is using the microphone"
         }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
     }

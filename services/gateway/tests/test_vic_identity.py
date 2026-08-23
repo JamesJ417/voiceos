@@ -15,7 +15,7 @@ class VicIdentityTest(unittest.TestCase):
         prompt = master_system_prompt()
         self.assertIn("You are VIC", prompt)
         self.assertIn("Voice Interface Controller", prompt)
-        self.assertIn("inside VoiceOS", prompt)
+        self.assertIn("inside Omarchy Voice", prompt)
         self.assertIn("Model output is reasoning, not authority", prompt)
 
     def test_soul_is_identity_focused_and_names_runtime_boundary(self) -> None:

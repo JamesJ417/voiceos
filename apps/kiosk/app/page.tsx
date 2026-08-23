@@ -70,25 +70,6 @@ type TaskDetail = {
   artifacts: Array<{ id: string; kind: string; uri: string; description: string }>;
 };
 
-type RecognitionResultEvent = {
-  resultIndex: number;
-  results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }>;
-};
-
-type RecognitionLike = {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  onresult: ((event: RecognitionResultEvent) => void) | null;
-  onerror: ((event: { error: string }) => void) | null;
-  onend: (() => void) | null;
-  start(): void;
-  stop(): void;
-  abort(): void;
-};
-
-type RecognitionConstructor = new () => RecognitionLike;
-
 const STORAGE = {
   gateway: "voiceos.web.gateway",
   token: "voiceos.web.device-token",
@@ -98,7 +79,7 @@ const STORAGE = {
   eventCursor: "voiceos.web.event-cursor",
 };
 
-const suggestedGateway = "https://voiceos-rig.example.ts.net";
+const suggestedGateway = "http://127.0.0.1:8787";
 
 const voiceCopy: Record<VoiceState, { eyebrow: string; title: string; action: string }> = {
   ready: { eyebrow: "Voice channel ready", title: "What can I help with?", action: "Talk" },
@@ -117,7 +98,7 @@ function cleanGateway(value: string) {
 }
 
 function errorText(error: unknown) {
-  return error instanceof Error ? error.message : "VoiceOS could not complete that request.";
+  return error instanceof Error ? error.message : "Omarchy Voice could not complete that request.";
 }
 
 function isContinueHereCommand(text: string) {
@@ -135,7 +116,7 @@ export default function Home() {
   const [health, setHealth] = useState<GatewayHealth>({});
   const [hostHealth, setHostHealth] = useState<HostHealth>({});
   const [connected, setConnected] = useState(false);
-  const [statusMessage, setStatusMessage] = useState("Connect this browser to VoiceOS.");
+  const [statusMessage, setStatusMessage] = useState("Connect this browser to Omarchy Voice.");
   const [draft, setDraft] = useState("");
   const [liveTranscript, setLiveTranscript] = useState("");
   const [lastResponse, setLastResponse] = useState("");
@@ -149,11 +130,13 @@ export default function Home() {
   const [enrollmentCode, setEnrollmentCode] = useState("");
   const [speechRate, setSpeechRate] = useState(1.25);
   const [floor, setFloor] = useState<ConversationFloor | null>(null);
-  const recognition = useRef<RecognitionLike | null>(null);
+  const recorder = useRef<MediaRecorder | null>(null);
+  const microphoneStream = useRef<MediaStream | null>(null);
+  const audioChunks = useRef<Blob[]>([]);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
   const request = useCallback(async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
-    if (!gateway) throw new Error("Enter the VoiceOS gateway URL in Connection settings.");
+    if (!gateway) throw new Error("Enter the Omarchy Voice gateway URL in Connection settings.");
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     if (token) headers.set("Authorization", `Bearer ${token}`);
@@ -162,7 +145,7 @@ export default function Home() {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const reason = typeof payload.error === "string" ? payload.error.replaceAll("_", " ") : `HTTP ${response.status}`;
-      throw new Error(`VoiceOS gateway: ${reason}`);
+      throw new Error(`Omarchy Voice gateway: ${reason}`);
     }
     return payload as T;
   }, [gateway, token]);
@@ -195,7 +178,7 @@ export default function Home() {
   ) => {
     const payload = await request<{ floor: ConversationFloor }>("/v1/conversations/active/floor", {
       method: "POST",
-      body: JSON.stringify({ action, phase, partial_transcript: partialTranscript || null, response_text: responseText || null, display_name: "VoiceOS touch panel", ttl_seconds: 45 }),
+      body: JSON.stringify({ action, phase, partial_transcript: partialTranscript || null, response_text: responseText || null, display_name: "Omarchy Voice touch panel", ttl_seconds: 45 }),
     });
     setFloor(payload.floor);
     return payload.floor;
@@ -250,7 +233,7 @@ export default function Home() {
 
   useEffect(() => {
     const restore = window.setTimeout(() => {
-      const savedGateway = localStorage.getItem(STORAGE.gateway) ?? "";
+      const savedGateway = localStorage.getItem(STORAGE.gateway) ?? suggestedGateway;
       const savedToken = localStorage.getItem(STORAGE.token) ?? "";
       const savedSession = localStorage.getItem(STORAGE.session) ?? makeId();
       const savedRate = Number(localStorage.getItem(STORAGE.speechRate) ?? "1.25");
@@ -311,7 +294,7 @@ export default function Home() {
                 setFloor(nextFloor);
                 const thisDevice = localStorage.getItem(STORAGE.deviceId);
                 if (nextFloor.active && nextFloor.holder_device_id !== thisDevice) {
-                  recognition.current?.abort();
+                  recorder.current?.stop();
                   speechSynthesis.cancel();
                   setVoiceState("ready");
                   setLiveTranscript(nextFloor.partial_transcript ?? "");
@@ -337,7 +320,7 @@ export default function Home() {
             if (event.type === "approval.decided") setPendingApproval(null);
             if (event.type === "status.changed") {
               setConnected(true);
-              setStatusMessage("VoiceOS status updated · online");
+              setStatusMessage("Omarchy Voice status updated · online");
             }
           }
         }
@@ -358,7 +341,7 @@ export default function Home() {
   }, [gateway, token, loadHistory, loadTasks]);
 
   useEffect(() => () => {
-    recognition.current?.abort();
+    recorder.current?.stop();
     speechSynthesis.cancel();
   }, []);
 
@@ -393,7 +376,7 @@ export default function Home() {
       setStatusMessage(result.approvals?.length ? "Approval required before the tool can run." : "Response complete");
       const currentDevice = localStorage.getItem(STORAGE.deviceId);
       const speakingFloor = await changeFloor("update", "speaking", normalized, result.response_text).catch(() => null);
-      if (speakingFloor?.holder_device_id === currentDevice) speak(result.response_text);
+      if (!speakingFloor || speakingFloor.holder_device_id === currentDevice) speak(result.response_text);
     } catch (error) {
       setStatusMessage(errorText(error));
       setVoiceState("error");
@@ -414,67 +397,54 @@ export default function Home() {
     speechSynthesis.speak(utterance);
   }
 
-  function startListening() {
-    const browserWindow = window as typeof window & {
-      SpeechRecognition?: RecognitionConstructor;
-      webkitSpeechRecognition?: RecognitionConstructor;
-    };
-    const Recognition = browserWindow.SpeechRecognition ?? browserWindow.webkitSpeechRecognition;
-    if (!Recognition) {
-      setStatusMessage("This browser does not provide speech recognition. Chrome or Edge is recommended.");
-      setVoiceState("error");
-      return;
-    }
-    const instance = new Recognition();
-    recognition.current = instance;
-    instance.continuous = false;
-    instance.interimResults = true;
-    instance.lang = "en-US";
-    instance.onresult = (event) => {
-      let transcript = "";
-      let final = false;
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        transcript += event.results[index][0].transcript;
-        final ||= event.results[index].isFinal;
-      }
-      const nextTranscript = transcript.trim();
-      setLiveTranscript(nextTranscript);
-      void changeFloor("update", "listening", nextTranscript).catch(() => undefined);
-      if (final) {
-        instance.stop();
-        if (isContinueHereCommand(transcript)) {
-          setStatusMessage("Conversation moved to this touch panel.");
-          setVoiceState("ready");
-          window.setTimeout(startListening, 250);
-        } else {
-          void sendText(transcript);
-        }
-      }
-    };
-    instance.onerror = (event) => {
-      setStatusMessage(`Microphone: ${event.error.replaceAll("-", " ")}`);
-      setVoiceState("error");
-      void changeFloor("release", "idle").catch(() => undefined);
-    };
-    instance.onend = () => {
-      recognition.current = null;
-      setVoiceState((current) => current === "listening" ? "ready" : current);
-    };
+  async function startListening() {
     setLiveTranscript("");
-    void changeFloor("claim", "listening").then(() => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      microphoneStream.current = stream;
+      audioChunks.current = [];
+      const instance = new MediaRecorder(stream);
+      recorder.current = instance;
+      instance.ondataavailable = (event) => {
+        if (event.data.size) audioChunks.current.push(event.data);
+      };
+      instance.onstop = () => {
+        recorder.current = null;
+        microphoneStream.current?.getTracks().forEach((track) => track.stop());
+        microphoneStream.current = null;
+        const recording = new Blob(audioChunks.current, { type: instance.mimeType || "audio/webm" });
+        setVoiceState("processing");
+        setStatusMessage("Transcribing microphone audio…");
+        void request<{ transcript: string }>("/v1/transcriptions", {
+          method: "POST",
+          headers: { "Content-Type": recording.type },
+          body: recording,
+        }).then(({ transcript }) => {
+          setLiveTranscript(transcript);
+          if (isContinueHereCommand(transcript)) {
+            setVoiceState("ready");
+            setStatusMessage("Conversation moved to this touch panel.");
+          } else {
+            void sendText(transcript);
+          }
+        }).catch((error) => {
+          setStatusMessage(errorText(error));
+          setVoiceState("error");
+        });
+      };
+      await changeFloor("claim", "listening").catch(() => null);
       setVoiceState("listening");
       instance.start();
-    }).catch((error) => {
+      setStatusMessage("Listening through the selected microphone. Press Done when finished.");
+    } catch (error) {
       setStatusMessage(errorText(error));
       setVoiceState("error");
-    });
+    }
   }
 
   function handleTalk() {
     if (voiceState === "listening") {
-      recognition.current?.stop();
-      setVoiceState("ready");
-      void changeFloor("release", "idle").catch(() => undefined);
+      recorder.current?.stop();
     } else if (voiceState === "speaking") {
       speechSynthesis.cancel();
       setVoiceState("ready");
@@ -491,7 +461,7 @@ export default function Home() {
     try {
       const result = await request<{ device_id: string; device_token: string }>("/v1/enrollment/exchange", {
         method: "POST",
-        body: JSON.stringify({ code: enrollmentCode.trim(), device_name: `VoiceOS Web · ${navigator.platform || "browser"}` }),
+        body: JSON.stringify({ code: enrollmentCode.trim(), device_name: `Omarchy Voice Web · ${navigator.platform || "browser"}` }),
       });
       setToken(result.device_token);
       localStorage.setItem(STORAGE.token, result.device_token);
@@ -508,7 +478,7 @@ export default function Home() {
     const cleaned = cleanGateway(value);
     setGateway(cleaned);
     localStorage.setItem(STORAGE.gateway, cleaned);
-    setStatusMessage("Checking the private VoiceOS link…");
+    setStatusMessage("Checking the private Omarchy Voice link…");
   }
 
   async function decideApproval(approve: boolean) {
@@ -582,7 +552,7 @@ export default function Home() {
       const response = await fetch(`${gateway}/v1/files`, { method: "POST", headers, body: file });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error ?? `Upload failed with HTTP ${response.status}`);
-      setStatusMessage(`${file.name} is now available to VoiceOS memory.`);
+      setStatusMessage(`${file.name} is now available to Omarchy Voice memory.`);
     } catch (error) {
       setStatusMessage(errorText(error));
     }
@@ -603,15 +573,15 @@ export default function Home() {
 
   return (
     <main className="shell">
-      <aside className="rail" aria-label="VoiceOS navigation">
-        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>VoiceOS</span></div>
+      <aside className="rail" aria-label="Omarchy Voice navigation">
+        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Omarchy Voice</span></div>
         <nav className="nav-list">
           <NavButton active={view === "command"} label="Command" icon="⌂" onClick={() => setView("command")} />
           <NavButton active={view === "tasks"} label="Tasks" icon="✓" onClick={() => { setView("tasks"); void loadTasks(); }} />
           <NavButton active={view === "history"} label="History" icon="◷" onClick={() => { setView("history"); void loadHistory(); }} />
           <NavButton active={view === "system"} label="System" icon="⌁" onClick={() => { setView("system"); void refreshStatus(); }} />
         </nav>
-        <div className="rail-status"><span className={`status-dot ${connected ? "" : "offline"}`} /><div><strong>{connected ? "Private link" : "Disconnected"}</strong><small>{connected ? "VoiceOS connected" : "Open settings"}</small></div></div>
+        <div className="rail-status"><span className={`status-dot ${connected ? "" : "offline"}`} /><div><strong>{connected ? "Private link" : "Disconnected"}</strong><small>{connected ? "Omarchy Voice connected" : "Open settings"}</small></div></div>
       </aside>
 
       <section className="workspace">
@@ -628,7 +598,7 @@ export default function Home() {
         {view === "command" && (
           <div className="dashboard-grid">
             <section className={`voice-panel panel state-${voiceState}`}>
-              <div className="voice-copy"><p className="kicker">{copy.eyebrow}</p><h2>{copy.title}</h2><p>{liveTranscript || "Talk naturally. This browser joins the same continuing VoiceOS conversation as your phone."}</p></div>
+              <div className="voice-copy"><p className="kicker">{copy.eyebrow}</p><h2>{copy.title}</h2><p>{liveTranscript || "Talk naturally. This browser joins the same continuing Omarchy Voice conversation as your phone."}</p></div>
               <div className="voice-stage">
                 <div className="signal-ring ring-one" /><div className="signal-ring ring-two" />
                 <button className="talk-hex" onClick={handleTalk} aria-label={`${copy.action}. ${copy.title}`}><span className="mic" aria-hidden="true"><i /></span><strong>{copy.action}</strong><small>{voiceState === "ready" ? "Touch to begin" : copy.eyebrow}</small></button>
@@ -645,7 +615,7 @@ export default function Home() {
               <div className="panel-heading"><div><p className="kicker">Continuous conversation</p><h2>Current thread</h2></div><span className="memory-pill">Memory active</span></div>
               <div className="conversation-list">{recentMessages.length ? recentMessages.map((message) => <MessageCard key={message.id} message={message} />) : <EmptyState text="Your phone and web conversations will appear here." />}</div>
               {pendingApproval && <div className="approval-card"><div><p className="kicker">Approval required</p><strong>{pendingApproval.tool}</strong><small>{pendingApproval.tool === "rig.root_command" ? "Administrative approval is restricted to the enrolled Pixel." : "VIC will not run this tool without your decision."}</small></div><button className="deny" onClick={() => void decideApproval(false)}>Deny</button><button className="approve" disabled={pendingApproval.tool === "rig.root_command"} onClick={() => void decideApproval(true)}>{pendingApproval.tool === "rig.root_command" ? "Approve on Pixel" : "Approve"}</button></div>}
-              <button className="skill-review-callout" onClick={() => setView("system")}><span><strong>Skill proposals</strong><small>{skillProposals.length ? `${skillProposals.length} waiting for evidence review` : "No proposals waiting. VoiceOS never enables a generated skill silently."}</small></span><span aria-hidden="true">Review →</span></button>
+              <button className="skill-review-callout" onClick={() => setView("system")}><span><strong>Skill proposals</strong><small>{skillProposals.length ? `${skillProposals.length} waiting for evidence review` : "No proposals waiting. Omarchy Voice never enables a generated skill silently."}</small></span><span aria-hidden="true">Review →</span></button>
               <div className="conversation-actions">
                 <button disabled={!lastResponse} onClick={() => speak(lastResponse)}>↻ <span>Repeat</span></button>
                 <button disabled={!lastResponse} onClick={() => { void navigator.clipboard.writeText(lastResponse); setStatusMessage("Response copied."); }}>▣ <span>Copy reply</span></button>
@@ -665,7 +635,7 @@ export default function Home() {
 
         {view === "tasks" && <TaskBoard tasks={tasks} filter={taskFilter} onFilter={setTaskFilter} onRefresh={() => void loadTasks()} />}
 
-        {view === "system" && <div className="system-layout"><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its VoiceOS device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside VoiceOS.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
+        {view === "system" && <div className="system-layout"><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The browser stores only its Omarchy Voice device credential and preferences. Conversation memory, provider routing, approvals, documents, and audit history remain inside Omarchy Voice.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
       </section>
 
       {showSettings && <SettingsDialog gateway={gateway} enrollmentCode={enrollmentCode} setEnrollmentCode={setEnrollmentCode} onSaveGateway={saveGateway} onEnroll={enroll} onClose={() => setShowSettings(false)} hasToken={Boolean(token)} onForget={() => { localStorage.removeItem(STORAGE.token); localStorage.removeItem(STORAGE.deviceId); setToken(""); setConnected(false); setStatusMessage("Browser enrollment removed."); }} />}
@@ -675,7 +645,7 @@ export default function Home() {
 
 function SettingsDialog({ gateway, enrollmentCode, setEnrollmentCode, onSaveGateway, onEnroll, onClose, hasToken, onForget }: { gateway: string; enrollmentCode: string; setEnrollmentCode: (value: string) => void; onSaveGateway: (value: string) => void; onEnroll: (event: FormEvent) => void; onClose: () => void; hasToken: boolean; onForget: () => void }) {
   const [gatewayDraft, setGatewayDraft] = useState(gateway || suggestedGateway);
-  return <div className="dialog-backdrop" role="presentation"><section className="settings-dialog panel" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="panel-heading"><div><p className="kicker">Private connection</p><h2 id="settings-title">Connect this browser</h2></div><button className="icon-button" aria-label="Close settings" onClick={onClose}>×</button></div><label>VoiceOS gateway URL<input type="url" value={gatewayDraft} onChange={(event) => setGatewayDraft(event.target.value)} placeholder={suggestedGateway} /></label><button className="primary-button" onClick={() => onSaveGateway(gatewayDraft)}>Save and test connection</button><div className="dialog-divider" /><form onSubmit={onEnroll}><label>One-time enrollment code<input inputMode="numeric" autoComplete="one-time-code" value={enrollmentCode} onChange={(event) => setEnrollmentCode(event.target.value)} placeholder="Enter the code from VoiceOS" /></label><button className="primary-button" disabled={!gatewayDraft.trim() || !enrollmentCode.trim()}>{hasToken ? "Replace browser credential" : "Enroll browser"}</button></form>{hasToken && <button className="danger-button" onClick={onForget}>Forget this browser</button>}<p className="dialog-help">The gateway must use HTTPS when this page is opened from a secure URL. Add this site’s exact origin to the gateway’s allowed web origins.</p></section></div>;
+  return <div className="dialog-backdrop" role="presentation"><section className="settings-dialog panel" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="panel-heading"><div><p className="kicker">Private connection</p><h2 id="settings-title">Connect this browser</h2></div><button className="icon-button" aria-label="Close settings" onClick={onClose}>×</button></div><label>Omarchy Voice gateway URL<input type="url" value={gatewayDraft} onChange={(event) => setGatewayDraft(event.target.value)} placeholder={suggestedGateway} /></label><button className="primary-button" onClick={() => onSaveGateway(gatewayDraft)}>Save and test connection</button><div className="dialog-divider" /><form onSubmit={onEnroll}><label>One-time enrollment code<input inputMode="numeric" autoComplete="one-time-code" value={enrollmentCode} onChange={(event) => setEnrollmentCode(event.target.value)} placeholder="Enter the code from Omarchy Voice" /></label><button className="primary-button" disabled={!gatewayDraft.trim() || !enrollmentCode.trim()}>{hasToken ? "Replace browser credential" : "Enroll browser"}</button></form>{hasToken && <button className="danger-button" onClick={onForget}>Forget this browser</button>}<p className="dialog-help">The gateway must use HTTPS when this page is opened from a secure URL. Add this site’s exact origin to the gateway’s allowed web origins.</p></section></div>;
 }
 
 function NavButton({ active, icon, label, onClick }: { active: boolean; icon: string; label: string; onClick: () => void }) {
@@ -697,7 +667,7 @@ function TaskBoard({ tasks, filter, onFilter, onRefresh }: { tasks: TaskDetail[]
 }
 
 function SkillProposalPanel({ proposals, onDecision, onRefresh }: { proposals: SkillProposal[]; onDecision: (proposal: SkillProposal, approve: boolean) => void; onRefresh: () => void }) {
-  return <section className="skill-proposals-panel panel"><div className="panel-heading"><div><p className="kicker">Reviewed self-improvement</p><h2>Skill proposals</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><p className="proposal-intro">{proposals.length ? `${proposals.length} evidence-backed proposal${proposals.length === 1 ? "" : "s"} waiting for your decision.` : "Nothing is waiting for review. VoiceOS never enables a generated skill silently."}</p><div className="skill-proposal-list">{proposals.map((proposal) => <article className="skill-proposal-card" key={proposal.id}><div className="skill-proposal-title"><div><span className="proposal-version">Version {proposal.version}</span><h3>{proposal.name}</h3></div><span className="proposal-status">Review required</span></div><div className="proposal-facts"><span><strong>{proposal.evidence.length}</strong> successful audit turns</span><span><strong>{proposal.required_capabilities.length}</strong> typed capabilities</span></div><div className="capability-list">{proposal.required_capabilities.map((capability, index) => <code key={`${String(capability)}-${index}`}>{String(capability)}</code>)}</div><details><summary>Inspect proposed procedure</summary><pre>{proposal.content}</pre></details><details><summary>Inspect source evidence</summary><pre>{JSON.stringify(proposal.evidence, null, 2)}</pre></details><div className="proposal-actions"><button className="deny" onClick={() => onDecision(proposal, false)}>Reject</button><button className="approve" onClick={() => onDecision(proposal, true)}>Approve version</button></div><p className="proposal-safety">Approval records this version for later permissioned use. The proposal itself cannot execute.</p></article>)}</div></section>;
+  return <section className="skill-proposals-panel panel"><div className="panel-heading"><div><p className="kicker">Reviewed self-improvement</p><h2>Skill proposals</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><p className="proposal-intro">{proposals.length ? `${proposals.length} evidence-backed proposal${proposals.length === 1 ? "" : "s"} waiting for your decision.` : "Nothing is waiting for review. Omarchy Voice never enables a generated skill silently."}</p><div className="skill-proposal-list">{proposals.map((proposal) => <article className="skill-proposal-card" key={proposal.id}><div className="skill-proposal-title"><div><span className="proposal-version">Version {proposal.version}</span><h3>{proposal.name}</h3></div><span className="proposal-status">Review required</span></div><div className="proposal-facts"><span><strong>{proposal.evidence.length}</strong> successful audit turns</span><span><strong>{proposal.required_capabilities.length}</strong> typed capabilities</span></div><div className="capability-list">{proposal.required_capabilities.map((capability, index) => <code key={`${String(capability)}-${index}`}>{String(capability)}</code>)}</div><details><summary>Inspect proposed procedure</summary><pre>{proposal.content}</pre></details><details><summary>Inspect source evidence</summary><pre>{JSON.stringify(proposal.evidence, null, 2)}</pre></details><div className="proposal-actions"><button className="deny" onClick={() => onDecision(proposal, false)}>Reject</button><button className="approve" onClick={() => onDecision(proposal, true)}>Approve version</button></div><p className="proposal-safety">Approval records this version for later permissioned use. The proposal itself cannot execute.</p></article>)}</div></section>;
 }
 
 function SkillCatalogPanel({ skills, usages, onDisable, onFeedback }: { skills: SkillProposal[]; usages: SkillUsage[]; onDisable: (skill: SkillProposal) => void; onFeedback: (usage: SkillUsage, correct: boolean) => void }) {
@@ -710,7 +680,7 @@ function ProviderPanel({ providers, active, wide = false }: { providers: Provide
     { name: "ollama-deep", role: "Deep local reasoning" },
     { name: "codex-sol", role: "Highest confidence" },
   ];
-  return <section className={`provider-panel panel ${wide ? "wide" : ""}`}><div className="panel-heading"><div><p className="kicker">Reasoning fabric</p><h2>Model providers</h2></div></div><div className="provider-list">{displayProviders.slice(0, 5).map((provider) => { const selected = provider.name === active; return <div className="provider-row" key={provider.name}><span className={`provider-glyph ${selected ? "green" : "cyan"}`} aria-hidden="true">{selected ? "✦" : "◎"}</span><div><strong>{providerLabel(provider.name)}</strong><small>{provider.role ?? "VoiceOS provider"}</small></div><span className={`provider-state ${selected ? "green" : provider.configured === false ? "amber" : "cyan"}`}>{selected ? "Active" : provider.configured === false ? "Offline" : "Ready"}</span></div>; })}</div></section>;
+  return <section className={`provider-panel panel ${wide ? "wide" : ""}`}><div className="panel-heading"><div><p className="kicker">Reasoning fabric</p><h2>Model providers</h2></div></div><div className="provider-list">{displayProviders.slice(0, 5).map((provider) => { const selected = provider.name === active; return <div className="provider-row" key={provider.name}><span className={`provider-glyph ${selected ? "green" : "cyan"}`} aria-hidden="true">{selected ? "✦" : "◎"}</span><div><strong>{providerLabel(provider.name)}</strong><small>{provider.role ?? "Omarchy Voice provider"}</small></div><span className={`provider-state ${selected ? "green" : provider.configured === false ? "amber" : "cyan"}`}>{selected ? "Active" : provider.configured === false ? "Offline" : "Ready"}</span></div>; })}</div></section>;
 }
 
 function HealthPanel({ gatewayHealth, hostHealth, connected, wide = false }: { gatewayHealth: GatewayHealth; hostHealth: HostHealth; connected: boolean; wide?: boolean }) {

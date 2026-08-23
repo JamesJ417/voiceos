@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: VoiceOS Gateway
+  title: Omarchy Voice Gateway
   version: 0.7.0
 servers:
   - url: http://127.0.0.1:8787
@@ -236,7 +236,7 @@ paths:
   /v1/skills/proposals:
     get:
       operationId: listSkillProposals
-      summary: List validated Hermes skill proposals mirrored into VoiceOS
+      summary: List validated Hermes skill proposals mirrored into Omarchy Voice
       parameters:
         - in: query
           name: status
@@ -287,7 +287,7 @@ paths:
   /v1/skills:
     get:
       operationId: listSkills
-      summary: List approved or disabled VoiceOS skills
+      summary: List approved or disabled Omarchy Voice skills
       parameters:
         - in: query
           name: status
@@ -790,7 +790,7 @@ paths:
                 url: { type: string, format: uri, maxLength: 4096 }
       responses:
         "200":
-          description: Bounded evidence that cannot issue VoiceOS instructions
+          description: Bounded evidence that cannot issue Omarchy Voice instructions
           content:
             application/json:
               schema:
@@ -826,6 +826,33 @@ paths:
                 $ref: "#/components/schemas/Turn"
         "413":
           description: Audio payload is too large
+  /v1/transcriptions:
+    post:
+      operationId: transcribeAudio
+      summary: Transcribe a bounded desktop microphone recording
+      requestBody:
+        required: true
+        content:
+          audio/webm:
+            schema: { type: string, contentMediaType: audio/webm }
+          audio/ogg:
+            schema: { type: string, contentMediaType: audio/ogg }
+          audio/wav:
+            schema: { type: string, contentMediaType: audio/wav }
+      responses:
+        "200":
+          description: Recognized speech
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [transcript]
+                properties:
+                  transcript: { type: string }
+        "400": { description: Audio body is empty or incomplete }
+        "401": { description: Device authentication required }
+        "413": { description: Audio payload is too large }
+        "503": { description: Speech transcription is unavailable or no speech was detected }
   /v1/turns/text:
     post:
       operationId: submitTextTurn

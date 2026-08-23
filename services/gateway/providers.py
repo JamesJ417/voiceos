@@ -1,4 +1,4 @@
-"""Provider-neutral reasoning interfaces for VoiceOS."""
+"""Provider-neutral reasoning interfaces for Omarchy Voice."""
 
 from __future__ import annotations
 
@@ -135,7 +135,7 @@ class OllamaProvider:
                     "content": (
                         master_system_prompt()
                         + "\n\nProvider role: Use typed tools when they can provide verified system evidence."
-                        + (f"\n\nVoiceOS private continuity context:\n{context}" if context else "")
+                        + (f"\n\nOmarchy Voice private continuity context:\n{context}" if context else "")
                     ),
                 },
                 {"role": "user", "content": text},
@@ -209,9 +209,7 @@ class CodexBridgeProvider:
         context: str | None = None,
         conversation_id: str | None = None,
     ) -> ProviderResponse:
-        # Codex is an answer-only reviewer in VoiceOS. Permissioned gateway tools
-        # remain local and are never delegated through this bridge.
-        del tools
+        # Codex may propose typed gateway tools, but the bridge never executes them.
         del conversation_id
         if not self.configured:
             raise ProviderUnavailable("Codex Sol escalation is not enabled")
@@ -220,10 +218,10 @@ class CodexBridgeProvider:
         prompt = f"{master_system_prompt()}\n\nUser request: {text}"
         if context:
             prompt = (
-                f"{master_system_prompt()}\n\nVoiceOS private continuity context:\n"
+                f"{master_system_prompt()}\n\nOmarchy Voice private continuity context:\n"
                 f"{context}\n\nUser request: {text}"
             )
-        request = json.dumps({"text": prompt}, separators=(",", ":")).encode("utf-8") + b"\n"
+        request = json.dumps({"text": prompt, "tools": tools or []}, separators=(",", ":")).encode("utf-8") + b"\n"
         if len(request) > 65_536:
             raise ProviderUnavailable("Codex Sol request exceeds the bridge limit")
         try:
@@ -244,7 +242,8 @@ class CodexBridgeProvider:
         answer = response.get("text")
         if not isinstance(answer, str) or not answer.strip():
             raise ProviderUnavailable("Codex Sol bridge returned no answer")
-        return ProviderResponse(text=answer.strip(), provider=self.name)
+        tool_calls = _parse_tool_calls(response.get("tool_calls"))
+        return ProviderResponse(text=answer.strip(), provider=self.name, tool_calls=tool_calls)
 
 
 class UnconfiguredCloudProvider:
@@ -283,7 +282,7 @@ class UnconfiguredCloudProvider:
 
 
 class HermesProvider:
-    """Hermes agent runtime behind VoiceOS-owned identity, memory, and policy."""
+    """Hermes agent runtime behind Omarchy Voice-owned identity, memory, and policy."""
 
     name = "hermes"
 
@@ -319,20 +318,20 @@ class HermesProvider:
         context: str | None = None,
         conversation_id: str | None = None,
     ) -> ProviderResponse:
-        # Hermes owns its skill/tool surface. VoiceOS deterministic commands run
+        # Hermes owns its skill/tool surface. Omarchy Voice deterministic commands run
         # before this provider, and privileged actions remain approval-gated.
         del tools
         api_key = self._read_api_key()
         system_prompt = (
             master_system_prompt()
-            + "\n\nRuntime role: You are VIC, the Voice Interface Controller and core agent inside VoiceOS. Hermes is your runtime, not your public name. "
+            + "\n\nRuntime role: You are VIC, the Voice Interface Controller and core agent inside Omarchy Voice. Hermes is your runtime, not your public name. "
             "For agentic requests, use installed skills when their trigger matches and create reusable skills only when appropriate. "
             "For ordinary conversation explicitly routed to Hermes, answer directly without inspecting or creating skills. "
             "Do not claim that a host mutation succeeded without verified evidence. "
-            "VoiceOS remains the authority for device identity, approvals, and its canonical memory."
+            "Omarchy Voice remains the authority for device identity, approvals, and its canonical memory."
         )
         if context:
-            system_prompt += f"\n\nVoiceOS private continuity context:\n{context}"
+            system_prompt += f"\n\nOmarchy Voice private continuity context:\n{context}"
         if self.use_async_runs:
             return self._respond_async(text, system_prompt, conversation_id, api_key)
         request_body = {
@@ -650,7 +649,7 @@ class ProviderRouter:
                 and self._ollama.model
                 and not _should_use_agent_runtime(text)
             ):
-                # Ordinary conversation still receives canonical VoiceOS memory,
+                # Ordinary conversation still receives canonical Omarchy Voice memory,
                 # but it does not pay the latency cost of a full Hermes agent run.
                 selected = self._ollama
         if selected is None:

@@ -25,6 +25,7 @@ def run_codex(
     reasoning_effort: str,
     workdir: str,
     timeout_seconds: int,
+    tools: list[dict[str, object]] | None = None,
 ) -> str:
     """Run a single answer-only, ephemeral Codex turn with immutable permissions."""
 
@@ -59,13 +60,24 @@ def run_codex(
     ]
     instruction = (
         f"{master_system_prompt()}\n\n"
-        "Provider role: You are the highest-confidence reasoning tier for VoiceOS. "
-        "Answer directly and concisely for spoken playback. Command, web-search, app, hook, "
-        "and subagent tools are disabled. Do not claim that an external action occurred. "
+        "Provider role: You are the highest-confidence reasoning tier for Omarchy Voice. "
+        "Answer directly and concisely for spoken playback. Your built-in command, web-search, app, hook, "
+        "and subagent tools are disabled. You may propose the typed Omarchy Voice tools supplied below. "
+        "For opening a local browser, propose computer_run with /usr/bin/google-chrome-stable and the URL as argv. "
+        "Do not claim that an external action occurred. "
         "If current system evidence "
-        "would be required, say that VoiceOS must run its permissioned tools.\n\n"
+        "would be required, say that Omarchy Voice must run its permissioned tools.\n\n"
         f"User request:\n{prompt}"
     )
+    if tools:
+        instruction += (
+            "\n\nAvailable Omarchy Voice tools (proposal only):\n"
+            + json.dumps(tools, separators=(",", ":"))
+            + "\nIf an action is needed, return ONLY JSON in this form: "
+            '{"text":"brief explanation","tool_calls":[{"function":{"name":"tool_name","arguments":{}}}]}. '
+            "Propose at most one tool call. Never claim it ran; Omarchy Voice will request approval. "
+            "Otherwise answer normally without JSON."
+        )
     completed = subprocess.run(
         command,
         input=instruction,
@@ -99,11 +111,14 @@ class CodexRequestHandler(socketserver.StreamRequestHandler):
             if not raw_request or len(raw_request) > MAX_REQUEST_BYTES:
                 raise ValueError("request is empty or exceeds the bridge limit")
             request: Any = json.loads(raw_request)
-            if not isinstance(request, dict) or set(request) != {"text"}:
-                raise ValueError("request must contain only text")
+            if not isinstance(request, dict) or set(request) != {"text", "tools"}:
+                raise ValueError("request must contain text and tools")
             text = request["text"]
+            tools = request["tools"]
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("text must be a non-empty string")
+            if not isinstance(tools, list):
+                raise ValueError("tools must be an array")
             answer = run_codex(
                 text.strip(),
                 executable=self.server.codex_executable,
@@ -111,8 +126,18 @@ class CodexRequestHandler(socketserver.StreamRequestHandler):
                 reasoning_effort=self.server.reasoning_effort,
                 workdir=self.server.codex_workdir,
                 timeout_seconds=self.server.codex_timeout,
+                tools=tools,
             )
-            response = {"ok": True, "text": answer}
+            tool_calls: list[dict[str, object]] = []
+            response_text = answer
+            try:
+                structured = json.loads(answer)
+                if isinstance(structured, dict) and isinstance(structured.get("tool_calls"), list):
+                    response_text = str(structured.get("text", "Action proposed for approval."))
+                    tool_calls = structured["tool_calls"][:1]
+            except json.JSONDecodeError:
+                pass
+            response = {"ok": True, "text": response_text, "tool_calls": tool_calls}
         except (ValueError, json.JSONDecodeError, RuntimeError, subprocess.TimeoutExpired) as error:
             response = {"ok": False, "error": str(error)[:500]}
         self.wfile.write(json.dumps(response, separators=(",", ":")).encode("utf-8"))
@@ -129,7 +154,7 @@ class CodexBridgeServer(_UnixStreamServerBase):
 def main() -> None:
     if not hasattr(socketserver, "UnixStreamServer"):
         raise SystemExit("The Codex bridge requires Unix-domain socket support")
-    parser = argparse.ArgumentParser(description="Run the VoiceOS Codex bridge")
+    parser = argparse.ArgumentParser(description="Run the Omarchy Voice Codex bridge")
     parser.add_argument("--socket", default="/run/voiceos-codex/codex.sock")
     parser.add_argument("--codex", default="/home/llm/.local/bin/codex")
     parser.add_argument("--model", default="gpt-5.6-sol")

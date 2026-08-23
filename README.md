@@ -1,8 +1,24 @@
-# VoiceOS
+# Omarchy Voice
 
-VoiceOS is a phone-first, voice-controlled personal AI system. The Android phone is the microphone, speaker, display, and approval surface. A private GPU server performs speech recognition, model inference, tool execution, and system health checks.
+Omarchy Voice is a voice-first AI layer for [Omarchy](https://omarchy.org). It
+runs VIC, a persistent personal agent powered by Hermes and a remote Codex CLI
+brain, directly underneath the Omarchy desktop—no local LLM required.
 
-This repository starts with a deliberately small vertical slice:
+Talk to VIC from the compact desktop panel or the Android companion app. The
+Omarchy workstation owns the private gateway, conversation, permissions, tools,
+and audit history; Tailscale carries encrypted traffic between devices without
+exposing the gateway to the public internet.
+
+## What it does
+
+- Keeps Omarchy Voice in a permanent bottom-right Hyprland tile.
+- Uses a USB microphone for hands-free conversations with VIC.
+- Connects VIC to Hermes for agent orchestration and Codex for remote reasoning.
+- Extends VIC to a Pixel phone over private Tailscale HTTPS.
+- Requires explicit approval for consequential computer actions.
+- Runs as hardened user services and does not modify packaged Omarchy files.
+
+The core voice flow is deliberately simple:
 
 1. Tap **Talk** on an Android phone.
 2. Record 16 kHz mono PCM audio.
@@ -10,9 +26,22 @@ This repository starts with a deliberately small vertical slice:
 4. Receive a transcript and response.
 5. Speak the response on the phone.
 
-The gateway includes two local Ollama reasoning tiers, an explicit GPT-5.6 Sol
-escalation through an authenticated Codex CLI, fail-closed cloud-provider slots,
-permissioned tools, one-time device enrollment, and SQLite audit history.
+The gateway supports Hermes as the primary runtime, an authenticated Codex CLI
+bridge, optional local Ollama tiers, permissioned tools, one-time device
+enrollment, and SQLite audit history.
+
+## Install on Omarchy
+
+```bash
+git clone https://github.com/JamesJ417/voiceos.git
+cd voiceos
+chmod +x ops/omarchy/install.sh ops/omarchy/voiceosctl
+ops/omarchy/install.sh --enable
+voiceos-talk
+```
+
+See [`ops/omarchy/README.md`](ops/omarchy/README.md) for configuration, service
+management, Tailscale access, and the security model.
 
 ## Repository layout
 
@@ -99,7 +128,7 @@ future full-screen HP touchscreen kiosk. It supports browser voice recognition
 and playback, shared audit history, provider and system status, exact-response
 copying, private file upload, and explicit approval decisions.
 
-The web client enrolls as a separate VoiceOS device. Local browser origins are
+The web client enrolls as a separate Omarchy Voice device. Local browser origins are
 accepted for development. Production origins must be explicitly allowlisted in
 the gateway with `VOICEOS_WEB_ORIGINS`; wildcards are intentionally unsupported.
 
@@ -178,6 +207,13 @@ cargo test --workspace --all-targets
 
 See `docs/rust-memory-migration.md` for the provider configuration, rig shadow
 deployment, eventual HP database move, and Python retirement gate.
+
+## Omarchy desktop integration
+
+Omarchy Voice can run underneath an Omarchy desktop as a hardened user service without
+changing packaged Omarchy files or granting root authority. See
+[`ops/omarchy/README.md`](ops/omarchy/README.md) for installation, operation,
+and the boundary between the desktop control plane and optional GPU workers.
 
 ## Trusted agent kernel and reviewed skills
 

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command_name="${1:-status}"
+case "$command_name" in
+  start|stop|restart)
+    exec systemctl --user "$command_name" voiceos-gateway.service
+    ;;
+  logs)
+    exec journalctl --user -u voiceos-gateway.service -f
+    ;;
+  health)
+    exec curl --fail --silent --show-error http://127.0.0.1:8787/v1/health
+    ;;
+  wait)
+    for _ in {1..30}; do
+      if curl --fail --silent http://127.0.0.1:8787/v1/health >/dev/null; then
+        echo "Omarchy Voice gateway is healthy at http://127.0.0.1:8787"
+        exit 0
+      fi
+      sleep 0.2
+    done
+    echo "Omarchy Voice gateway did not become healthy." >&2
+    systemctl --user --no-pager --full status voiceos-gateway.service >&2 || true
+    exit 1
+    ;;
+  status)
+    systemctl --user --no-pager --full status voiceos-gateway.service || true
+    printf '\nHealth: '
+    if ! curl --fail --silent --show-error http://127.0.0.1:8787/v1/health; then
+      echo "unavailable"
+      exit 1
+    fi
+    echo
+    ;;
+  *)
+    echo "Usage: voiceosctl {status|health|start|stop|restart|logs|wait}" >&2
+    exit 2
+    ;;
+esac

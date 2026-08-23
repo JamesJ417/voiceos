@@ -280,7 +280,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val filename = DocumentInput.filename(contentResolver, uri)
         val mediaType = contentResolver.getType(uri) ?: DocumentInput.mediaTypeForFilename(filename)
         AlertDialog.Builder(this)
-            .setTitle("How should VoiceOS use this file?")
+            .setTitle("How should Omarchy Voice use this file?")
             .setItems(arrayOf("About me — always available", "Reference — retrieve when relevant")) { _, which ->
                 uploadDocument(uri, filename, mediaType, if (which == 0) "profile" else "reference")
             }
@@ -466,7 +466,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             gravity = Gravity.CENTER_VERTICAL
         }
         brandRow.addView(HexMarkView(this), LinearLayout.LayoutParams(dp(42), dp(38)))
-        brandRow.addView(heading("VoiceOS", 25f).apply {
+        brandRow.addView(heading("Omarchy Voice", 25f).apply {
             setPadding(dp(9), 0, 0, 0)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         gatewayView = TextView(this).apply {
@@ -513,7 +513,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         voicePanel.addView(voiceTitleView, fullWidthWrap())
         voicePanel.addView(TextView(this).apply {
-            text = "Tap the control and speak. VoiceOS keeps the conversation across your enrolled devices."
+            text = "Tap the control and speak. Omarchy Voice keeps the conversation across your enrolled devices."
             textSize = 14f
             setTextColor(CarbonPalette.muted)
             setLineSpacing(0f, 1.18f)
@@ -571,7 +571,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         conversationHeader.addView(memoryStatusView)
         conversationPanel.addView(conversationHeader, fullWidthWrap())
         transcriptView = TextView(this).apply {
-            text = "VoiceOS\nTap Talk and speak. Your conversation will continue here."
+            text = "Omarchy Voice\nTap Talk and speak. Your conversation will continue here."
             textSize = 16f
             setTextColor(CarbonPalette.white)
             setLineSpacing(dp(3).toFloat(), 1.18f)
@@ -727,7 +727,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val systemPage = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            addView(kicker("VoiceOS infrastructure"), fullWidthWrap().apply { topMargin = dp(24) })
+            addView(kicker("Omarchy Voice infrastructure"), fullWidthWrap().apply { topMargin = dp(24) })
             addView(heading("System", 30f), fullWidthWrap().apply { topMargin = dp(5) })
             addView(panel(17).apply {
                 addView(kicker("Audio playback"), fullWidthWrap())
@@ -1379,8 +1379,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun copyLastResponse() {
         val response = lastResponse ?: return
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("VoiceOS response", response))
-        Toast.makeText(this, "VoiceOS response copied", Toast.LENGTH_SHORT).show()
+        clipboard.setPrimaryClip(ClipData.newPlainText("Omarchy Voice response", response))
+        Toast.makeText(this, "Omarchy Voice response copied", Toast.LENGTH_SHORT).show()
     }
 
     private fun cycleSpeechRate() {
@@ -1689,7 +1689,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         form.addView(outcomeInput, fullWidthWrap())
         form.addView(minutesInput, fullWidthWrap())
         AlertDialog.Builder(this)
-            .setTitle("Add VoiceOS task")
+            .setTitle("Add Omarchy Voice task")
             .setView(form)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Add") { _, _ ->
@@ -1865,7 +1865,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun renderSkillProposals(proposals: List<SkillProposal>) {
         skillProposalContainer.removeAllViews()
         skillProposalStatusView.text = if (proposals.isEmpty()) {
-            "No proposals are waiting for review. VoiceOS will never enable a generated skill silently."
+            "No proposals are waiting for review. Omarchy Voice will never enable a generated skill silently."
         } else {
             "${proposals.size} proposal${if (proposals.size == 1) "" else "s"} waiting. Review the procedure, capabilities, and evidence before deciding."
         }

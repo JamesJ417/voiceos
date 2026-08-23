@@ -18,7 +18,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:letterSpacing="0.08"
-            android:text="VOICEOS  •  READY"
+            android:text="OMARCHY VOICE  •  READY"
             android:textColor="@color/voice_text"
             android:textSize="12sp"
             android:textStyle="bold" />
@@ -28,7 +28,7 @@
             android:layout_width="42dp"
             android:layout_height="36dp"
             android:backgroundTint="@color/voice_surface_raised"
-            android:contentDescription="Refresh VoiceOS tasks"
+            android:contentDescription="Refresh Omarchy Voice tasks"
             android:minHeight="0dp"
             android:minWidth="0dp"
             android:padding="0dp"

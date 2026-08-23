@@ -1,0 +1,27 @@
+[Unit]
+Description=Omarchy Voice Hermes agent runtime (VIC)
+After=network-online.target
+Wants=network-online.target
+Before=voiceos-gateway.service
+
+[Service]
+Type=simple
+Environment=HOME=%h
+Environment=HERMES_HOME=%h/.hermes
+Environment=PATH=@@HERMES_PATH@@:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=%h/.config/voiceos/hermes.env
+WorkingDirectory=@@REPO_ROOT@@
+ExecStart=@@HERMES@@ gateway run --replace --external-supervisor
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

@@ -88,7 +88,7 @@ class OllamaProviderTest(unittest.TestCase):
         self.assertFalse(payload["think"])
         self.assertEqual(0.0, payload["options"]["temperature"])
         self.assertEqual(tools, payload["tools"])
-        self.assertIn("VoiceOS Master Charter", payload["messages"][0]["content"])
+        self.assertIn("Omarchy Voice Master Charter", payload["messages"][0]["content"])
         self.assertEqual("user", payload["messages"][1]["role"])
 
     def test_deep_provider_enables_thinking_and_bounded_residency(self) -> None:
@@ -275,7 +275,7 @@ class CodexBridgeProviderTest(unittest.TestCase):
         connection.connect.assert_called_once_with("/run/test/codex.sock")
         sent = connection.sendall.call_args.args[0]
         bridged_prompt = json.loads(sent)["text"]
-        self.assertIn("VoiceOS Master Charter", bridged_prompt)
+        self.assertIn("Omarchy Voice Master Charter", bridged_prompt)
         self.assertTrue(bridged_prompt.endswith("User request: Ask Codex to verify this"))
 
 
