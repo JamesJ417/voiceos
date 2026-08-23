@@ -105,6 +105,10 @@ function isContinueHereCommand(text: string) {
   return /^(vic[,.]?\s*)?(continue|pick up|move|switch)( the conversation)? here[.!?]?$/i.test(text.trim());
 }
 
+function currentDeviceId() {
+  return localStorage.getItem(STORAGE.deviceId) || "development-device";
+}
+
 export default function Home() {
   const [view, setView] = useState<ViewName>("command");
   const [voiceState, setVoiceState] = useState<VoiceState>("ready");
@@ -298,7 +302,7 @@ export default function Home() {
               const nextFloor = event.payload.floor as ConversationFloor | undefined;
               if (nextFloor) {
                 setFloor(nextFloor);
-                const thisDevice = localStorage.getItem(STORAGE.deviceId);
+                const thisDevice = currentDeviceId();
                 if (nextFloor.active && nextFloor.holder_device_id !== thisDevice) {
                   recorder.current?.stop();
                   speechSynthesis.cancel();
@@ -380,7 +384,7 @@ export default function Home() {
       }]);
       setPendingApproval(result.approvals?.[0] ?? null);
       setStatusMessage(result.approvals?.length ? "Approval required before the tool can run." : "Response complete");
-      const currentDevice = localStorage.getItem(STORAGE.deviceId);
+      const currentDevice = currentDeviceId();
       const speakingFloor = await changeFloor("update", "speaking", normalized, result.response_text).catch(() => null);
       if (!speakingFloor || speakingFloor.holder_device_id === currentDevice) speak(result.response_text);
     } catch (error) {
