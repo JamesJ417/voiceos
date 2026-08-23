@@ -32,12 +32,10 @@ enrollment, and SQLite audit history.
 
 ## Install on Omarchy
 
+From a terminal on a fresh Omarchy desktop:
+
 ```bash
-git clone https://github.com/JamesJ417/voiceos.git
-cd voiceos
-chmod +x ops/omarchy/install.sh ops/omarchy/voiceosctl
-ops/omarchy/install.sh --enable
-voiceos-talk
+curl -fsSL https://raw.githubusercontent.com/JamesJ417/voiceos/main/install-omarchy.sh | bash
 ```
 
 See [`ops/omarchy/README.md`](ops/omarchy/README.md) for configuration, service

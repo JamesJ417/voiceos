@@ -8,9 +8,32 @@ no root account and does not modify packaged Omarchy files.
 
 ## Install
 
+For a clean Omarchy machine, run the complete setup wizard:
+
 ```bash
-chmod +x ops/omarchy/install.sh ops/omarchy/voiceosctl
+curl -fsSL https://raw.githubusercontent.com/JamesJ417/voiceos/main/install-omarchy.sh | bash
+```
+
+It installs the required Arch and AUR packages through `omarchy pkg`, installs
+Hermes Agent and Codex CLI from their official installers, guides you through
+remote-provider sign-in, downloads a checksum-verified Whisper model, builds the
+web interface, registers all user services, adds Omarchy Voice to the Omarchy
+menu, enables Tailscale, and runs an end-to-end readiness check.
+
+The upstream installers are downloaded over HTTPS from
+`hermes-agent.nousresearch.com/install.sh` and `chatgpt.com/codex/install.sh`.
+The speech model is downloaded from the official whisper.cpp Hugging Face
+repository and must match the SHA-256 recorded in `setup.sh` before installation.
+
+For automated image preparation, use `--non-interactive`. Authentication is
+intentionally not bypassed; after provisioning, run `codex login` and
+`hermes setup`, then rerun `ops/omarchy/install.sh --enable`.
+
+The lower-level installer is idempotent and useful after pulling an update:
+
+```bash
 ops/omarchy/install.sh --enable
+omarchy-voice-doctor
 ```
 
 The installer creates:
@@ -24,6 +47,9 @@ The installer creates:
 - `~/.local/state/voiceos/` for private state
 - `~/.local/bin/voiceosctl`
 - `~/.local/bin/voiceos-talk`
+- `~/.local/bin/omarchy-voice-doctor`
+- `~/.local/share/applications/omarchy-voice.desktop`
+- `~/.config/omarchy/extensions/omarchy-menu.jsonc` entry
 
 It preserves existing environment and key files. Omarchy Voice talks to Hermes over
 an authenticated loopback API, and Hermes publicly identifies itself as VIC.

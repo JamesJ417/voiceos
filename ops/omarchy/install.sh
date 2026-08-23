@@ -65,6 +65,13 @@ if [[ -z "$npm_bin" ]]; then
 fi
 npm_dir="$(dirname "$npm_bin")"
 
+if [[ ! -d "$repo_root/apps/kiosk/node_modules" ]]; then
+  "$npm_bin" ci --prefix "$repo_root/apps/kiosk"
+fi
+if [[ ! -d "$repo_root/apps/kiosk/dist" ]]; then
+  "$npm_bin" run build --prefix "$repo_root/apps/kiosk"
+fi
+
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/voiceos"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/voiceos"
 unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
@@ -104,7 +111,56 @@ chmod 0644 "$unit_dir/voiceos-ui.service"
 
 install -m 0755 "$script_dir/voiceosctl" "$bin_dir/voiceosctl"
 install -m 0755 "$script_dir/voiceos-talk" "$bin_dir/voiceos-talk"
+install -m 0755 "$script_dir/doctor.sh" "$bin_dir/omarchy-voice-doctor"
+
+applications_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+install -d -m 0755 "$applications_dir"
+desktop_file="$applications_dir/omarchy-voice.desktop"
+{
+  printf '%s\n' '[Desktop Entry]'
+  printf '%s\n' 'Type=Application'
+  printf '%s\n' 'Name=Omarchy Voice'
+  printf '%s\n' 'Comment=Talk to VIC through Hermes and Codex'
+  printf 'Exec=%s\n' "$bin_dir/voiceos-talk"
+  printf '%s\n' 'Icon=audio-input-microphone'
+  printf '%s\n' 'Terminal=false'
+  printf '%s\n' 'Categories=Utility;Audio;'
+  printf '%s\n' 'Keywords=VIC;voice;assistant;Hermes;Codex;'
+} >"$desktop_file"
+
+menu_file="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc"
+install -d -m 0755 "$(dirname "$menu_file")"
+if [[ ! -f "$menu_file" ]]; then
+  printf '{}\n' >"$menu_file"
+fi
+"$python_bin" - "$menu_file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+if '"omarchy-voice"' not in text:
+    closing = text.rfind("}")
+    if closing < 0:
+        raise SystemExit(f"Omarchy menu file has no closing object: {path}")
+    body = text[:closing]
+    without_comments = re.sub(r"//.*", "", body).strip()
+    comma = "," if without_comments not in {"", "{"} and not body.rstrip().endswith(",") else ""
+    entry = (
+        f'{comma}\n  "omarchy-voice": {{\n'
+        '    "icon": "󰍬",\n'
+        '    "label": "Omarchy Voice",\n'
+        '    "action": "voiceos-talk",\n'
+        '    "aliases": ["vic", "voice"],\n'
+        '    "description": "Talk to VIC"\n'
+        '  }\n'
+    )
+    path.write_text(body.rstrip() + entry + text[closing:], encoding="utf-8")
+PY
+
 systemctl --user daemon-reload
+omarchy menu refresh >/dev/null
 
 if ((enable)); then
   systemctl --user enable --now voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service
