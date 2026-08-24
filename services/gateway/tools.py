@@ -220,6 +220,25 @@ class ToolBroker:
         self._functions[name] = executor
         self._model_aliases[name.replace(".", "_")] = name
 
+    def register_console_tools(self, executor: ToolFunction) -> None:
+        """Register the two local VIC Console display commands."""
+        definitions = {
+            "console.show_weather": "Show the weather panel on the local VIC Console.",
+            "console.refresh_dashboard": "Refresh the local VIC Console weather dashboard.",
+        }
+        for name, description in definitions.items():
+            self._specs[name] = ToolSpec(
+                name,
+                description,
+                "none",
+                False,
+                _empty_parameters(),
+            )
+            self._functions[name] = lambda arguments, selected=name: executor(
+                {"tool": selected, **arguments}
+            )
+            self._model_aliases[name.replace(".", "_")] = name
+
     def describe(self) -> list[dict[str, object]]:
         return [asdict(spec) for spec in self._specs.values()]
 
@@ -345,6 +364,8 @@ class ToolBroker:
             if any(not isinstance(arguments.get(key), str) or not str(arguments[key]).strip() for key in required):
                 return "outreach_text_required"
             return None
+        if name.startswith("console."):
+            return None if not arguments else "arguments_not_allowed"
         return "tool_not_allowlisted"
 
     def _root_command(

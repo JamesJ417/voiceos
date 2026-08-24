@@ -1,4 +1,4 @@
-"""Provider-neutral reasoning interfaces for Omarchy Voice."""
+"""Provider-neutral reasoning interfaces for VoiceOS."""
 
 from __future__ import annotations
 
@@ -137,7 +137,7 @@ class OllamaProvider:
                     "content": (
                         master_system_prompt()
                         + "\n\nProvider role: Use typed tools when they can provide verified system evidence."
-                        + (f"\n\nOmarchy Voice private continuity context:\n{context}" if context else "")
+                        + (f"\n\nVoiceOS private continuity context:\n{context}" if context else "")
                     ),
                 },
                 {"role": "user", "content": text},
@@ -220,7 +220,7 @@ class CodexBridgeProvider:
         prompt = f"{master_system_prompt()}\n\nUser request: {text}"
         if context:
             prompt = (
-                f"{master_system_prompt()}\n\nOmarchy Voice private continuity context:\n"
+                f"{master_system_prompt()}\n\nVoiceOS private continuity context:\n"
                 f"{context}\n\nUser request: {text}"
             )
         request = json.dumps({"text": prompt, "tools": tools or []}, separators=(",", ":")).encode("utf-8") + b"\n"
@@ -284,7 +284,7 @@ class UnconfiguredCloudProvider:
 
 
 class HermesProvider:
-    """Hermes agent runtime behind Omarchy Voice-owned identity, memory, and policy."""
+    """Hermes agent runtime behind VoiceOS-owned identity, memory, and policy."""
 
     name = "hermes"
 
@@ -333,26 +333,27 @@ class HermesProvider:
         tools: list[dict[str, object]] | None = None,
         context: str | None = None,
         conversation_id: str | None = None,
+        image_data_urls: list[str] | None = None,
     ) -> ProviderResponse:
-        # Hermes owns its skill/tool surface. Omarchy Voice deterministic commands run
+        # Hermes owns its skill/tool surface. VoiceOS deterministic commands run
         # before this provider, and privileged actions remain approval-gated.
         del tools
         api_key = self._read_api_key()
         system_prompt = (
             master_system_prompt()
-            + "\n\nRuntime role: You are VIC, the Voice Interface Controller and core agent inside Omarchy Voice. Hermes is your runtime, not your public name. "
+            + "\n\nRuntime role: You are VIC, the Voice Interface Controller for VoiceOS. Hermes is the agent runtime behind VoiceOS, not your public name. "
             "For agentic requests, use installed skills when their trigger matches and create reusable skills only when appropriate. "
             "For ordinary conversation explicitly routed to Hermes, answer directly without inspecting or creating skills. "
             "For substantial research or multi-step work that does not need the user's immediate input, use delegate_task with background=true. "
             "After dispatching, immediately tell the user what the worker is doing and keep the foreground conversation available. "
             "Never use a vague holding phrase such as 'one moment' or 'I'm working on that'; report a concrete goal or a real result instead. "
             "Do not claim that a host mutation succeeded without verified evidence. "
-            "Omarchy Voice remains the authority for device identity, approvals, and its canonical memory."
+            "VoiceOS remains the authority for device identity, approvals, and canonical memory."
         )
         if context:
-            system_prompt += f"\n\nOmarchy Voice private continuity context:\n{context}"
+            system_prompt += f"\n\nVoiceOS private continuity context:\n{context}"
         if self.use_async_runs:
-            return self._respond_async(text, system_prompt, conversation_id, api_key)
+            return self._respond_async(text, system_prompt, conversation_id, api_key, image_data_urls)
         request_body = {
             "model": self.model,
             "messages": [
@@ -412,13 +413,23 @@ class HermesProvider:
         system_prompt: str,
         conversation_id: str | None,
         api_key: str,
+        image_data_urls: list[str] | None = None,
     ) -> ProviderResponse:
+        user_content: object = text
+        if image_data_urls:
+            user_content = [
+                {"type": "input_text", "text": text},
+                *[
+                    {"type": "input_image", "image_url": image_url, "detail": "auto"}
+                    for image_url in image_data_urls
+                ],
+            ]
         body: dict[str, object] = {
-            "input": text,
+            "input": [{"role": "user", "content": user_content}] if image_data_urls else text,
             "instructions": system_prompt,
             "model_options": {},
         }
-        agent_runtime = _should_use_agent_runtime(text)
+        agent_runtime = bool(image_data_urls) or _should_use_agent_runtime(text)
         body["model_options"] = {"reasoning_effort": "medium" if agent_runtime else "low"}
         if self.model.casefold() == "hermes" and not agent_runtime:
             body["model"] = os.environ.get("VOICEOS_FAST_CHAT_MODEL", "gpt-5.6-luna")
@@ -426,9 +437,10 @@ class HermesProvider:
         # Omitting that sentinel lets Hermes use its own configured default.
         if self.model.casefold() != "hermes":
             body["model"] = self.model
-        if conversation_id:
-            body["session_id"] = conversation_id
-        baseline_message_id = self._latest_message_id(conversation_id, api_key)
+        # Every /v1/runs request gets a fresh Hermes execution session. The
+        # stable conversation ID remains the memory scope header and canonical
+        # VoiceOS context, so overlapping panel/wake turns do not queue behind
+        # Hermes' per-session lease.
         result = self._request_json(
             "/v1/runs",
             api_key,
@@ -482,7 +494,7 @@ class HermesProvider:
                         self.activity_sink(conversation_id, safe_event)
                     if event_name == "subagent.start" and conversation_id:
                         self._start_completion_watcher(
-                            conversation_id, api_key, baseline_message_id
+                            run_id, conversation_id, api_key, 0
                         )
                     if event_name == "approval.request":
                         self._notify_skill_scan(run_id)
@@ -543,28 +555,36 @@ class HermesProvider:
         return max((_optional_int(item.get("id")) or 0 for item in messages if isinstance(item, dict)), default=0)
 
     def _start_completion_watcher(
-        self, session_id: str, api_key: str, after_message_id: int
+        self,
+        hermes_session_id: str,
+        conversation_id: str,
+        api_key: str,
+        after_message_id: int,
     ) -> None:
         with self._watchers_lock:
-            if session_id in self._completion_watchers:
+            if hermes_session_id in self._completion_watchers:
                 return
-            self._completion_watchers.add(session_id)
+            self._completion_watchers.add(hermes_session_id)
         threading.Thread(
             target=self._watch_completions,
-            args=(session_id, api_key, after_message_id),
-            name=f"hermes-completions-{session_id[:8]}",
+            args=(hermes_session_id, conversation_id, api_key, after_message_id),
+            name=f"hermes-completions-{hermes_session_id[:8]}",
             daemon=True,
         ).start()
 
     def _watch_completions(
-        self, session_id: str, api_key: str, cursor: int
+        self,
+        hermes_session_id: str,
+        conversation_id: str,
+        api_key: str,
+        cursor: int,
     ) -> None:
         idle_polls = 0
         try:
             while idle_polls < 360:
                 try:
                     result = self._request_json(
-                        f"/api/sessions/{session_id}/messages?order=latest&limit=100",
+                        f"/api/sessions/{hermes_session_id}/messages?order=latest&limit=100",
                         api_key,
                     )
                     messages = result.get("data") if isinstance(result, dict) else []
@@ -584,7 +604,7 @@ class HermesProvider:
                         ):
                             found = True
                             if self.completion_sink:
-                                self.completion_sink(session_id, message_id, content.strip())
+                                self.completion_sink(conversation_id, message_id, content.strip())
                     cursor = newest
                     idle_polls = 0 if found else idle_polls + 1
                 except ProviderUnavailable:
@@ -592,7 +612,7 @@ class HermesProvider:
                 time.sleep(5)
         finally:
             with self._watchers_lock:
-                self._completion_watchers.discard(session_id)
+                self._completion_watchers.discard(hermes_session_id)
 
     def _poll_run(self, run_id: str, api_key: str) -> ProviderResponse:
         import time
@@ -763,8 +783,11 @@ class ProviderRouter:
         tools: list[dict[str, object]] | None = None,
         context: str | None = None,
         conversation_id: str | None = None,
+        image_data_urls: list[str] | None = None,
     ) -> ProviderResponse:
         selected = self.default_provider if provider is None else self._providers.get(provider)
+        if image_data_urls:
+            selected = self._hermes
         if provider is None:
             if self._codex.configured and _should_use_codex(text):
                 selected = self._codex
@@ -777,11 +800,15 @@ class ProviderRouter:
                 and self._ollama.model
                 and not _should_use_agent_runtime(text)
             ):
-                # Ordinary conversation still receives canonical Omarchy Voice memory,
+                # Ordinary conversation still receives canonical VoiceOS memory,
                 # but it does not pay the latency cost of a full Hermes agent run.
                 selected = self._ollama
         if selected is None:
             raise ProviderUnavailable(f"Unknown provider: {provider}")
+        if selected is self._hermes and image_data_urls:
+            return self._hermes.respond(
+                text, tools, context, conversation_id, image_data_urls=image_data_urls
+            )
         return selected.respond(text, tools, context, conversation_id)
 
     def describe(self) -> list[dict[str, object]]:

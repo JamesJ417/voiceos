@@ -60,22 +60,22 @@ def run_codex(
     ]
     instruction = (
         f"{master_system_prompt()}\n\n"
-        "Provider role: You are the highest-confidence reasoning tier for Omarchy Voice. "
+        "Provider role: You are the highest-confidence reasoning tier behind VoiceOS. "
         "Answer directly and concisely for spoken playback. Your built-in command, web-search, app, hook, "
-        "and subagent tools are disabled. You may propose the typed Omarchy Voice tools supplied below. "
+        "and subagent tools are disabled. You may propose the typed VoiceOS tools supplied below. "
         "For opening a local browser, propose computer_run with /usr/bin/google-chrome-stable and the URL as argv. "
         "Do not claim that an external action occurred. "
         "If current system evidence "
-        "would be required, say that Omarchy Voice must run its permissioned tools.\n\n"
+        "would be required, say that VoiceOS must run its permissioned tools.\n\n"
         f"User request:\n{prompt}"
     )
     if tools:
         instruction += (
-            "\n\nAvailable Omarchy Voice tools (proposal only):\n"
+            "\n\nAvailable VoiceOS tools (proposal only):\n"
             + json.dumps(tools, separators=(",", ":"))
             + "\nIf an action is needed, return ONLY JSON in this form: "
             '{"text":"brief explanation","tool_calls":[{"function":{"name":"tool_name","arguments":{}}}]}. '
-            "Propose at most one tool call. Never claim it ran; Omarchy Voice will request approval. "
+            "Propose at most one tool call. Never claim it ran; VoiceOS will request approval. "
             "Otherwise answer normally without JSON."
         )
     completed = subprocess.run(
@@ -154,7 +154,7 @@ class CodexBridgeServer(_UnixStreamServerBase):
 def main() -> None:
     if not hasattr(socketserver, "UnixStreamServer"):
         raise SystemExit("The Codex bridge requires Unix-domain socket support")
-    parser = argparse.ArgumentParser(description="Run the Omarchy Voice Codex bridge")
+    parser = argparse.ArgumentParser(description="Run the VoiceOS Codex bridge")
     parser.add_argument("--socket", default="/run/voiceos-codex/codex.sock")
     parser.add_argument("--codex", default="/home/llm/.local/bin/codex")
     parser.add_argument("--model", default="gpt-5.6-sol")

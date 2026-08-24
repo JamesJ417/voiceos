@@ -88,7 +88,7 @@ class OllamaProviderTest(unittest.TestCase):
         self.assertFalse(payload["think"])
         self.assertEqual(0.0, payload["options"]["temperature"])
         self.assertEqual(tools, payload["tools"])
-        self.assertIn("Omarchy Voice Master Charter", payload["messages"][0]["content"])
+        self.assertIn("VoiceOS Master Charter", payload["messages"][0]["content"])
         self.assertEqual("user", payload["messages"][1]["role"])
 
     def test_deep_provider_enables_thinking_and_bounded_residency(self) -> None:
@@ -167,7 +167,7 @@ class HermesProviderTest(unittest.TestCase):
         self.assertEqual("Bearer test-secret", headers["Authorization"])
         self.assertEqual("voiceos:owner-1", headers["X-Hermes-Session-Key"])
         self.assertIn("You are VIC", payload["messages"][0]["content"])
-        self.assertIn("Hermes is your runtime, not your public name", payload["messages"][0]["content"])
+        self.assertIn("Hermes is the agent runtime behind VoiceOS, not your public name", payload["messages"][0]["content"])
         self.assertIn("answer directly without inspecting or creating skills", payload["messages"][0]["content"])
         self.assertIn("delegate_task with background=true", payload["messages"][0]["content"])
         self.assertIn("keep the foreground conversation available", payload["messages"][0]["content"])
@@ -265,6 +265,7 @@ class HermesAsyncProviderTest(unittest.TestCase):
             {"reasoning_effort": "medium"},
             FakeHermesAsyncHandler.request_payload["model_options"],  # type: ignore[index]
         )
+        self.assertNotIn("session_id", FakeHermesAsyncHandler.request_payload)
         self.assertEqual(FakeHermesAsyncHandler.run_id, response.approvals[0].provider_run_id)
         self.assertEqual("hermes.systemctl", response.approvals[0].tool)
         self.assertIn("VIC wants to run", response.text)
@@ -303,7 +304,7 @@ class CodexBridgeProviderTest(unittest.TestCase):
         connection.connect.assert_called_once_with("/run/test/codex.sock")
         sent = connection.sendall.call_args.args[0]
         bridged_prompt = json.loads(sent)["text"]
-        self.assertIn("Omarchy Voice Master Charter", bridged_prompt)
+        self.assertIn("VoiceOS Master Charter", bridged_prompt)
         self.assertTrue(bridged_prompt.endswith("User request: Ask Codex to verify this"))
 
 

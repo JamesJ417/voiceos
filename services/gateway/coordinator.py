@@ -43,6 +43,7 @@ class TurnCoordinator:
         conversation_id: str | None = None,
         provider: str | None = None,
         allowed_tools: set[str] | None = None,
+        image_data_urls: list[str] | None = None,
     ) -> CoordinatedResponse:
         tool_request = self._deterministic_tool_request(text)
         if tool_request is not None:
@@ -66,13 +67,15 @@ class TurnCoordinator:
                 and schema["function"].get("name") in model_names
             ]
         try:
-            provider_response = self.router.respond(
-                text,
-                provider=provider,
-                tools=model_schemas,
-                context=document_context,
-                conversation_id=conversation_id,
-            )
+            router_arguments = {
+                "provider": provider,
+                "tools": model_schemas,
+                "context": document_context,
+                "conversation_id": conversation_id,
+            }
+            if image_data_urls:
+                router_arguments["image_data_urls"] = image_data_urls
+            provider_response = self.router.respond(text, **router_arguments)
         except ProviderUnavailable as error:
             return CoordinatedResponse(
                 text=f"The selected model provider is unavailable. {error}",

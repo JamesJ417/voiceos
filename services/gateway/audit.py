@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+CLIENT_EVENT_RETENTION = 20_000
+
 
 class AuditStore:
     def __init__(self, path: Path) -> None:
@@ -480,7 +482,13 @@ class AuditStore:
             "INSERT INTO client_events(event_type, payload_json, created_at) VALUES (?, ?, ?)",
             (event_type, _json(payload), _now()),
         )
-        return int(cursor.lastrowid)
+        newest_id = int(cursor.lastrowid)
+        if newest_id % 100 == 0:
+            self._connection.execute(
+                "DELETE FROM client_events WHERE event_id <= ?",
+                (newest_id - CLIENT_EVENT_RETENTION,),
+            )
+        return newest_id
 
     def daily_checkin_status(
         self, checkin_date: str, questions: tuple[str, ...]

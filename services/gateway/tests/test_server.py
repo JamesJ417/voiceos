@@ -11,6 +11,7 @@ from pathlib import Path
 from services.gateway.audit import AuditStore
 from services.gateway.enrollment_qr import build_enrollment_uri
 from services.gateway.providers import ProviderResponse
+from services.gateway.tools import ToolBroker
 from services.gateway.server import (
     _clean_hermes_completion_report,
     _render_conversation_context,
@@ -194,6 +195,72 @@ Second result.
         self.assertEqual(503, status)
         self.assertEqual("file_memory_unavailable", payload["error"])
 
+        capture = json.dumps({"title": "Build a greenhouse", "importance": "normal"}).encode()
+        status, payload = self.request(
+            "POST", "/v1/focus/captures", capture, content_type="application/json"
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        switch = json.dumps({"task_id": "example", "planned_minutes": 5}).encode()
+        status, payload = self.request(
+            "POST", "/v1/focus/switch", switch, content_type="application/json"
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        attention = json.dumps({"due_at": None, "importance": "high"}).encode()
+        status, payload = self.request(
+            "POST",
+            "/v1/tasks/example/attention",
+            attention,
+            content_type="application/json",
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        status, payload = self.request("GET", "/v1/projects?limit=20")
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        status, payload = self.request("GET", "/v1/focus?mode=low_energy")
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        focus = json.dumps({"mode": "five_minute", "planned_minutes": 5}).encode()
+        status, payload = self.request(
+            "POST", "/v1/focus/sessions", focus, content_type="application/json"
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        focus_action = json.dumps({"action": "interrupt"}).encode()
+        status, payload = self.request(
+            "POST",
+            "/v1/focus/sessions/example/actions",
+            focus_action,
+            content_type="application/json",
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        project = json.dumps({"title": "VIC touch panel"}).encode()
+        status, payload = self.request(
+            "POST", "/v1/projects", project, content_type="application/json"
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        assignment = json.dumps({"project_id": None}).encode()
+        status, payload = self.request(
+            "POST",
+            "/v1/tasks/example/project",
+            assignment,
+            content_type="application/json",
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
         create = json.dumps(
             {
                 "title": "Build widget",
@@ -267,6 +334,22 @@ Second result.
         )
         self.assertEqual("completed", service_outcome.status)
         self.assertEqual("ollama", service_outcome.result["service"])
+
+    def test_console_tools_are_narrow_and_need_no_shell_arguments(self) -> None:
+        broker = ToolBroker()
+        delivered: list[str] = []
+        broker.register_console_tools(
+            lambda arguments: delivered.append(str(arguments["tool"]))
+            or {"status": "completed"}
+        )
+        outcome = broker.execute("console_show_weather", {})
+        self.assertEqual("completed", outcome.status)
+        self.assertEqual(["console.show_weather"], delivered)
+        denied = broker.execute(
+            "console.show_weather", {"script": "alert('no')"}
+        )
+        self.assertEqual("denied", denied.status)
+        self.assertEqual("arguments_not_allowed", denied.error)
 
     def test_project_tests_require_approval_without_execution(self) -> None:
         body = json.dumps(
@@ -446,6 +529,17 @@ Second result.
             prepare: dict[str, object] | None = None
             commit: dict[str, object] | None = None
 
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path != "/v1/attachments/attachment-1":
+                    self.send_error(404)
+                    return
+                body = b"\x89PNG\r\n\x1a\nfixture"
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_POST(self) -> None:  # noqa: N802
                 length = int(self.headers.get("Content-Length", "0"))
                 request = json.loads(self.rfile.read(length) or b"{}")
@@ -480,12 +574,14 @@ Second result.
             context: str | None = None
             conversation_id: str | None = None
             provider_hint: str | None = None
+            image_data_urls: list[str] | None = None
 
-            def respond(self, text: str, provider=None, tools=None, context=None, conversation_id=None):
+            def respond(self, text: str, provider=None, tools=None, context=None, conversation_id=None, image_data_urls=None):
                 del text, tools
                 self.context = context
                 self.conversation_id = conversation_id
                 self.provider_hint = provider
+                self.image_data_urls = image_data_urls
                 return ProviderResponse(text="I remember the GPU rig.", provider="ollama")
 
         core = ThreadingHTTPServer(("127.0.0.1", 0), MemoryCoreStub)
@@ -502,6 +598,8 @@ Second result.
                     "session_id": "pixel-session",
                     "text": "What were we discussing?",
                     "provider": "ollama",
+                    "request_id": "image-turn-1",
+                    "attachment_ids": ["attachment-1"],
                 }
             ).encode()
             status, payload = self.request(
@@ -516,7 +614,9 @@ Second result.
             self.assertIn("We are building VoiceOS", router.context or "")
             self.assertEqual("shared-owner-conversation", router.conversation_id)
             self.assertEqual("ollama", router.provider_hint)
+            self.assertTrue((router.image_data_urls or [""])[0].startswith("data:image/png;base64,"))
             self.assertEqual("pixel-owner", MemoryCoreStub.prepare["device_id"])  # type: ignore[index]
+            self.assertEqual(["attachment-1"], MemoryCoreStub.prepare["attachment_ids"])  # type: ignore[index]
             self.assertEqual("I remember the GPU rig.", MemoryCoreStub.commit["response_text"])  # type: ignore[index]
             self.assertEqual("ollama", MemoryCoreStub.commit["provider"])  # type: ignore[index]
         finally:
@@ -525,6 +625,52 @@ Second result.
             core.shutdown()
             core.server_close()
             thread.join(timeout=2)
+
+    def test_attachment_content_proxy_preserves_binary_bytes(self) -> None:
+        image = b"\x89PNG\r\n\x1a\nvoiceos-test-image"
+
+        class AttachmentStub(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                if self.path != "/v1/attachments/attachment-1":
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "private, max-age=300")
+                self.send_header("Content-Length", str(len(image)))
+                self.end_headers()
+                self.wfile.write(image)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), AttachmentStub)
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        try:
+            connection = HTTPConnection(
+                "127.0.0.1", self.server.server_port, timeout=2
+            )
+            connection.request("GET", "/v1/attachments/attachment-1")
+            response = connection.getresponse()
+            body = response.read()
+            self.assertEqual(200, response.status)
+            self.assertEqual("image/png", response.getheader("Content-Type"))
+            self.assertEqual(image, body)
+            connection.close()
+        finally:
+            self.server.memory_url = original_memory_url
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_attachment_turn_requires_idempotency_key(self) -> None:
+        body = json.dumps({"text": "Describe this", "attachment_ids": ["attachment-1"]}).encode()
+        status, payload = self.request("POST", "/v1/turns/text", body, content_type="application/json")
+        self.assertEqual(400, status)
+        self.assertEqual("request_id_required_for_attachments", payload["error"])
 
     def test_health_text_turn_uses_deterministic_tool(self) -> None:
         body = json.dumps({"text": "Check system health"}).encode()
@@ -598,6 +744,131 @@ Second result.
                 "Add a task to call the dentist for 15 minutes",
                 core.seen["text"],  # type: ignore[index,attr-defined]
             )
+        finally:
+            self.server.memory_url = original_memory_url
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_spoken_console_command_is_dispatched_to_rust_before_the_model(self) -> None:
+        class ConsoleCoreStub(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(length) or b"{}")
+                if self.path == "/internal/v1/console/command":
+                    self.server.seen = request  # type: ignore[attr-defined]
+                    payload = {
+                        "handled": True,
+                        "response_text": "Showing weather on VIC Console.",
+                        "provider": "deterministic-console",
+                        "tool_calls": [
+                            {"name": "console.show_weather", "status": "completed"}
+                        ],
+                        "approvals": [],
+                        "results": [
+                            {"command": "show_weather", "status": "completed"}
+                        ],
+                        "errors": [],
+                        "evidence": {"console_command_delivered": True},
+                    }
+                else:
+                    payload = {}
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), ConsoleCoreStub)
+        core.seen = None  # type: ignore[attr-defined]
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        try:
+            body = json.dumps({"text": "Show the weather"}).encode()
+            status, payload = self.request(
+                "POST", "/v1/turns/text", body, content_type="application/json"
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("deterministic-console", payload["provider"])
+            self.assertEqual("console.show_weather", payload["tool_calls"][0]["name"])
+            self.assertTrue(payload["evidence"]["console_command_delivered"])
+            self.assertEqual(
+                "Show the weather", core.seen["text"]  # type: ignore[index,attr-defined]
+            )
+        finally:
+            self.server.memory_url = original_memory_url
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_spoken_focus_command_is_dispatched_to_rust_before_the_model(self) -> None:
+        class FocusCoreStub(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(length) or b"{}")
+                if self.path == "/internal/v1/focus/command":
+                    self.server.seen = request  # type: ignore[attr-defined]
+                    payload = {
+                        "handled": True,
+                        "response_text": "Only do this next: put the appointment number in the form.",
+                        "provider": "deterministic-focus",
+                        "tool_calls": [{"name": "focus.next", "status": "completed"}],
+                        "approvals": [],
+                        "results": [{"focus": {"priorities": []}}],
+                        "errors": [],
+                        "evidence": {"focus_state_changed": False},
+                    }
+                else:
+                    payload = {}
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), FocusCoreStub)
+        core.seen = None  # type: ignore[attr-defined]
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        try:
+            body = json.dumps({"text": "What should I do now?"}).encode()
+            status, payload = self.request(
+                "POST", "/v1/turns/text", body, content_type="application/json"
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("deterministic-focus", payload["provider"])
+            self.assertEqual("focus.next", payload["tool_calls"][0]["name"])
+            self.assertFalse(payload["evidence"]["focus_state_changed"])
+            self.assertEqual(
+                "What should I do now?", core.seen["text"]  # type: ignore[index,attr-defined]
+            )
+            capture = json.dumps(
+                {"text": "Park this idea build a mobile greenhouse"}
+            ).encode()
+            status, payload = self.request(
+                "POST", "/v1/turns/text", capture, content_type="application/json"
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("deterministic-focus", payload["provider"])
+            self.assertEqual(
+                "Park this idea build a mobile greenhouse",
+                core.seen["text"],  # type: ignore[index,attr-defined]
+            )
+            status, recovery = self.request("GET", "/v1/events/recovery?after=0")
+            self.assertEqual(200, status)
+            self.assertIn("focus.updated", {event["type"] for event in recovery["events"]})
         finally:
             self.server.memory_url = original_memory_url
             core.shutdown()

@@ -1,4 +1,4 @@
-"""Always-on local wake-word bridge for Omarchy Voice."""
+"""Always-on local wake-word bridge for VIC through VoiceOS."""
 
 from __future__ import annotations
 
