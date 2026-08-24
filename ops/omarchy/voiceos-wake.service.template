@@ -1,5 +1,5 @@
 [Unit]
-Description=Omarchy Voice local Hey VIC listener
+Description=VIC local voice interface and Hey VIC listener
 After=pipewire.service wireplumber.service voiceos-gateway.service
 Wants=voiceos-gateway.service
 

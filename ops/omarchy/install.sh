@@ -25,7 +25,7 @@ repo_root="${repo_root:-$default_repo_root}"
 repo_root="$(realpath "$repo_root")"
 
 if [[ ! -f "$repo_root/services/gateway/server.py" ]]; then
-  echo "Not an Omarchy Voice repository: $repo_root" >&2
+  echo "Not a VoiceOS repository for Omarchy Touch: $repo_root" >&2
   exit 2
 fi
 if [[ "$repo_root" == *'|'* || "$repo_root" == *$'\n'* ]]; then
@@ -60,7 +60,7 @@ hermes_dir="$(dirname "$hermes_bin")"
 
 npm_bin="$(command -v npm || true)"
 if [[ -z "$npm_bin" ]]; then
-  echo "Node.js and npm are required for the Omarchy Voice talk interface." >&2
+  echo "Node.js and npm are required for the Touch interface." >&2
   exit 1
 fi
 npm_dir="$(dirname "$npm_bin")"
@@ -164,21 +164,21 @@ desktop_file="$applications_dir/omarchy-voice.desktop"
 {
   printf '%s\n' '[Desktop Entry]'
   printf '%s\n' 'Type=Application'
-  printf '%s\n' 'Name=VIC Panel'
-  printf '%s\n' 'Comment=Open the full-screen VIC workspace'
+  printf '%s\n' 'Name=Omarchy Touch'
+  printf '%s\n' 'Comment=Open Touch, the touchscreen system interface for VoiceOS'
   printf 'Exec=%s\n' "$bin_dir/voiceos-talk"
   printf '%s\n' 'Icon=audio-input-microphone'
   printf '%s\n' 'Terminal=false'
   printf '%s\n' 'Categories=Utility;Audio;'
-  printf '%s\n' 'Keywords=VIC;voice;assistant;Hermes;Codex;'
+  printf '%s\n' 'Keywords=Omarchy;Touch;VoiceOS;VIC;voice;assistant;Hermes;Codex;'
 } >"$desktop_file"
 
 native_desktop_file="$applications_dir/omarchy-voice-native.desktop"
 {
   printf '%s\n' '[Desktop Entry]'
   printf '%s\n' 'Type=Application'
-  printf '%s\n' 'Name=VIC Panel Native Preview'
-  printf '%s\n' 'Comment=Native Rust interface for Omarchy Voice'
+  printf '%s\n' 'Name=Touch Native Preview'
+  printf '%s\n' 'Comment=Native Rust preview for the Touch system interface'
   printf 'Exec=%s\n' "$bin_dir/voiceos-native"
   printf '%s\n' 'Terminal=false'
   printf '%s\n' 'Categories=Utility;Accessibility;'
@@ -207,16 +207,16 @@ if '"omarchy-voice"' not in text:
     entry = (
         f'{comma}\n  "omarchy-voice": {{\n'
         '    "icon": "󰍬",\n'
-        '    "label": "VIC Panel",\n'
+        '    "label": "Omarchy Touch",\n'
         '    "action": "voiceos-talk",\n'
-        '    "aliases": ["vic", "voice", "omarchy voice"],\n'
-        '    "description": "Open the full-screen VIC workspace"\n'
+        '    "aliases": ["vic", "voice", "omarchy voice", "omarchy touch", "touch"],\n'
+        '    "description": "Touchscreen interface for VoiceOS; voice through VIC"\n'
         '  }\n'
     )
     path.write_text(body.rstrip() + entry + text[closing:], encoding="utf-8")
 else:
-    text = re.sub(r'("omarchy-voice"\s*:\s*\{.*?"label"\s*:\s*)"[^"]*"', r'\1"VIC Panel"', text, count=1, flags=re.S)
-    text = re.sub(r'("omarchy-voice"\s*:\s*\{.*?"description"\s*:\s*)"[^"]*"', r'\1"Open the full-screen VIC workspace"', text, count=1, flags=re.S)
+    text = re.sub(r'("omarchy-voice"\s*:\s*\{.*?"label"\s*:\s*)"[^"]*"', r'\1"Omarchy Touch"', text, count=1, flags=re.S)
+    text = re.sub(r'("omarchy-voice"\s*:\s*\{.*?"description"\s*:\s*)"[^"]*"', r'\1"Touchscreen interface for VoiceOS; voice through VIC"', text, count=1, flags=re.S)
     path.write_text(text, encoding="utf-8")
 PY
 
@@ -225,9 +225,9 @@ omarchy menu refresh >/dev/null
 
 hypr_config="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/hyprland.lua"
 hypr_autostart="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/autostart.lua"
-if [[ -f "$hypr_config" ]] && ! grep -q 'Keep VIC Panel as a dedicated full-screen' "$hypr_config"; then
+if [[ -f "$hypr_config" ]] && ! grep -Eq 'Keep (VIC Panel|Omarchy Touch|the Touch system interface) as a dedicated full-screen' "$hypr_config"; then
   {
-    printf '\n%s\n' '-- Keep VIC Panel as a dedicated full-screen Omarchy workspace.'
+    printf '\n%s\n' '-- Keep the Touch system interface as a dedicated full-screen Omarchy workspace.'
     printf '%s\n' 'o.window({ class = "^chrome-127.*Default$" }, {'
     printf '%s\n' '  tag = "-default-opacity",'
     printf '%s\n' '  workspace = "name:vic-panel silent",'
@@ -245,7 +245,11 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-marker = "-- Keep VIC Panel as a dedicated full-screen Omarchy workspace."
+marker = next((item for item in (
+    "-- Keep the Touch system interface as a dedicated full-screen Omarchy workspace.",
+    "-- Keep Omarchy Touch as a dedicated full-screen Omarchy workspace.",
+    "-- Keep VIC Panel as a dedicated full-screen Omarchy workspace.",
+) if item in text), "")
 before, separator, after = text.partition(marker)
 if separator and 'workspace = "name:vic-panel silent"' not in after:
     after = after.replace(
@@ -256,7 +260,7 @@ if separator and 'workspace = "name:vic-panel silent"' not in after:
     path.write_text(before + separator + after, encoding="utf-8")
 PY
 fi
-if [[ -f "$hypr_config" ]] && grep -q 'Keep VIC Panel as a dedicated full-screen' "$hypr_config" \
+if [[ -f "$hypr_config" ]] && grep -Eq 'Keep (VIC Panel|Omarchy Touch|the Touch system interface) as a dedicated full-screen' "$hypr_config" \
   && ! grep -q 'fullscreen_state = "2 2"' "$hypr_config"; then
   "$python_bin" - "$hypr_config" <<'PY'
 from pathlib import Path
@@ -264,7 +268,11 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-marker = "-- Keep VIC Panel as a dedicated full-screen Omarchy workspace."
+marker = next((item for item in (
+    "-- Keep the Touch system interface as a dedicated full-screen Omarchy workspace.",
+    "-- Keep Omarchy Touch as a dedicated full-screen Omarchy workspace.",
+    "-- Keep VIC Panel as a dedicated full-screen Omarchy workspace.",
+) if item in text), "")
 before, separator, after = text.partition(marker)
 if separator and 'fullscreen_state = "2 2"' not in after:
     after = after.replace(
@@ -277,13 +285,13 @@ PY
 fi
 if [[ -f "$hypr_autostart" ]] && ! grep -q 'o.launch_on_start("voiceos-talk")' "$hypr_autostart"; then
   {
-    printf '\n%s\n' '-- Start the full-screen VIC Panel with each Omarchy desktop session.'
+    printf '\n%s\n' '-- Start Touch with each Omarchy desktop session.'
     printf '%s\n' 'o.launch_on_start("voiceos-talk")'
   } >>"$hypr_autostart"
 fi
 hyprctl reload >/dev/null
 if [[ -n "$(hyprctl configerrors)" ]]; then
-  echo "Hyprland rejected the VIC Panel window rule:" >&2
+  echo "Hyprland rejected the Touch window rule:" >&2
   hyprctl configerrors >&2
   exit 1
 fi
@@ -301,7 +309,7 @@ if ((enable)); then
   systemctl --user restart voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service voiceos-wake.service
   "$bin_dir/voiceosctl" wait
 else
-  echo "Omarchy Voice integration installed but not started."
+  echo "Omarchy Touch is installed but Touch is not started."
   echo "Review $config_dir/gateway.env, then run:"
   echo "  systemctl --user enable --now voiceos-gateway.service"
 fi

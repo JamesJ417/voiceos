@@ -1,5 +1,5 @@
 [Unit]
-Description=Omarchy Voice task and memory authority
+Description=VoiceOS task and memory authority
 After=network-online.target
 Wants=network-online.target
 Before=voiceos-gateway.service

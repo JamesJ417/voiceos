@@ -1,8 +1,11 @@
-# Omarchy Voice on Omarchy
+# Omarchy Touch for Omarchy OS
 
-This integration runs the Omarchy Voice gateway, Hermes Agent, and an answer-only
-Codex CLI fallback as user services underneath the Omarchy desktop session.
-Hermes is VIC's default agent runtime and uses its configured remote provider;
+Omarchy Touch is an optional add-on for Omarchy OS. **VoiceOS** is its private
+backend and control plane, **VIC** is its Voice Interface Controller, and
+**Touch** is its full-screen touchscreen system interface. VoiceOS runs the
+local gateway, Hermes Agent, and an answer-only Codex CLI fallback as user
+services underneath the Omarchy desktop session. Hermes is the default agent
+runtime behind VIC and uses its configured remote provider;
 no local LLM is required. It requires
 no root account and does not modify packaged Omarchy files.
 
@@ -17,7 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/JamesJ417/voiceos/main/install-omar
 It installs the required Arch and AUR packages through `omarchy pkg`, installs
 Hermes Agent and Codex CLI from their official installers, guides you through
 remote-provider sign-in, downloads a checksum-verified Whisper model, builds the
-web interface, registers all user services, adds Omarchy Voice to the Omarchy
+Touch interface, registers all user services, adds Omarchy Touch to the Omarchy
 menu, enables Tailscale, and runs an end-to-end readiness check.
 
 The upstream installers are downloaded over HTTPS from
@@ -53,7 +56,7 @@ The installer creates:
 - `~/.local/share/applications/omarchy-voice.desktop`
 - `~/.config/omarchy/extensions/omarchy-menu.jsonc` entry
 
-It preserves existing environment and key files. Omarchy Voice talks to Hermes over
+It preserves existing environment and key files. VoiceOS talks to Hermes over
 an authenticated loopback API, and Hermes publicly identifies itself as VIC.
 The authenticated Codex CLI remains available through a private Unix socket. Codex is
 ephemeral, answer-only, read-only, and has its command, web, app, hook, and
@@ -74,7 +77,7 @@ voiceosctl restart
 voiceos-talk
 ```
 
-`voiceos-talk` opens VIC Panel full-screen in Google Chrome. Press **Talk**, allow microphone
+`voiceos-talk` opens Touch full-screen in Google Chrome. Press **Talk**, allow microphone
 access the first time, speak, and press **Done**. Chromium performs speech
 recognition, the gateway sends the transcript to the Hermes-powered VIC agent, and
 the gateway returns the same Ava Neural voice used by the local Hey VIC listener.
@@ -92,11 +95,11 @@ for your first request.
 Wake acknowledgement and error prompts are cached locally for immediate
 playback. Ordinary conversation uses low reasoning latency, while action and
 tool requests retain medium reasoning. Longer work is surfaced through live
-VIC Panel status instead of a repeated spoken holding message. Ordinary chat
-uses the low-latency Luna model, and VIC Panel synthesizes Ava Neural speech
+Touch status instead of a repeated spoken holding message. Ordinary chat
+uses the low-latency Luna model, and VIC synthesizes Ava Neural speech
 one sentence ahead so long answers begin playing sooner.
 
-VIC Panel also renders Hermes activity as a safe live progress trace. It shows
+Touch also renders Hermes activity as a safe live progress trace. It shows
 reasoning phases, animated tool execution, and delegated worker state without
 exposing private chain-of-thought or sensitive tool output.
 
@@ -108,7 +111,7 @@ Tailscale Funnel.
 
 The Omarchy profile enables `computer.run`, allowing Codex to propose exact
 user-level commands and browser launches. Every proposal is inert until the user
-approves its exact argv, working directory, and stated reason in Omarchy Voice. The
+approves its exact argv, working directory, and stated reason in Touch. The
 gateway has write access to the user's home directory, not the protected system
 filesystem. Root operations remain behind the desktop's password prompt.
 

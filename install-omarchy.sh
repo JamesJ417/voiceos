@@ -13,12 +13,12 @@ if ! command -v omarchy >/dev/null || [[ ! -d /usr/share/omarchy ]]; then
   echo "This installer must run from an Omarchy desktop." >&2
   exit 1
 fi
-command -v git >/dev/null || { echo "Git is required by Omarchy Voice." >&2; exit 1; }
+command -v git >/dev/null || { echo "Git is required by VoiceOS." >&2; exit 1; }
 
 mkdir -p "$install_root"
 if [[ -d "$source_dir/.git" ]]; then
   if [[ -n "$(git -C "$source_dir" status --porcelain)" ]]; then
-    echo "Existing Omarchy Voice source has local changes: $source_dir" >&2
+    echo "Existing VoiceOS source has local changes: $source_dir" >&2
     echo "Commit or remove those changes before reinstalling." >&2
     exit 1
   fi

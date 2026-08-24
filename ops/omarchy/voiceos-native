@@ -2,13 +2,27 @@
 set -euo pipefail
 
 project_dir="${VOICEOS_PROJECT_DIR:-$HOME/Work/voiceos}"
-binary="$project_dir/target/release/vic-panel-native"
+browser="$(command -v google-chrome-stable || command -v google-chrome || true)"
 
-systemctl --user start voiceos-hermes.service voiceos-codex.service voiceos-gateway.service
-
-if [[ ! -x "$binary" ]]; then
-  echo "Building the native VIC Panel for the first launch…"
-  cargo build --release --manifest-path "$project_dir/Cargo.toml" -p vic-panel-native
+if [[ -z "$browser" ]]; then
+  echo "Google Chrome is required for Touch." >&2
+  exit 1
 fi
 
-exec "$binary"
+# The kiosk is the canonical panel: it contains the complete command, task,
+# history, system, attachment, approval, and live-activity surfaces. Keep one
+# launcher path so the native-panel shortcut cannot open a reduced UI.
+systemctl --user start voiceos-hermes.service voiceos-codex.service voiceos-gateway.service voiceos-ui.service
+
+for _ in {1..40}; do
+  if curl --fail --silent http://127.0.0.1:3000 >/dev/null; then
+    exec "$browser" \
+      --app=http://127.0.0.1:3000 \
+      --autoplay-policy=no-user-gesture-required \
+      --user-data-dir="${XDG_STATE_HOME:-$HOME/.local/state}/voiceos/chrome-browser"
+  fi
+  sleep 0.25
+done
+
+echo "Touch did not become ready." >&2
+exit 1

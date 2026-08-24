@@ -1,5 +1,5 @@
 [Unit]
-Description=Omarchy Voice Carbon Command interface
+Description=Touch system interface for VoiceOS
 After=network-online.target voiceos-gateway.service
 Wants=network-online.target voiceos-gateway.service
 

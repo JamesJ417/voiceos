@@ -1,5 +1,5 @@
 [Unit]
-Description=Omarchy Voice answer-only Codex CLI bridge
+Description=VoiceOS answer-only Codex CLI bridge
 After=network-online.target
 Wants=network-online.target
 Before=voiceos-gateway.service

@@ -1,5 +1,5 @@
 [Unit]
-Description=Omarchy Voice Hermes agent runtime (VIC)
+Description=VoiceOS Hermes agent runtime
 After=network-online.target
 Wants=network-online.target
 Before=voiceos-gateway.service
@@ -8,6 +8,7 @@ Before=voiceos-gateway.service
 Type=simple
 Environment=HOME=%h
 Environment=HERMES_HOME=%h/.hermes
+Environment=CUA_DRIVER_RS_ENABLE_WAYLAND=1
 Environment=PATH=@@HERMES_PATH@@:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=%h/.config/voiceos/hermes.env
 WorkingDirectory=@@REPO_ROOT@@

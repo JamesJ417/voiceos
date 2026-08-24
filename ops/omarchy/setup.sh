@@ -10,8 +10,9 @@ usage() {
   cat <<'EOF'
 Usage: ops/omarchy/setup.sh [--non-interactive] [--skip-tailscale]
 
-Installs every Omarchy Voice dependency, configures VIC, builds the interface,
-and enables the user services. Run this from a cloned Omarchy Voice repository.
+Installs the Omarchy Touch add-on, configures the VIC voice controller, builds
+the Touch interface, and enables the VoiceOS backend services. Run this from a
+cloned VoiceOS repository.
 EOF
 }
 
@@ -32,7 +33,7 @@ if [[ $EUID -eq 0 ]]; then
   exit 1
 fi
 if ! command -v omarchy >/dev/null || [[ ! -d /usr/share/omarchy ]]; then
-  echo "Omarchy Voice requires an installed Omarchy system." >&2
+  echo "Omarchy Touch requires an installed Omarchy OS system." >&2
   exit 1
 fi
 if ! systemctl --user show-environment >/dev/null 2>&1; then
@@ -47,7 +48,7 @@ trap 'rm -rf -- "$temp_dir"' EXIT
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 
-step "Installing Omarchy Voice system packages"
+step "Installing Omarchy Touch system packages"
 omarchy pkg add git curl python nodejs npm ffmpeg whisper-cpp tailscale jq
 if ! command -v google-chrome-stable >/dev/null; then
   omarchy pkg aur add google-chrome
@@ -81,11 +82,11 @@ if [[ ! -f "$model_path" ]] || ! echo "$WHISPER_MODEL_SHA256  $model_path" | sha
   install -m 0644 "$temp_dir/ggml-base.en.bin" "$model_path"
 fi
 
-step "Building the Omarchy Voice interface"
+step "Building the Touch system interface"
 npm ci --prefix "$repo_root/apps/kiosk"
 npm run build --prefix "$repo_root/apps/kiosk"
 
-step "Building the Omarchy Voice task and memory service"
+step "Building the VoiceOS task and memory service"
 if ! command -v cargo >/dev/null; then
   mise use --global rust@stable
 fi
@@ -122,4 +123,4 @@ fi
 
 step "Running final checks"
 "$script_dir/doctor.sh"
-printf '\nOmarchy Voice is installed. Open the Omarchy menu and choose Omarchy Voice.\n'
+printf '\nOmarchy Touch is installed. Open the Omarchy menu and choose Omarchy Touch.\n'

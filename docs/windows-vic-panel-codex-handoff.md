@@ -1,4 +1,4 @@
-# Windows VIC Panel — Codex handoff
+# Windows Touch — Codex handoff
 
 ## Goal
 
@@ -59,7 +59,7 @@ Rust responsibilities:
 
 UI responsibilities:
 
-- match the VIC Panel visual language, but do not copy Linux-only GTK code;
+- match the Touch visual language, but do not copy Linux-only GTK code;
 - visible connection/listening/thinking/speaking state;
 - conversation history, task status, activity, approvals, and explicit error recovery;
 - no background microphone capture in the first milestone. Start with push-to-talk.
@@ -104,7 +104,7 @@ Codex should work in a clone of this repository, not in a copied source folder. 
 Use this after the server changes have been committed and pushed to a branch that Windows can clone:
 
 ```
-You are implementing the Windows VIC Panel in this repository. Read docs/windows-vic-panel-codex-handoff.md first, then inspect services/voiceos-gateway-rs/src/api/client.rs, services/voiceos-gateway-rs/src/api/conversations.rs, and apps/vic-panel-native/src/main.rs.
+You are implementing the Windows Touch interface in this repository. Read docs/windows-vic-panel-codex-handoff.md first, then inspect services/voiceos-gateway-rs/src/api/client.rs, services/voiceos-gateway-rs/src/api/conversations.rs, and apps/vic-panel-native/src/main.rs.
 
 Create apps/vic-panel-windows as a Tauri 2 Windows app with a Rust backend. Implement only milestone 1 from the handoff. Use a typed client contract, bearer-token storage via Windows Credential Manager, UUID request ids, Tailscale HTTPS-only validation, bootstrap version validation, active conversation loading, text turns, and resumable SSE conversation updates. Do not implement enrollment-session creation, wake-word listening, always-on microphone capture, provider credentials, tool execution, or any public-network path. Add focused tests and run the relevant Rust and frontend tests. Do not commit changes.
 ```
