@@ -1416,6 +1416,7 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "axum",
+ "chrono",
  "futures-util",
  "rusqlite",
  "serde",
@@ -1423,6 +1424,7 @@ dependencies = [
  "sha2",
  "tokio",
  "urlencoding",
+ "uuid",
  "voiceos-core",
  "voiceos-ontology",
 ]

@@ -20,6 +20,10 @@ pub enum ProviderError {
 
 pub trait Provider: Send + Sync {
     fn name(&self) -> &str;
+    /// Providers must opt in only when their adapter sends image bytes to the model.
+    fn supports_vision(&self) -> bool {
+        false
+    }
     fn complete(&self, request: &ProviderRequest) -> Result<ProviderCompletion, ProviderError>;
 }
 

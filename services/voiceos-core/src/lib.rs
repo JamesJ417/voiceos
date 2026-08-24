@@ -6,6 +6,7 @@ mod outreach;
 mod provider;
 mod schema;
 mod skill_proposal;
+mod sleep_cycle;
 mod store;
 mod task_initiative;
 mod task_progress;
@@ -18,9 +19,9 @@ pub use model::{
     ArtifactRecord, AutomationProposal, ChatMessage, ConversationContext, ConversationFloor,
     ConversationMessage, DocumentRecord, ExecutionEvent, GoalRecord, JobRecord, Memory,
     OutreachPolicy, OutreachRecord, ProjectRecord, ProviderCompletion, ProviderRequest,
-    ProviderRunMetric, Role, SkillProposal, SkillUsage, TaskArtifactRecord, TaskBlockerRecord,
-    TaskDetail, TaskHandoffRecord, TaskInitiative, TaskProgress, TaskRecord, TaskStepRecord,
-    ToolCall, ToolDefinition, Usage,
+    ProviderRunMetric, Role, SkillProposal, SkillUsage, SleepCycleChange, SleepCycleRecord,
+    SleepCycleReport, TaskArtifactRecord, TaskBlockerRecord, TaskDetail, TaskHandoffRecord,
+    TaskInitiative, TaskProgress, TaskRecord, TaskStepRecord, ToolCall, ToolDefinition, Usage,
 };
 pub use provider::{
     CodexBridgeProvider, MockProvider, OllamaProvider, Provider, ProviderError, ProviderRouter,

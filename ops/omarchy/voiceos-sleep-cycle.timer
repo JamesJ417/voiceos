@@ -1,0 +1,11 @@
+[Unit]
+Description=Run VIC memory consolidation nightly at 2 AM Eastern
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 America/New_York
+Persistent=true
+AccuracySec=1min
+Unit=voiceos-sleep-cycle.service
+
+[Install]
+WantedBy=timers.target

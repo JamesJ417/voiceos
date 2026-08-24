@@ -33,6 +33,51 @@ pub struct Memory {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SleepCycleRecord {
+    pub id: String,
+    pub owner_id: String,
+    pub idempotency_key: String,
+    pub mode: String,
+    pub dry_run: bool,
+    pub status: String,
+    pub previous_cycle_id: Option<String>,
+    pub event_watermark: i64,
+    pub message_watermark: i64,
+    pub events_inspected: u64,
+    pub messages_inspected: u64,
+    pub memories_before: u64,
+    pub memories_after: u64,
+    pub proposed_changes: u64,
+    pub committed_changes: u64,
+    pub summary: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SleepCycleChange {
+    pub id: String,
+    pub sleep_cycle_id: String,
+    pub operation: String,
+    pub memory_kind: String,
+    pub title: String,
+    pub detail: String,
+    pub status: String,
+    pub confidence: Option<f64>,
+    pub evidence: serde_json::Value,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SleepCycleReport {
+    pub cycle: SleepCycleRecord,
+    pub changes: Vec<SleepCycleChange>,
+    pub new_evidence_count: u64,
+    pub durable_memory_delta: i64,
+    pub proposed_change_delta: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentRecord {
     pub id: String,
     pub filename: String,

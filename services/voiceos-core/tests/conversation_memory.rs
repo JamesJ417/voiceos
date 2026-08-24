@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use tempfile::tempdir;
 use voiceos_core::{
     ConversationEngine, ConversationStore, EngineConfig, Provider, ProviderCompletion,
-    ProviderError, ProviderRequest, Role, Usage,
+    ProviderError, ProviderRequest, Role, StoreError, Usage,
 };
 
 #[derive(Default)]
@@ -105,6 +105,73 @@ fn owner_shares_one_ordered_conversation_across_devices_and_retries() {
     assert_eq!(messages[0].origin_device_id.as_deref(), Some("pixel"));
     assert_eq!(messages[1].origin_device_id.as_deref(), Some("hp-kiosk"));
     assert_eq!(messages[2].role, Role::Assistant);
+}
+
+#[test]
+fn finalized_owner_attachment_is_claimed_once_by_an_idempotent_user_turn() {
+    let store = Arc::new(ConversationStore::in_memory().unwrap());
+    store.migrate_devices_to_owner("owner-1").unwrap();
+    let engine = ConversationEngine::new(store.clone());
+    {
+        let connection = store.connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO attachments(attachment_id, upload_id, owner_id, filename, media_type, byte_size, sha256, bytes, status, created_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    "attachment-ready",
+                    "upload-1",
+                    "owner-1",
+                    "photo.png",
+                    "image/png",
+                    3,
+                    "abc",
+                    b"png".as_slice(),
+                    "ready",
+                    "2026-08-23T00:00:00Z",
+                ],
+            )
+            .unwrap();
+    }
+
+    let (conversation_id, _) = engine
+        .prepare_owner_turn_with_attachments(
+            "owner-1",
+            "pixel",
+            Some("phone-session"),
+            "What is in this image?",
+            Some("request-with-image"),
+            &["attachment-ready".to_owned()],
+        )
+        .unwrap();
+    engine
+        .prepare_owner_turn_with_attachments(
+            "owner-1",
+            "pixel",
+            Some("phone-session"),
+            "What is in this image?",
+            Some("request-with-image"),
+            &["attachment-ready".to_owned()],
+        )
+        .unwrap();
+
+    let connection = store.connection().unwrap();
+    let user_message_id: i64 = connection
+        .query_row(
+            "SELECT message_id FROM messages WHERE conversation_id=?1 AND request_id=?2",
+            rusqlite::params![&conversation_id, "request-with-image"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let claims: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM message_attachments WHERE message_id=?1 AND attachment_id=?2",
+            rusqlite::params![user_message_id, "attachment-ready"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(claims, 1);
+    drop(connection);
+    assert_eq!(store.message_count(&conversation_id).unwrap(), 1);
 }
 
 #[test]
@@ -230,13 +297,13 @@ fn legacy_python_audit_can_be_replayed_idempotently() {
     let store = ConversationStore::in_memory().unwrap();
     assert_eq!(
         store
-            .import_legacy_audit(&legacy_path, "legacy-device")
+            .import_legacy_audit(&legacy_path, "legacy-device", "legacy-device")
             .unwrap(),
         1
     );
     assert_eq!(
         store
-            .import_legacy_audit(&legacy_path, "legacy-device")
+            .import_legacy_audit(&legacy_path, "legacy-device", "legacy-device")
             .unwrap(),
         0
     );
@@ -291,4 +358,77 @@ fn uploaded_documents_are_private_searchable_and_deletable() {
     assert!(store.delete_document("pixel", &reference.id).unwrap());
     assert!(!store.delete_document("pixel", &reference.id).unwrap());
     assert_eq!(store.list_documents("pixel").unwrap(), vec![profile]);
+}
+
+#[test]
+fn conflicting_owner_for_an_active_device_returns_an_explicit_error() {
+    let store = ConversationStore::in_memory().unwrap();
+    store
+        .resolve_owner_conversation("primary-owner", "legacy-audit", None)
+        .unwrap();
+
+    let error = store
+        .resolve_owner_conversation("different-owner", "legacy-audit", Some("new-session"))
+        .unwrap_err();
+
+    assert!(
+        matches!(error, StoreError::InvalidInput(message) if message.contains("active device belongs to a different owner"))
+    );
+}
+
+#[test]
+fn importing_legacy_turns_reuses_the_primary_owner_conversation() {
+    let directory = tempdir().unwrap();
+    let legacy_path = directory.path().join("audit.sqlite3");
+    let legacy = Connection::open(&legacy_path).unwrap();
+    legacy
+        .execute_batch(
+            "CREATE TABLE turns(id INTEGER PRIMARY KEY, session_id TEXT NOT NULL, transcript TEXT NOT NULL, response_text TEXT NOT NULL, provider TEXT NOT NULL, created_at TEXT NOT NULL);",
+        )
+        .unwrap();
+    legacy
+        .execute(
+            "INSERT INTO turns VALUES(1, 'legacy-session', 'remember this', 'recorded', 'mock', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    drop(legacy);
+
+    let store = ConversationStore::in_memory().unwrap();
+    store.migrate_devices_to_owner("primary-owner").unwrap();
+    let conversation_id = store
+        .resolve_owner_conversation("primary-owner", "legacy-audit", None)
+        .unwrap();
+
+    assert_eq!(
+        store
+            .import_legacy_audit(&legacy_path, "primary-owner", "legacy-audit")
+            .unwrap(),
+        1
+    );
+    let connection = store.connection().unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT conversation_id FROM conversation_aliases WHERE device_id='legacy-audit' AND client_session_id='legacy:legacy-session'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        conversation_id,
+    );
+    let imported_messages: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id=?1",
+            [&conversation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(imported_messages, 2);
+    let violations: i64 = connection
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(violations, 0);
 }

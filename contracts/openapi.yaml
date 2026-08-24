@@ -615,6 +615,69 @@ paths:
         "200": { description: Applied action and refreshed task-detail projection }
         "400": { description: Invalid or unsupported task action }
         "404": { description: "Task, step, or blocker does not exist" }
+  /v1/uploads:
+    post:
+      operationId: createImageUpload
+      parameters:
+        - in: header
+          name: X-VoiceOS-File-Name
+          required: true
+          schema: { type: string }
+        - in: header
+          name: X-VoiceOS-Upload-Length
+          required: true
+          schema: { type: integer, format: int64, minimum: 1, maximum: 26214400 }
+        - in: header
+          name: X-VoiceOS-Upload-SHA256
+          required: true
+          schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+      requestBody:
+        required: false
+        content:
+          image/jpeg: {}
+          image/png: {}
+          image/webp: {}
+          image/gif: {}
+      responses:
+        "201": { description: Resumable image upload session created }
+        "400": { description: Upload metadata is invalid }
+        "401": { description: Device authentication required }
+        "413": { description: Image exceeds 25 MiB }
+        "415": { description: Image type is not supported }
+  /v1/uploads/{upload_id}/chunks/{offset}:
+    put:
+      operationId: uploadImageChunk
+      parameters:
+        - in: path
+          name: upload_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: path
+          name: offset
+          required: true
+          schema: { type: integer, format: int64, minimum: 0 }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: {}
+      responses:
+        "200": { description: Chunk accepted or idempotently replayed }
+        "401": { description: Device authentication required }
+        "409": { description: Chunk conflicts with bytes already received }
+  /v1/uploads/{upload_id}/finalize:
+    post:
+      operationId: finalizeImageUpload
+      parameters:
+        - in: path
+          name: upload_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Existing finalized attachment returned }
+        "201": { description: Image finalized and stored }
+        "401": { description: Device authentication required }
+        "409": { description: Upload is incomplete }
+        "422": { description: SHA-256 does not match the declared hash }
   /v1/files:
     get:
       operationId: listKnowledgeFiles
@@ -871,6 +934,19 @@ paths:
                 provider:
                   type: string
                   description: Optional explicit provider hint for trusted clients.
+                attachment_ids:
+                  type: array
+                  description: Finalized owner-scoped image attachment IDs. Rejected when the selected provider has no vision adapter.
+                  items: { type: string, format: uuid }
+                attachments:
+                  type: array
+                  description: Contract-compatible image references; mutually exclusive with attachment_ids.
+                  items:
+                    type: object
+                    required: [attachment_id]
+                    properties:
+                      attachment_id: { type: string, format: uuid }
+                      purpose: { type: string, enum: [input_image], default: input_image }
       responses:
         "200":
           description: Completed text turn
@@ -879,7 +955,9 @@ paths:
               schema:
                 $ref: "#/components/schemas/Turn"
         "400":
-          description: Invalid JSON or missing text
+          description: Invalid JSON, missing text, or invalid attachment reference
+        "422":
+          description: The selected provider cannot consume image input (error `vision_not_supported`)
 components:
   securitySchemes:
     deviceBearer:

@@ -8,11 +8,13 @@ mod health;
 mod ontology;
 mod outreach;
 mod skills;
+mod sleep_cycles;
 mod tasks;
 mod turns;
+mod uploads;
 
 use axum::Router;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 
 use crate::state::AppState;
 
@@ -38,6 +40,20 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/skills/proposals", get(skills::list_proposals))
         .route("/v1/skills", get(skills::list_skills))
         .route("/v1/skills/usages", get(skills::list_usages))
+        .route("/v1/uploads", post(uploads::create))
+        .route(
+            "/v1/uploads/{upload_id}/chunks/{offset}",
+            put(uploads::chunk),
+        )
+        .route("/v1/uploads/{upload_id}/finalize", post(uploads::finalize))
+        .route(
+            "/v1/memory/sleep-cycles",
+            get(sleep_cycles::list).post(sleep_cycles::start),
+        )
+        .route(
+            "/v1/memory/sleep-cycles/{sleep_cycle_id}",
+            get(sleep_cycles::detail),
+        )
         .route(
             "/v1/skills/usages/{usage_id}/feedback",
             post(skills::review_usage),

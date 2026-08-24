@@ -1,0 +1,20 @@
+[Unit]
+Description=Run VIC nightly memory sleep cycle
+After=network-online.target voiceos-core.service
+Wants=network-online.target voiceos-core.service
+
+[Service]
+Type=oneshot
+Environment=VOICEOS_TIME_ZONE=America/New_York
+ExecStart=/home/vic/Work/voiceos-sleep-cycle/ops/omarchy/voiceos-sleep-cycle
+UMask=0077
+StateDirectory=voiceos/sleep-cycles
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/voiceos/sleep-cycles
+
+[Install]
+WantedBy=default.target

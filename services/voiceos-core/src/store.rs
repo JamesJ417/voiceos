@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
@@ -52,7 +53,7 @@ impl ConversationStore {
         Ok(store)
     }
 
-    pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
+    pub fn connection(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
         self.connection.lock().map_err(|_| StoreError::LockPoisoned)
     }
 
@@ -136,6 +137,21 @@ impl ConversationStore {
         let now = Utc::now().to_rfc3339();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
+        let active_device_owner: Option<String> = transaction
+            .query_row(
+                "SELECT owner_id FROM conversations WHERE device_id=?1 AND status='active'",
+                [device_id.trim()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if active_device_owner
+            .as_deref()
+            .is_some_and(|existing_owner| existing_owner != owner_id.trim())
+        {
+            return Err(StoreError::InvalidInput(
+                "active device belongs to a different owner".to_owned(),
+            ));
+        }
         transaction.execute(
             "INSERT INTO owners(owner_id, created_at, updated_at) VALUES(?1, ?2, ?2) ON CONFLICT(owner_id) DO UPDATE SET updated_at=excluded.updated_at",
             params![owner_id.trim(), now],
@@ -166,6 +182,125 @@ impl ConversationStore {
                 params![device_id, alias.trim(), conversation_id, now],
             )?;
         }
+        transaction.commit()?;
+        Ok(conversation_id)
+    }
+
+    pub fn append_owner_user_message_with_attachments(
+        &self,
+        owner_id: &str,
+        device_id: &str,
+        client_session_id: Option<&str>,
+        content: &str,
+        request_id: Option<&str>,
+        attachment_ids: &[String],
+    ) -> Result<String, StoreError> {
+        if owner_id.trim().is_empty() || device_id.trim().is_empty() {
+            return Err(StoreError::InvalidInput(
+                "owner_id and device_id are required".to_owned(),
+            ));
+        }
+        if attachment_ids.is_empty()
+            || attachment_ids
+                .iter()
+                .any(|attachment_id| attachment_id.trim().is_empty())
+        {
+            return Err(StoreError::InvalidInput(
+                "attachment_ids are required".to_owned(),
+            ));
+        }
+        let unique_attachment_ids = attachment_ids.iter().collect::<HashSet<_>>();
+        if unique_attachment_ids.len() != attachment_ids.len() {
+            return Err(StoreError::InvalidInput(
+                "duplicate_attachment_id".to_owned(),
+            ));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        for attachment_id in attachment_ids {
+            let attachment: Option<(String, String)> = transaction
+                .query_row(
+                    "SELECT owner_id, status FROM attachments WHERE attachment_id=?1",
+                    [attachment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            match attachment {
+                Some((attachment_owner, status))
+                    if attachment_owner == owner_id.trim() && status == "ready" => {}
+                _ => {
+                    return Err(StoreError::InvalidInput("attachment_not_found".to_owned()));
+                }
+            }
+        }
+
+        transaction.execute(
+            "INSERT INTO owners(owner_id, created_at, updated_at) VALUES(?1, ?2, ?2) ON CONFLICT(owner_id) DO UPDATE SET updated_at=excluded.updated_at",
+            params![owner_id.trim(), now],
+        )?;
+        transaction.execute(
+            "INSERT INTO devices(device_id, created_at, last_seen_at) VALUES(?1, ?2, ?2) ON CONFLICT(device_id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
+            params![device_id, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO owner_devices(owner_id, device_id, enrolled_at) VALUES(?1, ?2, ?3) ON CONFLICT(device_id) DO UPDATE SET owner_id=excluded.owner_id, revoked_at=NULL",
+            params![owner_id.trim(), device_id, now],
+        )?;
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT conversation_id FROM conversations WHERE owner_id=?1 AND status='active'",
+                [owner_id.trim()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let conversation_id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
+        transaction.execute(
+            "INSERT OR IGNORE INTO conversations(conversation_id, device_id, status, created_at, updated_at, owner_id) VALUES(?1, ?2, 'active', ?3, ?3, ?4)",
+            params![conversation_id, device_id, now, owner_id.trim()],
+        )?;
+        if let Some(alias) = client_session_id.filter(|alias| !alias.trim().is_empty()) {
+            transaction.execute(
+                "INSERT INTO conversation_aliases(device_id, client_session_id, conversation_id, first_seen_at) VALUES(?1, ?2, ?3, ?4) ON CONFLICT(device_id, client_session_id) DO UPDATE SET conversation_id=excluded.conversation_id",
+                params![device_id, alias.trim(), conversation_id, now],
+            )?;
+        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO messages(conversation_id, role, content, provider, created_at, origin_device_id, request_id) VALUES(?1, 'user', ?2, NULL, ?3, ?4, ?5)",
+            params![conversation_id, content, now, device_id, request_id],
+        )?;
+        let message_id: i64 = if let Some(request_id) = request_id {
+            transaction.query_row(
+                "SELECT message_id FROM messages WHERE conversation_id=?1 AND request_id=?2",
+                params![conversation_id, request_id],
+                |row| row.get(0),
+            )?
+        } else {
+            transaction.last_insert_rowid()
+        };
+        for attachment_id in attachment_ids {
+            let claimed_message: Option<i64> = transaction
+                .query_row(
+                    "SELECT message_id FROM message_attachments WHERE attachment_id=?1",
+                    [attachment_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if claimed_message.is_some_and(|claimed| claimed != message_id) {
+                return Err(StoreError::InvalidInput(
+                    "attachment_already_claimed".to_owned(),
+                ));
+            }
+            transaction.execute(
+                "INSERT OR IGNORE INTO message_attachments(message_id, attachment_id, purpose) VALUES(?1, ?2, 'input_image')",
+                params![message_id, attachment_id],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE conversations SET updated_at=?2 WHERE conversation_id=?1",
+            params![conversation_id, now],
+        )?;
         transaction.commit()?;
         Ok(conversation_id)
     }
@@ -702,6 +837,7 @@ impl ConversationStore {
     pub fn import_legacy_audit(
         &self,
         legacy_path: impl AsRef<Path>,
+        owner_id: &str,
         device_id: &str,
     ) -> Result<usize, StoreError> {
         let source_path = legacy_path.as_ref().to_string_lossy().to_string();
@@ -732,8 +868,11 @@ impl ConversationStore {
             if already_imported {
                 continue;
             }
-            let conversation_id =
-                self.resolve_conversation(device_id, Some(&format!("legacy:{session_id}")))?;
+            let conversation_id = self.resolve_owner_conversation(
+                owner_id,
+                device_id,
+                Some(&format!("legacy:{session_id}")),
+            )?;
             let connection = self.connection()?;
             let transaction = connection.unchecked_transaction()?;
             transaction.execute(

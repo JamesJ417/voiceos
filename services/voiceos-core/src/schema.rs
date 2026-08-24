@@ -355,6 +355,69 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS provider_runs_owner_idx
             ON provider_runs(owner_id, provider_run_id DESC);
+        CREATE TABLE IF NOT EXISTS upload_sessions (
+            upload_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, filename TEXT NOT NULL,
+            media_type TEXT NOT NULL, byte_size INTEGER NOT NULL, sha256 TEXT NOT NULL,
+            received_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'created',
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS upload_chunks (
+            upload_id TEXT NOT NULL, offset INTEGER NOT NULL, bytes BLOB NOT NULL,
+            PRIMARY KEY(upload_id, offset), FOREIGN KEY(upload_id) REFERENCES upload_sessions(upload_id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS attachments (
+            attachment_id TEXT PRIMARY KEY, upload_id TEXT NOT NULL UNIQUE, owner_id TEXT NOT NULL,
+            filename TEXT NOT NULL, media_type TEXT NOT NULL, byte_size INTEGER NOT NULL,
+            sha256 TEXT NOT NULL, bytes BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'ready',
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS message_attachments (
+            message_id INTEGER NOT NULL,
+            attachment_id TEXT NOT NULL UNIQUE,
+            purpose TEXT NOT NULL DEFAULT 'input_image',
+            PRIMARY KEY(message_id, attachment_id),
+            FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE CASCADE,
+            FOREIGN KEY(attachment_id) REFERENCES attachments(attachment_id) ON DELETE RESTRICT
+        );
+        CREATE TABLE IF NOT EXISTS sleep_cycles (
+            sleep_cycle_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'dry_run' CHECK(mode = 'dry_run'),
+            status TEXT NOT NULL DEFAULT 'completed' CHECK(status IN ('running', 'completed', 'failed')),
+            previous_cycle_id TEXT,
+            event_watermark INTEGER NOT NULL DEFAULT 0,
+            message_watermark INTEGER NOT NULL DEFAULT 0,
+            events_inspected INTEGER NOT NULL DEFAULT 0,
+            messages_inspected INTEGER NOT NULL DEFAULT 0,
+            memories_before INTEGER NOT NULL DEFAULT 0,
+            memories_after INTEGER NOT NULL DEFAULT 0,
+            proposed_changes INTEGER NOT NULL DEFAULT 0,
+            committed_changes INTEGER NOT NULL DEFAULT 0,
+            summary TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(previous_cycle_id) REFERENCES sleep_cycles(sleep_cycle_id),
+            UNIQUE(owner_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS sleep_cycles_owner_created_idx
+            ON sleep_cycles(owner_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS sleep_cycle_changes (
+            change_id TEXT PRIMARY KEY,
+            sleep_cycle_id TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN ('add', 'reinforce', 'link', 'supersede', 'dispute', 'expire', 'noop')),
+            memory_kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('proposed', 'verified', 'committed', 'rejected')),
+            confidence REAL,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(sleep_cycle_id) REFERENCES sleep_cycles(sleep_cycle_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS sleep_cycle_changes_cycle_idx
+            ON sleep_cycle_changes(sleep_cycle_id, created_at, change_id);
         "#,
     )?;
     add_column(connection, "conversations", "owner_id", "TEXT")?;
@@ -362,6 +425,68 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     add_column(connection, "messages", "request_id", "TEXT")?;
     add_column(connection, "memories", "owner_id", "TEXT")?;
     add_column(connection, "documents", "owner_id", "TEXT")?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "status",
+        "TEXT NOT NULL DEFAULT 'completed'",
+    )?;
+    add_column(connection, "sleep_cycles", "previous_cycle_id", "TEXT")?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "event_watermark",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "message_watermark",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "events_inspected",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "messages_inspected",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "memories_before",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "memories_after",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "proposed_changes",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "committed_changes",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "summary",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(connection, "sleep_cycles", "completed_at", "TEXT")?;
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS owner_devices (
@@ -381,6 +506,34 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             ON messages(conversation_id, request_id) WHERE request_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS memories_owner_idx ON memories(owner_id, updated_at);
         CREATE INDEX IF NOT EXISTS documents_owner_idx ON documents(owner_id, created_at);
+        "#,
+    )?;
+    connection.execute_batch(
+        r#"
+        INSERT INTO owners(owner_id, created_at, updated_at)
+        SELECT owner_id, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        FROM (
+            SELECT owner_id FROM goals
+            UNION SELECT owner_id FROM projects
+            UNION SELECT owner_id FROM tasks
+            UNION SELECT owner_id FROM task_steps
+            UNION SELECT owner_id FROM task_blockers
+            UNION SELECT owner_id FROM task_handoffs
+            UNION SELECT owner_id FROM task_artifacts
+            UNION SELECT owner_id FROM outreach_events
+            UNION SELECT owner_id FROM outreach_policies
+            UNION SELECT owner_id FROM jobs
+            UNION SELECT owner_id FROM skills
+            UNION SELECT owner_id FROM skill_usages
+            UNION SELECT owner_id FROM automation_proposals
+            UNION SELECT owner_id FROM artifacts
+            UNION SELECT owner_id FROM execution_events
+            UNION SELECT owner_id FROM conversation_floors
+            UNION SELECT owner_id FROM provider_runs
+            UNION SELECT owner_id FROM sleep_cycles
+        )
+        WHERE owner_id IS NOT NULL AND trim(owner_id) <> ''
+        ON CONFLICT(owner_id) DO NOTHING;
         "#,
     )?;
     Ok(())
