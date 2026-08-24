@@ -1,6 +1,6 @@
-# VIC Panel
+# Touch
 
-This responsive interface is VIC's full-screen Omarchy workspace and the HP touchscreen client for Omarchy Voice.
+Touch is the responsive, full-screen touchscreen system interface for VoiceOS. It shares the Omarchy workspace with VIC, the Voice Interface Controller.
 It connects to the existing gateway and shared server-owned conversation. The
 Command surface supports browser speech recognition, typed turns, spoken
 responses, playback speed, repeat, copy, private document upload, and approval

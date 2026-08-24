@@ -13,17 +13,24 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "VIC Panel",
-  description: "The full-screen private workspace for VIC and Omarchy Voice.",
+  title: "Touch",
+  description: "The touchscreen system interface for VoiceOS, with voice through VIC.",
+  applicationName: "Touch",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    title: "Touch",
+    statusBarStyle: "black-translucent",
+  },
   openGraph: {
-    title: "VIC Panel",
-    description: "Private voice intelligence. One continuous conversation.",
-    images: [{ url: "/og.png", width: 1536, height: 1024, alt: "VIC Panel" }],
+    title: "Touch",
+    description: "The private touchscreen system interface for VoiceOS and VIC.",
+    images: [{ url: "/og.png", width: 1536, height: 1024, alt: "Touch" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "VIC Panel",
-    description: "Private voice intelligence. One continuous conversation.",
+    title: "Touch",
+    description: "The private touchscreen system interface for VoiceOS and VIC.",
     images: ["/og.png"],
   },
 };

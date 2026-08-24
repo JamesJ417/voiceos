@@ -1,0 +1,19 @@
+{
+  "name": "Touch",
+  "short_name": "Touch",
+  "description": "The touchscreen system interface for VoiceOS, with voice through VIC.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#101010",
+  "background_color": "#101010",
+  "icons": [
+    {
+      "src": "/og.png",
+      "sizes": "1536x1024",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
