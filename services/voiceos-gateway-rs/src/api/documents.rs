@@ -120,14 +120,29 @@ fn supported_text_file(filename: &str, media_type: &str) -> bool {
     )
 }
 
+fn supported_image_file(filename: &str, media_type: &str) -> bool {
+    let extension = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp")
+        && matches!(media_type, "image/jpeg" | "image/png" | "image/webp")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::supported_text_file;
+    use super::{supported_image_file, supported_text_file};
 
     #[test]
     fn requires_both_supported_extension_and_media_type() {
         assert!(supported_text_file("profile.md", "text/markdown"));
         assert!(!supported_text_file("payload.exe", "text/plain"));
         assert!(!supported_text_file("profile.md", "application/pdf"));
+    }
+
+    #[test]
+    fn accepts_only_supported_image_extension_and_media_type_pairs() {
+        assert!(supported_image_file("photo.jpg", "image/jpeg"));
+        assert!(supported_image_file("photo.png", "image/png"));
+        assert!(supported_image_file("photo.webp", "image/webp"));
+        assert!(!supported_image_file("photo.pdf", "image/jpeg"));
+        assert!(!supported_image_file("photo.jpg", "application/pdf"));
     }
 }

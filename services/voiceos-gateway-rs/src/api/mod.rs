@@ -1,14 +1,20 @@
+mod attachments;
 mod auth;
 mod client;
+mod console;
 mod conversations;
 mod documents;
 mod error;
 mod events;
 mod floor;
+mod focus;
 mod health;
+mod memories;
 mod ontology;
 mod outreach;
+mod projects;
 mod skills;
+mod sleep_cycles;
 mod tasks;
 mod turns;
 
@@ -20,11 +26,37 @@ use crate::state::AppState;
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health::health))
+        .route("/v1/attachments", post(attachments::upload_attachment))
+        .route(
+            "/v1/attachments/{attachment_id}",
+            get(attachments::attachment_content),
+        )
         .route("/v1/client/bootstrap", get(client::bootstrap))
+        .route("/v1/console/commands", post(console::execute))
         .route("/v1/events", get(events::stream))
         .route("/v1/events/recovery", get(events::recovery))
+        .route("/v1/focus", get(focus::snapshot))
+        .route("/v1/focus/captures", post(focus::capture))
+        .route("/v1/focus/switch", post(focus::switch))
+        .route("/v1/focus/sessions", post(focus::start))
+        .route("/v1/focus/sessions/{session_id}/actions", post(focus::act))
         .route("/v1/turns/text", post(turns::turn))
         .route("/v1/conversations/active", get(conversations::active))
+        .route("/v1/memories", get(memories::list).post(memories::create))
+        .route("/v1/memories/{memory_id}", delete(memories::forget))
+        .route("/v1/memories/{memory_id}/correct", post(memories::correct))
+        .route(
+            "/v1/memory/sleep-cycles",
+            get(sleep_cycles::list).post(sleep_cycles::start),
+        )
+        .route(
+            "/v1/memory/sleep-cycles/{sleep_cycle_id}",
+            get(sleep_cycles::detail),
+        )
+        .route(
+            "/v1/memory/sleep-cycles/{sleep_cycle_id}/commit",
+            post(sleep_cycles::commit),
+        )
         .route(
             "/v1/conversations/active/messages",
             get(conversations::messages),
@@ -46,7 +78,16 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/skills/{skill_id}/status", post(skills::set_status))
         .route("/v1/tasks", get(tasks::list_tasks).post(tasks::create_task))
+        .route("/v1/projects", get(projects::list).post(projects::create))
         .route("/v1/tasks/{task_id}", get(tasks::task_detail))
+        .route(
+            "/v1/tasks/{task_id}/project",
+            post(tasks::assign_task_project),
+        )
+        .route(
+            "/v1/tasks/{task_id}/attention",
+            post(tasks::set_task_attention),
+        )
         .route(
             "/v1/tasks/{task_id}/status",
             post(tasks::update_task_status),
@@ -91,6 +132,12 @@ pub(crate) fn router(state: AppState) -> Router {
             post(conversations::commit),
         )
         .route("/internal/v1/tasks/command", post(tasks::voice_command))
+        .route("/internal/v1/focus/command", post(focus::voice_command))
+        .route(
+            "/internal/v1/console/commands",
+            post(console::internal_execute),
+        )
+        .route("/internal/v1/console/command", post(console::voice_command))
         .route(
             "/internal/v1/tasks/actions",
             post(tasks::internal_task_action),

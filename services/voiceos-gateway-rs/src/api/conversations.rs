@@ -21,6 +21,8 @@ pub(crate) struct PrepareRequest {
     session_id: Option<String>,
     text: String,
     request_id: Option<String>,
+    #[serde(default)]
+    attachment_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -144,12 +146,13 @@ pub(crate) async fn prepare(
     let engine = state.engine.clone();
     let owner_id = state.primary_owner_id.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let (conversation_id, mut context) = engine.prepare_owner_turn(
+        let (conversation_id, mut context) = engine.prepare_owner_turn_with_attachments(
             &owner_id,
             &request.device_id,
             request.session_id.as_deref(),
             &request.text,
             request.request_id.as_deref(),
+            &request.attachment_ids,
         )?;
         if context.recent_messages.last().is_some_and(|message| {
             message.role == Role::User && message.content == request.text.trim()

@@ -12,7 +12,8 @@ rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "io-util"] }
 urlencoding = "2"
+uuid.workspace = true
 voiceos-core = { path = "../voiceos-core" }
 voiceos-ontology = { path = "../voiceos-ontology" }

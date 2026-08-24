@@ -24,11 +24,25 @@ pub(crate) struct CreateTaskRequest {
     estimated_minutes: u32,
     project_id: Option<String>,
     parent_task_id: Option<String>,
+    due_at: Option<String>,
+    importance: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct UpdateTaskStatusRequest {
     status: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AssignTaskProjectRequest {
+    project_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetTaskAttentionRequest {
+    due_at: Option<String>,
+    importance: String,
 }
 
 #[derive(Deserialize)]
@@ -118,7 +132,7 @@ pub(crate) async fn create_task(
     Json(request): Json<CreateTaskRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let device_id = authenticate(&state, &headers)?;
-    let task = state
+    let mut task = state
         .store
         .create_task(
             &state.primary_owner_id,
@@ -129,6 +143,19 @@ pub(crate) async fn create_task(
             request.estimated_minutes,
         )
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?;
+    if request.due_at.is_some() || request.importance.is_some() {
+        task = state
+            .store
+            .set_task_attention_as(
+                &state.primary_owner_id,
+                &task.id,
+                request.due_at.as_deref(),
+                request.importance.as_deref().unwrap_or("normal"),
+                &format!("device:{device_id}"),
+            )
+            .map_err(store_error)?
+            .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "task_not_found"))?;
+    }
     state
         .store
         .append_execution_event(
@@ -168,6 +195,47 @@ pub(crate) async fn update_task_status(
             &format!("device:{device_id}"),
         )
         .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "task_not_found"))?;
+    Ok(Json(json!({"task": task})))
+}
+
+pub(crate) async fn assign_task_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+    Json(request): Json<AssignTaskProjectRequest>,
+) -> ApiResult<Json<Value>> {
+    let device_id = authenticate(&state, &headers)?;
+    let task = state
+        .store
+        .assign_task_project_as(
+            &state.primary_owner_id,
+            &task_id,
+            request.project_id.as_deref(),
+            &format!("device:{device_id}"),
+        )
+        .map_err(|error| api_error(StatusCode::BAD_REQUEST, error.to_string()))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "task_not_found"))?;
+    Ok(Json(json!({"task": task})))
+}
+
+pub(crate) async fn set_task_attention(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+    Json(request): Json<SetTaskAttentionRequest>,
+) -> ApiResult<Json<Value>> {
+    let device_id = authenticate(&state, &headers)?;
+    let task = state
+        .store
+        .set_task_attention_as(
+            &state.primary_owner_id,
+            &task_id,
+            request.due_at.as_deref(),
+            &request.importance,
+            &format!("device:{device_id}"),
+        )
+        .map_err(store_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "task_not_found"))?;
     Ok(Json(json!({"task": task})))
 }
@@ -616,7 +684,7 @@ fn sentence_case(value: &str) -> String {
     first.to_uppercase().collect::<String>() + characters.as_str()
 }
 
-fn resolve_task_reference<'a>(
+pub(crate) fn resolve_task_reference<'a>(
     tasks: &'a [TaskRecord],
     reference: &str,
 ) -> Result<&'a TaskRecord, String> {

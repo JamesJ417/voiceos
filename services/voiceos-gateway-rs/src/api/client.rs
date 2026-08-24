@@ -23,13 +23,22 @@ fn bootstrap_payload(device_id: &str) -> Value {
         "contract_version": 1,
         "device_id": device_id,
         "authentication": {"scheme": "bearer"},
+        "component_registry": component_registry(),
         "endpoints": {
+            "bootstrap": "/v1/client/bootstrap",
             "conversation": "/v1/conversations/active",
             "conversation_events": "/v1/conversations/active/events",
             "turn": "/v1/turns/text"
         },
         "transport": {"private_network_required": true, "tls_required": true}
     })
+}
+
+fn component_registry() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../../contracts/component-registry.json"
+    ))
+    .expect("component registry must be valid JSON")
 }
 
 #[cfg(test)]
@@ -40,19 +49,34 @@ mod tests {
 
     #[test]
     fn bootstrap_describes_the_windows_client_contract() {
+        let payload = bootstrap_payload("windows-laptop");
+        assert_eq!(payload["contract_version"], json!(1));
+        assert_eq!(payload["device_id"], json!("windows-laptop"));
+        assert_eq!(payload["authentication"], json!({"scheme": "bearer"}));
         assert_eq!(
-            bootstrap_payload("windows-laptop"),
+            payload["endpoints"],
             json!({
-                "contract_version": 1,
-                "device_id": "windows-laptop",
-                "authentication": {"scheme": "bearer"},
-                "endpoints": {
-                    "conversation": "/v1/conversations/active",
-                    "conversation_events": "/v1/conversations/active/events",
-                    "turn": "/v1/turns/text"
-                },
-                "transport": {"private_network_required": true, "tls_required": true}
+                "bootstrap": "/v1/client/bootstrap",
+                "conversation": "/v1/conversations/active",
+                "conversation_events": "/v1/conversations/active/events",
+                "turn": "/v1/turns/text"
             })
+        );
+        assert_eq!(
+            payload["component_registry"]["roles"]["backend_control_plane"],
+            "voiceos"
+        );
+        assert_eq!(
+            payload["component_registry"]["roles"]["voice_interface_controller"],
+            "vic"
+        );
+        assert_eq!(
+            payload["component_registry"]["roles"]["touchscreen_system_interface"],
+            "touch"
+        );
+        assert_eq!(
+            payload["transport"],
+            json!({"private_network_required": true, "tls_required": true})
         );
     }
 }

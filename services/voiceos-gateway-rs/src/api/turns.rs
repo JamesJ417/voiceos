@@ -17,6 +17,8 @@ pub(crate) struct TurnRequest {
     text: String,
     provider: Option<String>,
     request_id: Option<String>,
+    #[serde(default)]
+    attachment_ids: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -47,6 +49,23 @@ pub(crate) async fn turn(
     if text.chars().count() > 8_000 {
         return Err(api_error(StatusCode::PAYLOAD_TOO_LARGE, "text_too_long"));
     }
+    if request.attachment_ids.len() > 10
+        || request.attachment_ids.iter().any(|id| id.trim().is_empty())
+        || request
+            .attachment_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != request.attachment_ids.len()
+    {
+        return Err(api_error(StatusCode::BAD_REQUEST, "invalid_attachment_ids"));
+    }
+    if !request.attachment_ids.is_empty() && request.request_id.is_none() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "request_id_required_for_attachments",
+        ));
+    }
 
     let device_id = authenticate(&state, &headers)?;
     let ontology = state.ontology.clone();
@@ -76,6 +95,7 @@ pub(crate) async fn turn(
                 user_text: &original_text,
                 tools: vec![],
                 request_id: request.request_id.as_deref(),
+                attachment_ids: request.attachment_ids,
             },
             provider.as_ref(),
         )

@@ -33,6 +33,7 @@ fn public_event_type(event_type: &str) -> Option<&str> {
         value if value.starts_with("task.initiative.") => Some("task.initiative.updated"),
         "task.progress.recorded" => Some("task.progress.updated"),
         value if value.starts_with("task.") => Some("task.changed"),
+        value if value.starts_with("focus.") => Some("focus.updated"),
         // Internal provider, skill, and job evidence remains private until a
         // dedicated public contract explicitly defines its redacted shape.
         _ => None,
