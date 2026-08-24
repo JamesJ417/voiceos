@@ -24,11 +24,99 @@ impl ChatMessage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Memory {
     pub id: String,
     pub content: String,
     pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub category: String,
+    pub status: String,
+    pub confidence: f64,
+    pub provenance: String,
+    pub supersedes_memory_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SleepCycleRecord {
+    pub id: String,
+    pub owner_id: String,
+    pub idempotency_key: String,
+    pub mode: String,
+    pub dry_run: bool,
+    pub status: String,
+    pub previous_cycle_id: Option<String>,
+    pub event_watermark: i64,
+    pub message_watermark: i64,
+    pub events_inspected: u64,
+    pub messages_inspected: u64,
+    pub memories_before: u64,
+    pub memories_after: u64,
+    pub proposed_changes: u64,
+    pub committed_changes: u64,
+    pub summary: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveMemoryChange {
+    pub content: String,
+    pub source: String,
+    pub evidence: serde_json::Value,
+}
+
+impl LiveMemoryChange {
+    pub fn add(content: impl Into<String>, source: impl Into<String>) -> Self {
+        let source = source.into();
+        Self {
+            content: content.into(),
+            evidence: serde_json::json!([{ "source": source.clone() }]),
+            source,
+        }
+    }
+
+    pub fn with_evidence(mut self, evidence: serde_json::Value) -> Self {
+        self.evidence = evidence;
+        self
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SleepCycleChange {
+    pub id: String,
+    pub sleep_cycle_id: String,
+    pub operation: String,
+    pub memory_kind: String,
+    pub title: String,
+    pub detail: String,
+    pub status: String,
+    pub confidence: Option<f64>,
+    pub evidence: serde_json::Value,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SleepCycleReport {
+    pub cycle: SleepCycleRecord,
+    pub changes: Vec<SleepCycleChange>,
+    pub new_evidence_count: u64,
+    pub durable_memory_delta: i64,
+    pub proposed_change_delta: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QuarantineRecord {
+    pub quarantine_id: String,
+    pub conversation_id: String,
+    pub claim_id: String,
+    pub source: String,
+    pub provenance: String,
+    pub confidence: f32,
+    pub relevance: f32,
+    pub content: String,
+    pub reason: String,
     pub created_at: String,
 }
 
@@ -45,6 +133,17 @@ pub struct DocumentRecord {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentRecord {
+    pub id: String,
+    pub filename: String,
+    pub media_type: String,
+    pub byte_size: u64,
+    pub sha256: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConversationContext {
     pub conversation_id: String,
     pub summary: Option<String>,
@@ -62,6 +161,8 @@ pub struct ConversationMessage {
     pub provider: Option<String>,
     pub origin_device_id: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -134,6 +235,8 @@ pub struct TaskRecord {
     pub title: String,
     pub observable_outcome: String,
     pub estimated_minutes: u32,
+    pub due_at: Option<String>,
+    pub importance: String,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
@@ -209,6 +312,49 @@ pub struct TaskDetail {
     pub artifacts: Vec<TaskArtifactRecord>,
     pub approvals: Vec<serde_json::Value>,
     pub activity: Vec<ExecutionEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusSessionRecord {
+    pub id: String,
+    pub owner_id: String,
+    pub task_id: String,
+    pub step_id: Option<String>,
+    pub mode: String,
+    pub planned_minutes: u32,
+    pub status: String,
+    pub next_action: String,
+    pub interruption_note: Option<String>,
+    pub restart_action: Option<String>,
+    pub reflection: Option<String>,
+    pub started_at: String,
+    pub updated_at: String,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusPriority {
+    pub task_id: String,
+    pub title: String,
+    pub observable_outcome: String,
+    pub estimated_minutes: u32,
+    pub due_at: Option<String>,
+    pub importance: String,
+    pub urgency: String,
+    pub status: String,
+    pub next_action: String,
+    pub project_title: Option<String>,
+    pub goal_title: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusSnapshot {
+    pub mode: String,
+    pub active_session: Option<FocusSessionRecord>,
+    pub priorities: Vec<FocusPriority>,
+    pub recommendation: Option<FocusPriority>,
+    pub last_interrupted_session: Option<FocusSessionRecord>,
+    pub parked: Vec<FocusPriority>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -368,4 +514,232 @@ pub struct ProviderRunMetric {
     pub cost_usd: Option<f64>,
     pub status: String,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProactiveSubscription {
+    pub id: String,
+    pub owner_id: String,
+    pub topic: String,
+    pub project_id: Option<String>,
+    pub source_type: String,
+    pub cadence: String,
+    pub quiet_hours: Option<String>,
+    pub status: String,
+    pub provenance: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProactiveCandidate {
+    pub id: String,
+    pub owner_id: String,
+    pub subscription_id: Option<String>,
+    pub project_id: Option<String>,
+    pub reason: String,
+    pub evidence: serde_json::Value,
+    pub priority: String,
+    pub confidence: f64,
+    pub expires_at: String,
+    pub deduplication_key: String,
+    pub provenance: String,
+    pub created_at: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutreachProposal {
+    pub id: String,
+    pub owner_id: String,
+    pub candidate_id: String,
+    pub original_draft: String,
+    pub editable_draft: String,
+    pub channel: String,
+    pub approval_state: String,
+    pub risk_class: String,
+    pub delivery_deadline: Option<String>,
+    pub provenance: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutreachDelivery {
+    pub id: String,
+    pub owner_id: String,
+    pub proposal_id: String,
+    pub provider: String,
+    pub channel: String,
+    pub result: String,
+    pub idempotency_key: String,
+    pub response_link: Option<String>,
+    pub provenance: String,
+    pub created_at: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProactiveFeedback {
+    pub id: String,
+    pub owner_id: String,
+    pub proposal_id: Option<String>,
+    pub action: String,
+    pub note: Option<String>,
+    pub provenance: String,
+    pub created_at: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProactiveDraftingInput {
+    pub owner_id: String,
+    pub candidate_id: String,
+    pub project_id: Option<String>,
+    pub reason: String,
+    pub priority: String,
+    pub candidate_confidence: f64,
+    pub evidence_ids: Vec<String>,
+    pub candidate_expires_at: String,
+}
+
+pub trait ProactiveDraftingContract {
+    /// Returns a local structured draft. Implementations receive no tools or store access.
+    fn draft(&self, input: &ProactiveDraftingInput) -> Result<String, String>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewProactiveSubscription {
+    pub owner_id: String,
+    pub topic: String,
+    pub project_id: Option<String>,
+    pub source_type: String,
+    pub cadence: String,
+    pub quiet_hours: Option<String>,
+    pub status: String,
+    pub provenance: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewProactiveCandidate {
+    pub owner_id: String,
+    pub subscription_id: Option<String>,
+    pub project_id: Option<String>,
+    pub reason: String,
+    pub evidence: serde_json::Value,
+    pub priority: String,
+    pub confidence: f64,
+    pub expires_at: String,
+    pub deduplication_key: String,
+    pub provenance: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewOutreachProposal {
+    pub owner_id: String,
+    pub candidate_id: String,
+    pub original_draft: String,
+    pub editable_draft: String,
+    pub channel: String,
+    pub approval_state: String,
+    pub risk_class: String,
+    pub delivery_deadline: Option<String>,
+    pub provenance: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewOutreachDelivery {
+    pub owner_id: String,
+    pub proposal_id: String,
+    pub provider: String,
+    pub channel: String,
+    pub result: String,
+    pub idempotency_key: String,
+    pub response_link: Option<String>,
+    pub provenance: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewProactiveFeedback {
+    pub owner_id: String,
+    pub proposal_id: Option<String>,
+    pub action: String,
+    pub note: Option<String>,
+    pub provenance: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureSource {
+    pub kind: String,
+    pub id: String,
+}
+
+impl CaptureSource {
+    pub fn voice(id: impl Into<String>) -> Self {
+        Self {
+            kind: "voice".into(),
+            id: id.into(),
+        }
+    }
+
+    pub fn fieldy(event_id: impl Into<String>) -> Self {
+        Self {
+            kind: "fieldy".into(),
+            id: event_id.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NewPersonalCapture {
+    pub owner_id: String,
+    pub source: String,
+    pub source_id: String,
+    pub raw_content: String,
+    pub structured_content: Option<serde_json::Value>,
+    pub created_at: String,
+    pub expires_at: String,
+    pub audit_id: String,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PersonalCapture {
+    pub id: String,
+    pub owner_id: String,
+    pub source: String,
+    pub source_id: String,
+    pub raw_content: String,
+    pub display_text: String,
+    pub structured_content: Option<serde_json::Value>,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub audit_id: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewCaptureProposal {
+    pub owner_id: String,
+    pub capture_id: String,
+    pub title: String,
+    pub category: String,
+    pub rationale: String,
+    pub expires_at: String,
+    pub audit_id: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureProposal {
+    pub id: String,
+    pub owner_id: String,
+    pub capture_id: String,
+    pub title: String,
+    pub category: String,
+    pub rationale: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub audit_id: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewDecision {
+    pub id: String,
+    pub owner_id: String,
+    pub status: String,
+    pub audit_id: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DailyFocusReset {
+    pub id: String,
+    pub owner_id: String,
+    pub reset_date: String,
+    pub status: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub audit_id: String,
 }

@@ -168,6 +168,66 @@ fn tasks_can_be_listed_and_status_changes_are_audited() {
 }
 
 #[test]
+fn projects_are_owner_scoped_and_tasks_can_be_reorganized() {
+    let store = ConversationStore::in_memory().unwrap();
+    let first = store
+        .create_project("owner", None, "VIC touch panel")
+        .unwrap();
+    let second = store.create_project("owner", None, "SMB Sentinel").unwrap();
+    store
+        .create_project("another-owner", None, "Private project")
+        .unwrap();
+    let task = store
+        .create_task(
+            "owner",
+            None,
+            None,
+            "Group current work",
+            "Every task has an intentional home",
+            20,
+        )
+        .unwrap();
+
+    let projects = store.projects("owner", 20).unwrap();
+    assert_eq!(2, projects.len());
+    assert!(projects.iter().all(|project| project.owner_id == "owner"));
+
+    let assigned = store
+        .assign_task_project_as("owner", &task.id, Some(&first.id), "device:panel")
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(first.id.as_str()), assigned.project_id.as_deref());
+    let moved = store
+        .assign_task_project_as("owner", &task.id, Some(&second.id), "device:panel")
+        .unwrap()
+        .unwrap();
+    assert_eq!(Some(second.id.as_str()), moved.project_id.as_deref());
+    let unassigned = store
+        .assign_task_project_as("owner", &task.id, None, "device:panel")
+        .unwrap()
+        .unwrap();
+    assert_eq!(None, unassigned.project_id);
+
+    let private_project = store.projects("another-owner", 20).unwrap().remove(0);
+    assert!(
+        store
+            .assign_task_project_as("owner", &task.id, Some(&private_project.id), "device:panel",)
+            .is_err()
+    );
+    assert!(
+        store
+            .assign_task_project_as("another-owner", &task.id, None, "device:other")
+            .unwrap()
+            .is_none()
+    );
+    let events = store.execution_events("owner", &task.id, 10).unwrap();
+    assert_eq!(3, events.len());
+    assert_eq!("task.project_changed", events[0].event_type);
+    assert_eq!(Some(first.id.as_str()), events[0].payload["to"].as_str());
+    assert!(events[2].payload["to"].is_null());
+}
+
+#[test]
 fn repeated_successful_audit_workflows_become_inert_review_proposals() {
     let directory = tempdir().unwrap();
     let audit_path = directory.path().join("audit.sqlite3");

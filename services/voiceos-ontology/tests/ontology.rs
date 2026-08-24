@@ -55,6 +55,81 @@ fn seeded_terms_cover_provider_memory_documents_health_services_and_approval() {
 }
 
 #[test]
+fn console_phrases_resolve_to_narrow_local_display_commands() {
+    let interpreter = interpreter();
+    let cases = [
+        ("Show the weather", "console.show_weather"),
+        (
+            "Refresh the VIC Console dashboard",
+            "console.refresh_dashboard",
+        ),
+    ];
+    for (phrase, intent) in cases {
+        let decision = interpreter.interpret("owner", phrase).unwrap();
+        assert_eq!(decision.status, DecisionStatus::Resolved);
+        assert_eq!(decision.interpretation.unwrap().intent.0, intent);
+    }
+
+    let question = interpreter
+        .interpret("owner", "What is the weather tomorrow?")
+        .unwrap();
+    assert_eq!(question.status, DecisionStatus::Unrecognized);
+}
+
+#[test]
+fn adhd_focus_phrases_resolve_without_claiming_task_completion() {
+    let interpreter = interpreter();
+    let cases = [
+        ("What should I do now?", "focus.next"),
+        ("I'm overwhelmed", "focus.next"),
+        ("Start a five minute focus session", "focus.start"),
+        ("I got interrupted", "focus.interrupt"),
+        ("Help me restart", "focus.restart"),
+        ("I'm done for now", "focus.complete"),
+    ];
+    for (phrase, intent) in cases {
+        let decision = interpreter.interpret("owner", phrase).unwrap();
+        assert_eq!(decision.status, DecisionStatus::Resolved, "{phrase}");
+        assert_eq!(
+            decision.interpretation.unwrap().intent.0,
+            intent,
+            "{phrase}"
+        );
+    }
+    let start = interpreter
+        .interpret("owner", "Start a five minute focus session")
+        .unwrap()
+        .interpretation
+        .unwrap();
+    assert_eq!(start.arguments["minutes"], json!(5));
+    let overwhelmed = interpreter
+        .interpret("owner", "I'm overwhelmed")
+        .unwrap()
+        .interpretation
+        .unwrap();
+    assert_eq!(overwhelmed.arguments["mode"], json!("low_energy"));
+
+    let capture = interpreter
+        .interpret("owner", "Park this idea build a mobile greenhouse")
+        .unwrap()
+        .interpretation
+        .unwrap();
+    assert_eq!(capture.intent.0, "focus.capture");
+    assert_eq!(
+        capture.arguments["title"],
+        json!("build a mobile greenhouse")
+    );
+
+    let switch = interpreter
+        .interpret("owner", "Work on the tax return instead")
+        .unwrap()
+        .interpretation
+        .unwrap();
+    assert_eq!(switch.intent.0, "focus.switch");
+    assert_eq!(switch.arguments["reference"], json!("the tax return"));
+}
+
+#[test]
 fn model_fallback_is_structured_and_validated_against_the_catalog() {
     let candidate = ModelCandidate {
         intent: IntentId("voice.playback_speed.set".to_owned()),

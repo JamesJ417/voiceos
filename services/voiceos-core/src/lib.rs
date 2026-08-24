@@ -1,11 +1,17 @@
 mod agent_store;
 mod engine;
+mod fieldy;
 mod floor;
+mod focus;
+mod integrity;
 mod model;
 mod outreach;
+mod personal_support;
+mod proactive;
 mod provider;
 mod schema;
 mod skill_proposal;
+mod sleep_cycle;
 mod store;
 mod task_initiative;
 mod task_progress;
@@ -14,11 +20,24 @@ pub use engine::{
     ConversationEngine, EngineConfig, EngineError, ExplicitMemoryExtractor, HeuristicSummarizer,
     MemoryExtractor, OwnerTurnInput, Summarizer,
 };
+pub use fieldy::{
+    FieldyTranscriptEvent, FieldyTranscriptIntake, FieldyWebhookError, FieldyWebhookStore,
+    MAX_FIELDY_BODY_BYTES, verify_fieldy_signature,
+};
+pub use integrity::{
+    ContextClaim, ContextSource, IntegrityReport, QuarantinedClaim, validate_context,
+};
 pub use model::{
-    ArtifactRecord, AutomationProposal, ChatMessage, ConversationContext, ConversationFloor,
-    ConversationMessage, DocumentRecord, ExecutionEvent, GoalRecord, JobRecord, Memory,
-    OutreachPolicy, OutreachRecord, ProjectRecord, ProviderCompletion, ProviderRequest,
-    ProviderRunMetric, Role, SkillProposal, SkillUsage, TaskArtifactRecord, TaskBlockerRecord,
+    ArtifactRecord, AttachmentRecord, AutomationProposal, CaptureProposal, CaptureSource,
+    ChatMessage, ConversationContext, ConversationFloor, ConversationMessage, DailyFocusReset,
+    DocumentRecord, ExecutionEvent, FocusPriority, FocusSessionRecord, FocusSnapshot, GoalRecord,
+    JobRecord, LiveMemoryChange, Memory, NewCaptureProposal, NewOutreachDelivery,
+    NewOutreachProposal, NewPersonalCapture, NewProactiveCandidate, NewProactiveFeedback,
+    NewProactiveSubscription, OutreachDelivery, OutreachPolicy, OutreachProposal, OutreachRecord,
+    PersonalCapture, ProactiveCandidate, ProactiveDraftingContract, ProactiveDraftingInput,
+    ProactiveFeedback, ProactiveSubscription, ProjectRecord, ProviderCompletion, ProviderRequest,
+    ProviderRunMetric, QuarantineRecord, ReviewDecision, Role, SkillProposal, SkillUsage,
+    SleepCycleChange, SleepCycleRecord, SleepCycleReport, TaskArtifactRecord, TaskBlockerRecord,
     TaskDetail, TaskHandoffRecord, TaskInitiative, TaskProgress, TaskRecord, TaskStepRecord,
     ToolCall, ToolDefinition, Usage,
 };

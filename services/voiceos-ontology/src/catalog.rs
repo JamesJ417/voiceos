@@ -96,6 +96,64 @@ impl Catalog {
                 false,
             ),
             intent(
+                "console.show_weather",
+                "Show the weather panel on the local VIC Console.",
+                vec![],
+                false,
+            ),
+            intent(
+                "console.refresh_dashboard",
+                "Refresh the local VIC Console weather dashboard.",
+                vec![],
+                false,
+            ),
+            intent(
+                "focus.next",
+                "Choose one concrete next action from no more than three priorities.",
+                vec![enumeration(
+                    "mode",
+                    false,
+                    &["normal", "five_minute", "low_energy", "restart"],
+                )],
+                false,
+            ),
+            intent(
+                "focus.start",
+                "Start a bounded focus session on the recommended next action.",
+                vec![number("minutes", false, Some(Unit::Minutes), 1.0, 120.0)],
+                false,
+            ),
+            intent(
+                "focus.interrupt",
+                "Record an interruption and preserve the restart action.",
+                vec![],
+                false,
+            ),
+            intent(
+                "focus.restart",
+                "Resume the most recently interrupted focus session.",
+                vec![],
+                false,
+            ),
+            intent(
+                "focus.complete",
+                "End the active focus session without assuming the task is complete.",
+                vec![],
+                false,
+            ),
+            intent(
+                "focus.capture",
+                "Park a new idea without changing the active focus session.",
+                vec![string("title", true)],
+                false,
+            ),
+            intent(
+                "focus.switch",
+                "Deliberately switch tasks after preserving the active restart point.",
+                vec![string("reference", true)],
+                false,
+            ),
+            intent(
                 "task.create",
                 "Create a task on the shared VoiceOS task board.",
                 vec![

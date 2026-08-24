@@ -2,12 +2,15 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{ChatMessage, ConversationContext, ConversationMessage, DocumentRecord, Memory, Role};
+use crate::{
+    AttachmentRecord, ChatMessage, ConversationContext, ConversationMessage, DocumentRecord,
+    Memory, QuarantineRecord, QuarantinedClaim, Role,
+};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -26,6 +29,44 @@ pub struct ConversationStore {
 }
 
 impl ConversationStore {
+    pub(crate) fn insert_structured_memory(
+        transaction: &Transaction<'_>,
+        owner_id: &str,
+        device_id: &str,
+        content: &str,
+        category: &str,
+        source: &str,
+        confidence: f64,
+        provenance: &str,
+    ) -> Result<String, StoreError> {
+        let content = content.trim();
+        if content.is_empty() || content.chars().count() > 500 {
+            return Err(StoreError::InvalidInput(
+                "memory content must contain 1 to 500 characters".to_owned(),
+            ));
+        }
+        if !matches!(
+            category,
+            "general" | "identity" | "preference" | "person" | "project" | "routine" | "sensitive"
+        ) {
+            return Err(StoreError::InvalidInput(
+                "invalid memory category".to_owned(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&confidence) || provenance.trim().is_empty() {
+            return Err(StoreError::InvalidInput(
+                "memory confidence or provenance is invalid".to_owned(),
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "INSERT INTO memories(memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,category,status,confidence,provenance) VALUES(?1,?2,?3,?4,?5,?6,?6,?7,?8,'active',?9,?10)",
+            params![id, device_id, normalize(content), content, source.trim(), now, owner_id, category, confidence, provenance.trim()],
+        )?;
+        Ok(id)
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
@@ -56,6 +97,53 @@ impl ConversationStore {
         self.connection.lock().map_err(|_| StoreError::LockPoisoned)
     }
 
+    pub fn quarantine_claims(
+        &self,
+        conversation_id: &str,
+        claims: &[QuarantinedClaim],
+    ) -> Result<(), StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        for quarantined in claims {
+            let claim = &quarantined.claim;
+            transaction.execute(
+                "INSERT INTO context_quarantine (quarantine_id, conversation_id, claim_id, source, provenance, confidence, relevance, content, reason, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    Uuid::new_v4().to_string(), conversation_id, claim.id,
+                    serde_json::to_string(&claim.source)?, claim.provenance,
+                    claim.confidence, claim.relevance, claim.content,
+                    quarantined.reason, Utc::now().to_rfc3339()
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn quarantined_claims_for_owner(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<Vec<QuarantineRecord>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT q.quarantine_id, q.conversation_id, q.claim_id, q.source, q.provenance, q.confidence, q.relevance, q.content, q.reason, q.created_at FROM context_quarantine q JOIN conversations c ON c.conversation_id=q.conversation_id WHERE q.conversation_id=?1 AND c.owner_id=?2 ORDER BY q.created_at")?;
+        let rows = statement.query_map(params![conversation_id, owner_id], |row| {
+            Ok(QuarantineRecord {
+                quarantine_id: row.get(0)?,
+                conversation_id: row.get(1)?,
+                claim_id: row.get(2)?,
+                source: row.get(3)?,
+                provenance: row.get(4)?,
+                confidence: row.get(5)?,
+                relevance: row.get(6)?,
+                content: row.get(7)?,
+                reason: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     fn migrate(&self) -> Result<(), StoreError> {
         let connection = self.connection()?;
         crate::schema::migrate(&connection)?;
@@ -78,6 +166,19 @@ impl ConversationStore {
         }
         let now = Utc::now().to_rfc3339();
         let mut connection = self.connection()?;
+        let already_reconciled: bool = connection.query_row(
+            "SELECT
+                NOT EXISTS(SELECT 1 FROM devices d LEFT JOIN owner_devices od ON od.device_id=d.device_id AND od.owner_id=?1 AND od.revoked_at IS NULL WHERE od.device_id IS NULL)
+                AND NOT EXISTS(SELECT 1 FROM conversations WHERE owner_id IS NULL OR owner_id<>?1)
+                AND NOT EXISTS(SELECT 1 FROM memories WHERE owner_id IS NULL OR owner_id<>?1)
+                AND NOT EXISTS(SELECT 1 FROM documents WHERE owner_id IS NULL OR owner_id<>?1)
+                AND (SELECT COUNT(*) FROM conversations WHERE status='active') <= 1",
+            [owner_id.trim()],
+            |row| row.get(0),
+        )?;
+        if already_reconciled {
+            return Ok(());
+        }
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT INTO owners(owner_id, created_at, updated_at) VALUES(?1, ?2, ?2) ON CONFLICT(owner_id) DO UPDATE SET updated_at=excluded.updated_at",
@@ -247,10 +348,16 @@ impl ConversationStore {
                     provider: row.get(4)?,
                     origin_device_id: row.get(5)?,
                     created_at: row.get(6)?,
+                    attachments: Vec::new(),
                 })
             },
         )?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
+        for message in &mut messages {
+            message.attachments =
+                attachments_for_message_connection(&connection, message.sequence)?;
+        }
+        Ok(messages)
     }
 
     pub fn recent_conversation_messages(
@@ -277,9 +384,15 @@ impl ConversationStore {
                 provider: row.get(4)?,
                 origin_device_id: row.get(5)?,
                 created_at: row.get(6)?,
+                attachments: Vec::new(),
             })
         })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut messages = rows.collect::<Result<Vec<_>, _>>()?;
+        for message in &mut messages {
+            message.attachments =
+                attachments_for_message_connection(&connection, message.sequence)?;
+        }
+        Ok(messages)
     }
 
     pub fn message_count(&self, conversation_id: &str) -> Result<usize, StoreError> {
@@ -356,6 +469,52 @@ impl ConversationStore {
             .map_err(StoreError::from)
     }
 
+    pub fn summary_for_owner(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<(String, i64)>, StoreError> {
+        self.connection()?
+            .query_row(
+                "SELECT s.content, s.through_message_id FROM conversation_summaries s JOIN conversations c ON c.conversation_id=s.conversation_id WHERE s.conversation_id=?1 AND c.owner_id=?2 AND c.status='active' AND s.owner_id=?2 AND s.provenance<>''",
+                params![conversation_id, owner_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn save_summary_for_owner(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        content: &str,
+        through_message_id: i64,
+    ) -> Result<(), StoreError> {
+        let eligible: bool = self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE conversation_id=?1 AND owner_id=?2 AND status='active')",
+            params![conversation_id, owner_id],
+            |row| row.get(0),
+        )?;
+        if !eligible {
+            return Err(StoreError::InvalidInput(
+                "summary requires an active conversation owned by the requested owner".to_owned(),
+            ));
+        }
+        self.connection()?.execute(
+            "INSERT INTO conversation_summaries(conversation_id, content, through_message_id, updated_at, owner_id, provenance) VALUES(?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(conversation_id) DO UPDATE SET content=excluded.content, through_message_id=excluded.through_message_id, updated_at=excluded.updated_at, owner_id=excluded.owner_id, provenance=excluded.provenance",
+            params![
+                conversation_id,
+                content,
+                through_message_id,
+                Utc::now().to_rfc3339(),
+                owner_id,
+                format!("conversation-summary://{conversation_id}"),
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn save_summary(
         &self,
         conversation_id: &str,
@@ -375,17 +534,32 @@ impl ConversationStore {
             return Ok(());
         }
         let now = Utc::now().to_rfc3339();
-        self.connection()?.execute(
-            "INSERT INTO memories(memory_id, device_id, normalized_content, content, source, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?6) ON CONFLICT(device_id, normalized_content) DO UPDATE SET content=excluded.content, source=excluded.source, updated_at=excluded.updated_at",
-            params![Uuid::new_v4().to_string(), device_id, normalized, content.trim(), source, now],
+        let confidence = if source == "explicit-user-request" {
+            1.0
+        } else {
+            0.85
+        };
+        let provenance = format!("user://{device_id}");
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE memories SET content=?1,source=?2,confidence=?3,provenance=?4,updated_at=?5 WHERE device_id=?6 AND normalized_content=?7 AND status='active'",
+            params![content.trim(), source, confidence, provenance, now, device_id, normalized],
         )?;
+        if changed == 0 {
+            transaction.execute(
+                "INSERT INTO memories(memory_id,device_id,normalized_content,content,source,created_at,updated_at,category,status,confidence,provenance) VALUES(?1,?2,?3,?4,?5,?6,?6,'general','active',?7,?8)",
+                params![Uuid::new_v4().to_string(), device_id, normalized, content.trim(), source, now, confidence, provenance],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
     pub fn memories(&self, device_id: &str, limit: usize) -> Result<Vec<Memory>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT memory_id, content, source, created_at FROM memories WHERE device_id=?1 ORDER BY updated_at DESC LIMIT ?2",
+            "SELECT memory_id, content, source, created_at, updated_at, category, status, confidence, provenance, supersedes_memory_id FROM memories WHERE device_id=?1 AND status='active' ORDER BY updated_at DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![device_id, limit as i64], |row| {
             Ok(Memory {
@@ -393,6 +567,12 @@ impl ConversationStore {
                 content: row.get(1)?,
                 source: row.get(2)?,
                 created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                category: row.get(5)?,
+                status: row.get(6)?,
+                confidence: row.get(7)?,
+                provenance: row.get(8)?,
+                supersedes_memory_id: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -413,6 +593,19 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub fn remember_for_owner_in_conversation(
+        &self,
+        owner_id: &str,
+        device_id: &str,
+        conversation_id: &str,
+        content: &str,
+        source: &str,
+    ) -> Result<(), StoreError> {
+        self.remember_for_owner(owner_id, device_id, content, source)?;
+        self.connection()?.execute("UPDATE memories SET conversation_id=?1 WHERE owner_id=?2 AND device_id=?3 AND normalized_content=?4", params![conversation_id, owner_id, device_id, normalize(content)])?;
+        Ok(())
+    }
+
     pub fn memories_for_owner(
         &self,
         owner_id: &str,
@@ -420,7 +613,7 @@ impl ConversationStore {
     ) -> Result<Vec<Memory>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT memory_id, content, source, created_at FROM memories WHERE owner_id=?1 ORDER BY updated_at DESC LIMIT ?2",
+            "SELECT memory_id, content, source, created_at, updated_at, category, status, confidence, provenance, supersedes_memory_id FROM memories WHERE owner_id=?1 AND status='active' ORDER BY updated_at DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![owner_id, limit as i64], |row| {
             Ok(Memory {
@@ -428,8 +621,128 @@ impl ConversationStore {
                 content: row.get(1)?,
                 source: row.get(2)?,
                 created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                category: row.get(5)?,
+                status: row.get(6)?,
+                confidence: row.get(7)?,
+                provenance: row.get(8)?,
+                supersedes_memory_id: row.get(9)?,
             })
         })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn search_memories_for_owner(
+        &self,
+        owner_id: &str,
+        query: Option<&str>,
+        include_inactive: bool,
+        limit: usize,
+    ) -> Result<Vec<Memory>, StoreError> {
+        let connection = self.connection()?;
+        let pattern = format!("%{}%", query.unwrap_or("").trim());
+        let mut statement = connection.prepare(
+            "SELECT memory_id, content, source, created_at, updated_at, category, status, confidence, provenance, supersedes_memory_id FROM memories WHERE owner_id=?1 AND (?2 OR status='active') AND content LIKE ?3 ORDER BY updated_at DESC LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![
+                owner_id,
+                include_inactive,
+                pattern,
+                limit.clamp(1, 500) as i64
+            ],
+            memory_from_row,
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn create_structured_memory(
+        &self,
+        owner_id: &str,
+        device_id: &str,
+        content: &str,
+        category: &str,
+        source: &str,
+        confidence: f64,
+        provenance: &str,
+        supersedes_memory_id: Option<&str>,
+    ) -> Result<Memory, StoreError> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let connection = self.connection()?;
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "INSERT INTO owners(owner_id, created_at, updated_at) VALUES(?1,?2,?2) ON CONFLICT(owner_id) DO UPDATE SET updated_at=excluded.updated_at",
+            params![owner_id, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO devices(device_id, created_at, last_seen_at) VALUES(?1,?2,?2) ON CONFLICT(device_id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
+            params![device_id, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO owner_devices(owner_id, device_id, enrolled_at) VALUES(?1,?2,?3) ON CONFLICT(device_id) DO UPDATE SET owner_id=excluded.owner_id, revoked_at=NULL",
+            params![owner_id, device_id, now],
+        )?;
+        if let Some(previous) = supersedes_memory_id {
+            transaction.execute(
+                "UPDATE memories SET status='superseded', updated_at=?1 WHERE memory_id=?2 AND owner_id=?3 AND status='active'",
+                params![now, previous, owner_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO memories(memory_id, device_id, normalized_content, content, source, created_at, updated_at, owner_id, category, status, confidence, provenance, supersedes_memory_id) VALUES(?1,?2,?3,?4,?5,?6,?6,?7,?8,'active',?9,?10,?11)",
+            params![id, device_id, normalize(content), content.trim(), source, now, owner_id, category.trim(), confidence.clamp(0.0, 1.0), provenance, supersedes_memory_id],
+        )?;
+        transaction.commit()?;
+        Ok(Memory {
+            id,
+            content: content.trim().to_owned(),
+            source: source.to_owned(),
+            created_at: now.clone(),
+            updated_at: now,
+            category: category.trim().to_owned(),
+            status: "active".to_owned(),
+            confidence: confidence.clamp(0.0, 1.0),
+            provenance: provenance.to_owned(),
+            supersedes_memory_id: supersedes_memory_id.map(str::to_owned),
+        })
+    }
+
+    pub fn forget_memory_for_owner(
+        &self,
+        owner_id: &str,
+        memory_id: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self.connection()?.execute(
+            "UPDATE memories SET status='forgotten', updated_at=?1 WHERE owner_id=?2 AND memory_id=?3 AND status!='forgotten'",
+            params![Utc::now().to_rfc3339(), owner_id, memory_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn memories_for_owner_conversation(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Memory>, StoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare("SELECT memory_id, content, source, created_at, updated_at, category, status, confidence, provenance, supersedes_memory_id FROM memories WHERE owner_id=?1 AND conversation_id=?2 AND status='active' ORDER BY updated_at DESC LIMIT ?3")?;
+        let rows =
+            statement.query_map(params![owner_id, conversation_id, limit as i64], |row| {
+                Ok(Memory {
+                    id: row.get(0)?,
+                    content: row.get(1)?,
+                    source: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    category: row.get(5)?,
+                    status: row.get(6)?,
+                    confidence: row.get(7)?,
+                    provenance: row.get(8)?,
+                    supersedes_memory_id: row.get(9)?,
+                })
+            })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -458,10 +771,27 @@ impl ConversationStore {
         recent_limit: usize,
         memory_limit: usize,
     ) -> Result<ConversationContext, StoreError> {
+        let eligible: bool = self.connection()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE conversation_id=?1 AND owner_id=?2 AND status='active')",
+            params![conversation_id, owner_id],
+            |row| row.get(0),
+        )?;
+        if !eligible {
+            return Err(StoreError::InvalidInput(
+                "conversation is not an active conversation owned by the requested owner"
+                    .to_owned(),
+            ));
+        }
         Ok(ConversationContext {
             conversation_id: conversation_id.to_owned(),
-            summary: self.summary(conversation_id)?.map(|value| value.0),
-            memories: self.memories_for_owner(owner_id, memory_limit)?,
+            summary: self
+                .summary_for_owner(owner_id, conversation_id)?
+                .map(|value| value.0),
+            memories: self.memories_for_owner_conversation(
+                owner_id,
+                conversation_id,
+                memory_limit,
+            )?,
             document_context: self
                 .relevant_document_context_for_owner(owner_id, query, 6, 8_000)?,
             recent_messages: self.recent_messages(conversation_id, recent_limit)?,
@@ -536,6 +866,143 @@ impl ConversationStore {
             params![owner_id, document.id],
         )?;
         Ok(document)
+    }
+
+    pub fn ingest_attachment_for_owner(
+        &self,
+        owner_id: &str,
+        device_id: &str,
+        filename: &str,
+        media_type: &str,
+        source: &[u8],
+    ) -> Result<AttachmentRecord, StoreError> {
+        if owner_id.trim().is_empty() || device_id.trim().is_empty() || source.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "attachment owner, device, and bytes are required".to_owned(),
+            ));
+        }
+        self.cleanup_expired_attachments()?;
+        let now = Utc::now().to_rfc3339();
+        self.connection()?.execute(
+            "INSERT INTO devices(device_id, created_at, last_seen_at) VALUES(?1, ?2, ?2) ON CONFLICT(device_id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
+            params![device_id.trim(), now],
+        )?;
+        let attachment = AttachmentRecord {
+            id: Uuid::new_v4().to_string(),
+            filename: sanitize_filename(filename),
+            media_type: media_type.to_owned(),
+            byte_size: source.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(source)),
+            status: "uploaded".to_owned(),
+            created_at: now.clone(),
+        };
+        self.connection()?.execute(
+            "INSERT INTO attachments(attachment_id, owner_id, device_id, filename, media_type, byte_size, sha256, source_bytes, status, created_at, expires_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![attachment.id, owner_id.trim(), device_id.trim(), attachment.filename, attachment.media_type, attachment.byte_size as i64, attachment.sha256, source, attachment.status, attachment.created_at, (Utc::now() + chrono::Duration::days(7)).to_rfc3339()],
+        )?;
+        Ok(attachment)
+    }
+
+    pub fn claim_attachments_for_owner_turn(
+        &self,
+        owner_id: &str,
+        device_id: &str,
+        conversation_id: &str,
+        content: &str,
+        request_id: Option<&str>,
+        attachment_ids: &[String],
+    ) -> Result<i64, StoreError> {
+        if request_id.is_none() && !attachment_ids.is_empty() {
+            return Err(StoreError::InvalidInput(
+                "request_id is required when claiming attachments".to_owned(),
+            ));
+        }
+        if attachment_ids.iter().any(|id| id.trim().is_empty())
+            || attachment_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != attachment_ids.len()
+        {
+            return Err(StoreError::InvalidInput(
+                "attachment_ids must be unique and non-empty".to_owned(),
+            ));
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let inserted = transaction.execute(
+            "INSERT OR IGNORE INTO messages(conversation_id, role, content, created_at, origin_device_id, request_id) VALUES(?1, 'user', ?2, ?3, ?4, ?5)",
+            params![conversation_id, content, Utc::now().to_rfc3339(), device_id, request_id],
+        )?;
+        let message_id = if let Some(request_id) = request_id {
+            transaction.query_row(
+                "SELECT message_id FROM messages WHERE conversation_id=?1 AND request_id=?2",
+                params![conversation_id, request_id],
+                |row| row.get(0),
+            )?
+        } else {
+            transaction.last_insert_rowid()
+        };
+        if inserted > 0 {
+            for attachment_id in attachment_ids {
+                if transaction.execute("UPDATE attachments SET status='attached' WHERE attachment_id=?1 AND owner_id=?2 AND device_id=?3 AND status='uploaded'", params![attachment_id, owner_id, device_id])? != 1 {
+                    return Err(StoreError::InvalidInput("attachment missing, unavailable, or not owned by device".to_owned()));
+                }
+                transaction.execute(
+                    "INSERT INTO message_attachments(message_id, attachment_id) VALUES(?1, ?2)",
+                    params![message_id, attachment_id],
+                )?;
+            }
+        } else {
+            let existing = attachments_for_message_connection(&transaction, message_id)?;
+            let existing_ids = existing
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>();
+            let requested_ids = attachment_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            if existing_ids != requested_ids {
+                return Err(StoreError::InvalidInput(
+                    "request_id was already used with different attachments".to_owned(),
+                ));
+            }
+        }
+        transaction.commit()?;
+        Ok(message_id)
+    }
+
+    pub fn attachments_for_message(
+        &self,
+        message_id: i64,
+    ) -> Result<Vec<AttachmentRecord>, StoreError> {
+        let connection = self.connection()?;
+        attachments_for_message_connection(&connection, message_id)
+    }
+
+    pub fn attachment_content_for_owner(
+        &self,
+        owner_id: &str,
+        attachment_id: &str,
+    ) -> Result<Option<(AttachmentRecord, Vec<u8>)>, StoreError> {
+        let connection = self.connection()?;
+        connection
+            .query_row(
+                "SELECT attachment_id, filename, media_type, byte_size, sha256, status, created_at, source_bytes FROM attachments WHERE attachment_id=?1 AND owner_id=?2",
+                params![attachment_id, owner_id],
+                |row| Ok((attachment_row(row)?, row.get(7)?)),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn cleanup_expired_attachments(&self) -> Result<usize, StoreError> {
+        let deleted = self.connection()?.execute(
+            "DELETE FROM attachments WHERE status='uploaded' AND expires_at < ?1",
+            [Utc::now().to_rfc3339()],
+        )?;
+        Ok(deleted)
     }
 
     pub fn list_documents(&self, device_id: &str) -> Result<Vec<DocumentRecord>, StoreError> {
@@ -702,6 +1169,7 @@ impl ConversationStore {
     pub fn import_legacy_audit(
         &self,
         legacy_path: impl AsRef<Path>,
+        owner_id: &str,
         device_id: &str,
     ) -> Result<usize, StoreError> {
         let source_path = legacy_path.as_ref().to_string_lossy().to_string();
@@ -732,8 +1200,11 @@ impl ConversationStore {
             if already_imported {
                 continue;
             }
-            let conversation_id =
-                self.resolve_conversation(device_id, Some(&format!("legacy:{session_id}")))?;
+            let conversation_id = self.resolve_owner_conversation(
+                owner_id,
+                device_id,
+                Some(&format!("legacy:{session_id}")),
+            )?;
             let connection = self.connection()?;
             let transaction = connection.unchecked_transaction()?;
             transaction.execute(
@@ -779,6 +1250,27 @@ fn normalize(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+fn attachment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttachmentRecord> {
+    Ok(AttachmentRecord {
+        id: row.get(0)?,
+        filename: row.get(1)?,
+        media_type: row.get(2)?,
+        byte_size: row.get::<_, i64>(3)?.max(0) as u64,
+        sha256: row.get(4)?,
+        status: row.get(5)?,
+        created_at: row.get(6)?,
+    })
+}
+
+fn attachments_for_message_connection(
+    connection: &rusqlite::Connection,
+    message_id: i64,
+) -> Result<Vec<AttachmentRecord>, StoreError> {
+    let mut statement = connection.prepare("SELECT a.attachment_id, a.filename, a.media_type, a.byte_size, a.sha256, a.status, a.created_at FROM attachments a JOIN message_attachments ma ON ma.attachment_id=a.attachment_id WHERE ma.message_id=?1 ORDER BY ma.rowid")?;
+    let rows = statement.query_map([message_id], attachment_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 fn document_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DocumentRecord> {
@@ -836,4 +1328,19 @@ fn search_terms(value: &str) -> std::collections::HashSet<String> {
         .filter(|term| term.len() >= 3 && !STOP_WORDS.contains(term))
         .map(str::to_owned)
         .collect()
+}
+
+fn memory_from_row(row: &Row<'_>) -> rusqlite::Result<Memory> {
+    Ok(Memory {
+        id: row.get(0)?,
+        content: row.get(1)?,
+        source: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+        category: row.get(5)?,
+        status: row.get(6)?,
+        confidence: row.get(7)?,
+        provenance: row.get(8)?,
+        supersedes_memory_id: row.get(9)?,
+    })
 }

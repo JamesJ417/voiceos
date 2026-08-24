@@ -1,17 +1,20 @@
-# Omarchy Voice
+# Omarchy Touch
 
-Omarchy Voice is a voice-first AI layer for [Omarchy](https://omarchy.org). It
-runs VIC, a persistent personal agent powered by Hermes and a remote Codex CLI
-brain, directly underneath the Omarchy desktop—no local LLM required.
+Omarchy Touch is a voice-first, touch-first add-on for
+[Omarchy OS](https://omarchy.org). It combines three distinct layers:
+**VoiceOS** is the private backend and control plane, **VIC** is the Voice
+Interface Controller, and **Touch** is the portrait touchscreen system
+interface. Hermes and a remote Codex CLI reasoning tier run behind VoiceOS
+directly underneath the Omarchy desktop—no local LLM required.
 
-Talk to VIC from the full-screen VIC Panel or the Android companion app. The
+Talk to VIC from the full-screen Touch interface or the Android companion app. The
 Omarchy workstation owns the private gateway, conversation, permissions, tools,
 and audit history; Tailscale carries encrypted traffic between devices without
 exposing the gateway to the public internet.
 
 ## What it does
 
-- Opens VIC Panel as a dedicated full-screen Hyprland workspace.
+- Opens Touch as a dedicated full-screen portrait Hyprland workspace.
 - Uses a USB microphone for hands-free conversations with VIC.
 - Connects VIC to Hermes for agent orchestration and Codex for remote reasoning.
 - Extends VIC to a Pixel phone over private Tailscale HTTPS.
@@ -45,7 +48,8 @@ management, Tailscale access, and the security model.
 
 ```text
 apps/android/       Native Android client and home-screen widget
-apps/kiosk/         VIC Panel web and touchscreen console
+apps/kiosk/         Touch web system interface
+apps/vic-console/   Native Tauri information console and weather dashboard
 contracts/          HTTP API contract
 docs/               Architecture and security decisions
 services/gateway/   Mock inference gateway
@@ -53,6 +57,13 @@ services/voiceos-core/ Provider-neutral Rust conversation and memory core
 services/voiceos-ontology/ Canonical speech meaning, validation, aliases, and audit
 services/voiceos-gateway-rs/ Android-compatible Rust transition gateway
 ```
+
+`contracts/component-registry.json` is the canonical integration map. VoiceOS
+serves it through the authenticated client bootstrap route so Touch can show
+which production, registered, and preview components are tied into the system.
+VIC Console uses that typed boundary through an owner-only local Unix socket.
+Voice commands are ontology-validated and every acknowledged or failed delivery
+is recorded in the VoiceOS execution log.
 
 ## Architecture guardrails
 
@@ -115,10 +126,10 @@ The default gateway URL is `http://10.0.2.2:8787`, which reaches this laptop fro
 
 Cleartext HTTP is allowed only in the debug build for initial LAN testing. The production transport will require TLS over the private Tailscale network.
 
-## VIC Panel interfaces
+## Touch and VIC interfaces
 
-The Pixel client and the touchscreen console share the VIC Panel visual
-system: near-black carbon surfaces, restrained hex geometry, cyan-teal primary
+The Pixel VIC client and the Touch console share a visual system:
+near-black carbon surfaces, restrained hex geometry, cyan-teal primary
 actions, and explicit state labels. The phone remains voice-first and displays
 secondary controls only when they apply. The responsive client in `apps/kiosk`
 provides live Command, History, and System views for normal browsers and the
@@ -126,7 +137,7 @@ future full-screen HP touchscreen kiosk. It supports browser voice recognition
 and playback, shared audit history, provider and system status, exact-response
 copying, private file upload, and explicit approval decisions.
 
-The web client enrolls as a separate Omarchy Voice device. Local browser origins are
+Touch enrolls as a separate VoiceOS device. Local browser origins are
 accepted for development. Production origins must be explicitly allowlisted in
 the gateway with `VOICEOS_WEB_ORIGINS`; wildcards are intentionally unsupported.
 
@@ -206,10 +217,12 @@ cargo test --workspace --all-targets
 See `docs/rust-memory-migration.md` for the provider configuration, rig shadow
 deployment, eventual HP database move, and Python retirement gate.
 
-## Omarchy desktop integration
+## Omarchy OS add-on integration
 
-Omarchy Voice can run underneath an Omarchy desktop as a hardened user service without
-changing packaged Omarchy files or granting root authority. See
+Omarchy Touch installs as an optional add-on above Omarchy OS. Its Touch
+interface, VIC voice controller, and VoiceOS backend stay in hardened user
+services. It does not change packaged Omarchy
+files or grant root authority. See
 [`ops/omarchy/README.md`](ops/omarchy/README.md) for installation, operation,
 and the boundary between the desktop control plane and optional GPU workers.
 

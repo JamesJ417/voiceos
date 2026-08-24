@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use tempfile::tempdir;
 use voiceos_core::{
-    ConversationEngine, ConversationStore, EngineConfig, Provider, ProviderCompletion,
-    ProviderError, ProviderRequest, Role, Usage,
+    ContextClaim, ContextSource, ConversationEngine, ConversationStore, EngineConfig, Provider,
+    ProviderCompletion, ProviderError, ProviderRequest, QuarantinedClaim, Role, Usage,
 };
 
 #[derive(Default)]
@@ -230,18 +230,18 @@ fn legacy_python_audit_can_be_replayed_idempotently() {
     let store = ConversationStore::in_memory().unwrap();
     assert_eq!(
         store
-            .import_legacy_audit(&legacy_path, "legacy-device")
+            .import_legacy_audit(&legacy_path, "legacy-owner", "legacy-device")
             .unwrap(),
         1
     );
     assert_eq!(
         store
-            .import_legacy_audit(&legacy_path, "legacy-device")
+            .import_legacy_audit(&legacy_path, "legacy-owner", "legacy-device")
             .unwrap(),
         0
     );
     let conversation = store
-        .resolve_conversation("legacy-device", Some("new-session"))
+        .resolve_owner_conversation("legacy-owner", "legacy-device", Some("new-session"))
         .unwrap();
     let messages = store.recent_messages(&conversation, 10).unwrap();
     assert_eq!(messages.len(), 2);
@@ -291,4 +291,236 @@ fn uploaded_documents_are_private_searchable_and_deletable() {
     assert!(store.delete_document("pixel", &reference.id).unwrap());
     assert!(!store.delete_document("pixel", &reference.id).unwrap());
     assert_eq!(store.list_documents("pixel").unwrap(), vec![profile]);
+}
+
+#[test]
+fn rejected_claims_are_durable_and_retrievable_with_provenance_reason_and_timestamp() {
+    let store = ConversationStore::in_memory().unwrap();
+    store.migrate_devices_to_owner("owner-1").unwrap();
+    let conversation = store
+        .resolve_owner_conversation("owner-1", "pixel", None)
+        .unwrap();
+    let claim = ContextClaim::new(
+        "bad",
+        &conversation,
+        ContextSource::ConversationSummary,
+        "old summary",
+    )
+    .with_metadata("summary://source-1", 0.7, 0.4);
+    store
+        .quarantine_claims(
+            &conversation,
+            &[QuarantinedClaim {
+                claim,
+                reason: "stale summary".into(),
+            }],
+        )
+        .unwrap();
+    let records = store
+        .quarantined_claims_for_owner("owner-1", &conversation)
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].claim_id, "bad");
+    assert_eq!(records[0].provenance, "summary://source-1");
+    assert_eq!(records[0].reason, "stale summary");
+    assert!(!records[0].created_at.is_empty());
+}
+
+#[test]
+fn owner_context_retrieval_is_conversation_scoped_for_summaries_and_memories() {
+    let store = ConversationStore::in_memory().unwrap();
+    store.migrate_devices_to_owner("owner-1").unwrap();
+    let conversation = store
+        .resolve_owner_conversation("owner-1", "pixel", None)
+        .unwrap();
+    store
+        .save_summary_for_owner("owner-1", &conversation, "current summary", 1)
+        .unwrap();
+    store
+        .remember_for_owner_in_conversation(
+            "owner-1",
+            "pixel",
+            &conversation,
+            "current memory",
+            "test",
+        )
+        .unwrap();
+    let other = "other-conversation";
+    assert!(store.summary_for_owner("owner-1", other).unwrap().is_none());
+    assert!(
+        store
+            .memories_for_owner_conversation("owner-1", other, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .context_for_owner("owner-1", other, "query", 2, 10)
+            .is_err()
+    );
+}
+
+#[test]
+fn compression_persists_owner_scoped_summary_metadata_across_reopen() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("compression-metadata.sqlite3");
+    let conversation_id;
+    {
+        let store = Arc::new(ConversationStore::open(&path).unwrap());
+        let engine = ConversationEngine::new(store.clone()).with_config(EngineConfig {
+            recent_message_limit: 1,
+            summary_trigger_messages: 2,
+            ..EngineConfig::default()
+        });
+        let provider = RecordingProvider::default();
+        conversation_id = engine
+            .run_owner_turn(
+                "owner-1",
+                "pixel",
+                Some("session"),
+                "First scoped turn",
+                vec![],
+                &provider,
+            )
+            .unwrap()
+            .0;
+        engine
+            .run_owner_turn(
+                "owner-1",
+                "pixel",
+                Some("session"),
+                "Second scoped turn",
+                vec![],
+                &provider,
+            )
+            .unwrap();
+    }
+
+    let connection = Connection::open(&path).unwrap();
+    let metadata: (String, String) = connection
+        .query_row(
+            "SELECT owner_id, provenance FROM conversation_summaries WHERE conversation_id=?1",
+            [&conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(metadata.0, "owner-1");
+    assert_eq!(
+        metadata.1,
+        format!("conversation-summary://{conversation_id}")
+    );
+    drop(connection);
+
+    let reopened = ConversationStore::open(&path).unwrap();
+    let context = reopened
+        .context_for_owner("owner-1", &conversation_id, "resume", 1, 1)
+        .unwrap();
+    assert!(context.summary.unwrap().contains("First scoped turn"));
+}
+
+#[test]
+fn reopened_store_rejects_recovery_of_an_archived_summary() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("recovery-isolation.sqlite3");
+    let archived_conversation;
+    {
+        let store = ConversationStore::open(&path).unwrap();
+        archived_conversation = store
+            .resolve_owner_conversation("owner-1", "pixel", Some("old-session"))
+            .unwrap();
+        store
+            .save_summary_for_owner("owner-1", &archived_conversation, "old-session summary", 1)
+            .unwrap();
+    }
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute(
+            "UPDATE conversations SET status='archived' WHERE conversation_id=?1",
+            [&archived_conversation],
+        )
+        .unwrap();
+    drop(connection);
+
+    let reopened = ConversationStore::open(&path).unwrap();
+    let active_conversation = reopened
+        .resolve_owner_conversation("owner-1", "pixel", Some("new-session"))
+        .unwrap();
+    assert_ne!(active_conversation, archived_conversation);
+    assert!(
+        reopened
+            .context_for_owner("owner-1", &archived_conversation, "resume", 10, 10)
+            .is_err()
+    );
+}
+
+#[test]
+fn image_attachment_is_owner_scoped_and_claimed_once_with_an_idempotent_turn() {
+    let store = Arc::new(ConversationStore::in_memory().unwrap());
+    store.migrate_devices_to_owner("owner-1").unwrap();
+    let attachment = store
+        .ingest_attachment_for_owner(
+            "owner-1",
+            "pixel",
+            "kitchen.jpg",
+            "image/jpeg",
+            b"\xff\xd8\xfftest-image",
+        )
+        .unwrap();
+    let conversation_id = store
+        .resolve_owner_conversation("owner-1", "pixel", Some("phone-session"))
+        .unwrap();
+    let message_id = store
+        .claim_attachments_for_owner_turn(
+            "owner-1",
+            "pixel",
+            &conversation_id,
+            "What is in this photo?",
+            Some("image-turn-1"),
+            &[attachment.id.clone()],
+        )
+        .unwrap();
+    store
+        .claim_attachments_for_owner_turn(
+            "owner-1",
+            "pixel",
+            &conversation_id,
+            "What is in this photo?",
+            Some("image-turn-1"),
+            &[attachment.id.clone()],
+        )
+        .unwrap();
+
+    assert_eq!(store.message_count(&conversation_id).unwrap(), 1);
+    let mut expected = attachment.clone();
+    expected.status = "attached".to_owned();
+    assert_eq!(
+        store.attachments_for_message(message_id).unwrap(),
+        vec![expected.clone()]
+    );
+    let messages = store.recent_conversation_messages("owner-1", 10).unwrap();
+    assert_eq!(messages[0].attachments, vec![expected]);
+    assert!(
+        store
+            .claim_attachments_for_owner_turn(
+                "owner-1",
+                "pixel",
+                &conversation_id,
+                "same request, different attachments",
+                Some("image-turn-1"),
+                &[],
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .claim_attachments_for_owner_turn(
+                "other-owner",
+                "other-device",
+                &conversation_id,
+                "should fail",
+                Some("cross-owner-request"),
+                &[attachment.id.clone()],
+            )
+            .is_err()
+    );
 }

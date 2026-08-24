@@ -37,6 +37,159 @@ impl DeterministicResolver {
             ));
         }
 
+        if has_any(&normalized, &["refresh", "update", "reload"])
+            && has_any(&normalized, &["console", "dashboard", "weather"])
+        {
+            return Some(request(
+                "console.refresh_dashboard",
+                [],
+                vec![],
+                0.99,
+                source,
+            ));
+        }
+        if has_any(&normalized, &["show", "open", "display", "switch"])
+            && normalized.contains("weather")
+        {
+            return Some(request("console.show_weather", [], vec![], 0.99, source));
+        }
+
+        if let Some(title) = strip_after(
+            &normalized,
+            &[
+                "park this idea ",
+                "park this ",
+                "capture this without switching ",
+                "capture this ",
+                "put this in the parking lot ",
+                "don t let me forget ",
+            ],
+        ) && !title.is_empty()
+        {
+            return Some(request(
+                "focus.capture",
+                [("title", json!(title))],
+                vec![],
+                0.99,
+                source,
+            ));
+        }
+        if let Some(reference) = strip_after(
+            &normalized,
+            &[
+                "switch focus to ",
+                "switch my focus to ",
+                "change focus to ",
+                "work on ",
+            ],
+        ) {
+            let reference = reference
+                .strip_suffix(" instead")
+                .unwrap_or(reference)
+                .trim();
+            if !reference.is_empty()
+                && (normalized.contains("switch") || normalized.ends_with(" instead"))
+            {
+                return Some(request(
+                    "focus.switch",
+                    [("reference", json!(reference))],
+                    vec![],
+                    0.99,
+                    source,
+                ));
+            }
+        }
+
+        if has_any(
+            &normalized,
+            &[
+                "i got interrupted",
+                "i was interrupted",
+                "save my restart point",
+                "lost my focus",
+            ],
+        ) {
+            return Some(request("focus.interrupt", [], vec![], 0.99, source));
+        }
+        if has_any(
+            &normalized,
+            &[
+                "help me restart",
+                "where was i",
+                "resume focus",
+                "restart my focus",
+                "pick up where i left off",
+            ],
+        ) {
+            return Some(request("focus.restart", [], vec![], 0.99, source));
+        }
+        if has_any(
+            &normalized,
+            &["done for now", "end focus session", "finish focus session"],
+        ) {
+            return Some(request("focus.complete", [], vec![], 0.99, source));
+        }
+        if let Some(minutes) = focus_minutes(&normalized) {
+            return Some(request(
+                "focus.start",
+                [("minutes", json!(minutes))],
+                vec![],
+                0.99,
+                source,
+            ));
+        }
+        if has_any(
+            &normalized,
+            &[
+                "i am overwhelmed",
+                "i m overwhelmed",
+                "low energy",
+                "make it easier",
+            ],
+        ) {
+            return Some(request(
+                "focus.next",
+                [("mode", json!("low_energy"))],
+                vec![],
+                0.99,
+                source,
+            ));
+        }
+        if has_any(
+            &normalized,
+            &[
+                "five minute version",
+                "5 minute version",
+                "give me five minutes",
+            ],
+        ) {
+            return Some(request(
+                "focus.next",
+                [("mode", json!("five_minute"))],
+                vec![],
+                0.99,
+                source,
+            ));
+        }
+        if has_any(
+            &normalized,
+            &[
+                "what should i do now",
+                "what is the next thing",
+                "give me one thing",
+                "help me focus",
+                "next action",
+            ],
+        ) {
+            return Some(request(
+                "focus.next",
+                [("mode", json!("normal"))],
+                vec![],
+                0.99,
+                source,
+            ));
+        }
+
         if is_task_assistance_request(&normalized) {
             return Some(request("task.assist", [], vec![], 0.99, source));
         }
@@ -440,6 +593,22 @@ fn playback_rate(phrase: &str) -> Option<f64> {
         ],
     ) {
         Some(1.0)
+    } else {
+        None
+    }
+}
+
+fn focus_minutes(phrase: &str) -> Option<u32> {
+    let focus_language = has_any(phrase, &["focus", "session", "timer"]);
+    if !focus_language || !has_any(phrase, &["start", "begin", "give me", "focus for"]) {
+        return None;
+    }
+    if has_any(phrase, &["five minute", "5 minute", "5-minute"]) {
+        Some(5)
+    } else if has_any(phrase, &["ten minute", "10 minute", "10-minute"]) {
+        Some(10)
+    } else if has_any(phrase, &["twenty minute", "20 minute", "20-minute"]) {
+        Some(20)
     } else {
         None
     }

@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -68,6 +68,21 @@ impl ConversationStore {
         })
     }
 
+    pub fn projects(&self, owner_id: &str, limit: usize) -> Result<Vec<ProjectRecord>, StoreError> {
+        require_text("owner_id", owner_id)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT project_id, owner_id, goal_id, title, status, created_at, updated_at
+             FROM projects
+             WHERE owner_id=?1
+             ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC
+             LIMIT ?2",
+        )?;
+        let rows =
+            statement.query_map(params![owner_id.trim(), limit.clamp(1, 200)], project_row)?;
+        rows.map(|row| row.map_err(StoreError::from)).collect()
+    }
+
     pub fn create_task(
         &self,
         owner_id: &str,
@@ -96,7 +111,7 @@ impl ConversationStore {
             require_owned(&connection, "tasks", "task_id", parent_task_id, owner_id)?;
         }
         connection.execute(
-            "INSERT INTO tasks(task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, status, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ready', ?8, ?8)",
+            "INSERT INTO tasks(task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, due_at, importance, status, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 'normal', 'ready', ?8, ?8)",
             params![id, owner_id.trim(), project_id, parent_task_id, title.trim(), observable_outcome.trim(), estimated_minutes, now],
         )?;
         Ok(TaskRecord {
@@ -107,6 +122,8 @@ impl ConversationStore {
             title: title.trim().to_owned(),
             observable_outcome: observable_outcome.trim().to_owned(),
             estimated_minutes,
+            due_at: None,
+            importance: "normal".to_owned(),
             status: "ready".to_owned(),
             created_at: now.clone(),
             updated_at: now,
@@ -122,7 +139,7 @@ impl ConversationStore {
         require_text("owner_id", owner_id)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, status, created_at, updated_at
+            "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, due_at, importance, status, created_at, updated_at
              FROM tasks
              WHERE owner_id=?1 AND (?2 OR status NOT IN ('completed', 'cancelled'))
              ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'ready' THEN 1 WHEN 'blocked' THEN 2 WHEN 'proposed' THEN 3 ELSE 4 END,
@@ -141,7 +158,7 @@ impl ConversationStore {
         require_text("task_id", task_id)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, status, created_at, updated_at
+            "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, due_at, importance, status, created_at, updated_at
              FROM tasks WHERE owner_id=?1 AND task_id=?2",
         )?;
         let mut rows = statement.query(params![owner_id.trim(), task_id.trim()])?;
@@ -149,6 +166,54 @@ impl ConversationStore {
             .map(task_row)
             .transpose()
             .map_err(StoreError::from)
+    }
+
+    pub fn assign_task_project_as(
+        &self,
+        owner_id: &str,
+        task_id: &str,
+        project_id: Option<&str>,
+        actor: &str,
+    ) -> Result<Option<TaskRecord>, StoreError> {
+        require_text("owner_id", owner_id)?;
+        require_text("task_id", task_id)?;
+        require_text("actor", actor)?;
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        if let Some(project_id) = project_id {
+            require_text("project_id", project_id)?;
+            require_owned(&connection, "projects", "project_id", project_id, owner_id)?;
+        }
+        let transaction = connection.transaction()?;
+        let previous_project_id: Option<Option<String>> = transaction
+            .query_row(
+                "SELECT project_id FROM tasks WHERE owner_id=?1 AND task_id=?2",
+                params![owner_id.trim(), task_id.trim()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(previous_project_id) = previous_project_id else {
+            return Ok(None);
+        };
+        let project_id = project_id.map(str::trim);
+        transaction.execute(
+            "UPDATE tasks SET project_id=?3, updated_at=?4 WHERE owner_id=?1 AND task_id=?2",
+            params![owner_id.trim(), task_id.trim(), project_id, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO execution_events(owner_id, stream_id, event_type, actor, payload_json, occurred_at)
+             VALUES(?1, ?2, 'task.project_changed', ?3, ?4, ?5)",
+            params![
+                owner_id.trim(),
+                task_id.trim(),
+                actor.trim(),
+                serde_json::json!({"from": previous_project_id, "to": project_id}).to_string(),
+                now,
+            ],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.task(owner_id, task_id)
     }
 
     pub fn update_task_status_as(
@@ -187,6 +252,60 @@ impl ConversationStore {
                 task_id.trim(),
                 actor.trim(),
                 serde_json::json!({"from": previous_status, "to": status}).to_string(),
+                now,
+            ],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.task(owner_id, task_id)
+    }
+
+    pub fn set_task_attention_as(
+        &self,
+        owner_id: &str,
+        task_id: &str,
+        due_at: Option<&str>,
+        importance: &str,
+        actor: &str,
+    ) -> Result<Option<TaskRecord>, StoreError> {
+        require_text("owner_id", owner_id)?;
+        require_text("task_id", task_id)?;
+        require_text("actor", actor)?;
+        validate_task_importance(importance)?;
+        let due_at = due_at
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                DateTime::parse_from_rfc3339(value)
+                    .map(|parsed| parsed.with_timezone(&Utc).to_rfc3339())
+                    .map_err(|_| {
+                        StoreError::InvalidInput("due_at must be an RFC 3339 date-time".to_owned())
+                    })
+            })
+            .transpose()?;
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE owner_id=?1 AND task_id=?2)",
+            params![owner_id.trim(), task_id.trim()],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        transaction.execute(
+            "UPDATE tasks SET due_at=?3, importance=?4, updated_at=?5 WHERE owner_id=?1 AND task_id=?2",
+            params![owner_id.trim(), task_id.trim(), due_at, importance, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO execution_events(owner_id, stream_id, event_type, actor, payload_json, occurred_at)
+             VALUES(?1, ?2, 'task.attention_changed', ?3, ?4, ?5)",
+            params![
+                owner_id.trim(),
+                task_id.trim(),
+                actor.trim(),
+                serde_json::json!({"due_at": due_at, "importance": importance}).to_string(),
                 now,
             ],
         )?;
@@ -936,6 +1055,16 @@ fn validate_task_status(status: &str) -> Result<(), StoreError> {
     }
 }
 
+fn validate_task_importance(importance: &str) -> Result<(), StoreError> {
+    if matches!(importance, "low" | "normal" | "high" | "critical") {
+        Ok(())
+    } else {
+        Err(StoreError::InvalidInput(
+            "invalid task importance".to_owned(),
+        ))
+    }
+}
+
 fn validate_job_status(status: &str) -> Result<(), StoreError> {
     if matches!(
         status,
@@ -976,9 +1105,23 @@ fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRecord> {
         title: row.get(4)?,
         observable_outcome: row.get(5)?,
         estimated_minutes: row.get(6)?,
-        status: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        due_at: row.get(7)?,
+        importance: row.get(8)?,
+        status: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+fn project_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRecord> {
+    Ok(ProjectRecord {
+        id: row.get(0)?,
+        owner_id: row.get(1)?,
+        goal_id: row.get(2)?,
+        title: row.get(3)?,
+        status: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 

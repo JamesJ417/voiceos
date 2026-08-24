@@ -1,4 +1,4 @@
-name: Omarchy Voice quality gates
+name: VoiceOS, VIC, and Touch quality gates
 
 on:
   push:
@@ -60,6 +60,24 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm test
+
+  vic-console-web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/vic-console
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/vic-console/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
 
   android:
     runs-on: ubuntu-latest

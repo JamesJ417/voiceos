@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    ChatMessage, ConversationStore, Provider, ProviderCompletion, ProviderError, ProviderRequest,
-    Role, StoreError, ToolDefinition,
+    ChatMessage, ContextClaim, ContextSource, ConversationStore, Provider, ProviderCompletion,
+    ProviderError, ProviderRequest, Role, StoreError, ToolDefinition, validate_context,
 };
 
 #[derive(Clone, Debug)]
@@ -75,6 +75,27 @@ impl MemoryExtractor for ExplicitMemoryExtractor {
                 }
             }
         }
+        let durable_prefixes = [
+            "my name is ",
+            "my preferred name is ",
+            "my favorite ",
+            "i prefer ",
+            "i am allergic to ",
+            "i'm allergic to ",
+            "my timezone is ",
+            "i live in ",
+            "i work at ",
+            "my email is ",
+        ];
+        if durable_prefixes
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+        {
+            let memory = trimmed.trim_end_matches(['.', '!', '?']).trim();
+            if memory.len() >= 4 && memory.len() <= 500 {
+                return vec![memory.to_owned()];
+            }
+        }
         Vec::new()
     }
 }
@@ -85,6 +106,8 @@ pub enum EngineError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    #[error("context integrity rejected {count} claim(s)")]
+    Integrity { count: usize },
 }
 
 pub struct OwnerTurnInput<'a> {
@@ -94,6 +117,7 @@ pub struct OwnerTurnInput<'a> {
     pub user_text: &'a str,
     pub tools: Vec<ToolDefinition>,
     pub request_id: Option<&'a str>,
+    pub attachment_ids: Vec<String>,
 }
 
 pub struct ConversationEngine {
@@ -153,6 +177,7 @@ impl ConversationEngine {
                 user_text,
                 tools,
                 request_id: None,
+                attachment_ids: vec![],
             },
             provider,
         )
@@ -163,14 +188,15 @@ impl ConversationEngine {
         input: OwnerTurnInput<'_>,
         provider: &dyn Provider,
     ) -> Result<(String, ProviderCompletion), EngineError> {
-        let (conversation_id, context) = self.prepare_owner_turn(
+        let (conversation_id, context) = self.prepare_owner_turn_with_attachments(
             input.owner_id,
             input.device_id,
             input.client_session_id,
             input.user_text,
             input.request_id,
+            &input.attachment_ids,
         )?;
-        let messages = self.provider_messages(context);
+        let messages = self.provider_messages(context)?;
         let completion = provider.complete(&ProviderRequest {
             conversation_id: conversation_id.clone(),
             messages,
@@ -203,22 +229,53 @@ impl ConversationEngine {
         user_text: &str,
         request_id: Option<&str>,
     ) -> Result<(String, crate::ConversationContext), StoreError> {
+        self.prepare_owner_turn_with_attachments(
+            owner_id,
+            device_id,
+            client_session_id,
+            user_text,
+            request_id,
+            &[],
+        )
+    }
+
+    pub fn prepare_owner_turn_with_attachments(
+        &self,
+        owner_id: &str,
+        device_id: &str,
+        client_session_id: Option<&str>,
+        user_text: &str,
+        request_id: Option<&str>,
+        attachment_ids: &[String],
+    ) -> Result<(String, crate::ConversationContext), StoreError> {
         let conversation_id =
             self.store
                 .resolve_owner_conversation(owner_id, device_id, client_session_id)?;
         for memory in self.memory_extractor.extract(user_text) {
-            self.store
-                .remember_for_owner(owner_id, device_id, &memory, "explicit-user-request")?;
+            let lower = user_text.trim().to_lowercase();
+            let source = if lower.starts_with("remember ") || lower.starts_with("please remember ")
+            {
+                "explicit-user-request"
+            } else {
+                "automatic-user-statement"
+            };
+            self.store.remember_for_owner_in_conversation(
+                owner_id,
+                device_id,
+                &conversation_id,
+                &memory,
+                source,
+            )?;
         }
-        self.store.append_message_from(
+        self.store.claim_attachments_for_owner_turn(
+            owner_id,
+            device_id,
             &conversation_id,
-            Role::User,
             user_text,
-            None,
-            Some(device_id),
             request_id,
+            attachment_ids,
         )?;
-        self.roll_summary(&conversation_id)?;
+        self.roll_summary(owner_id, &conversation_id)?;
         let context = self.store.context_for_owner(
             owner_id,
             &conversation_id,
@@ -264,7 +321,58 @@ impl ConversationEngine {
         Ok(())
     }
 
-    fn provider_messages(&self, context: crate::ConversationContext) -> Vec<ChatMessage> {
+    fn provider_messages(
+        &self,
+        context: crate::ConversationContext,
+    ) -> Result<Vec<ChatMessage>, EngineError> {
+        let mut claims = Vec::new();
+        if let Some(summary) = context.summary.as_ref() {
+            claims.push(ContextClaim::new(
+                "conversation-summary",
+                &context.conversation_id,
+                ContextSource::ConversationSummary,
+                summary,
+            ));
+        }
+        claims.extend(context.memories.iter().map(|memory| {
+            ContextClaim::new(
+                memory.id.clone(),
+                &context.conversation_id,
+                ContextSource::ExplicitMemory,
+                memory.content.clone(),
+            )
+        }));
+        if let Some(document_context) = context.document_context.as_ref() {
+            claims.push(ContextClaim::new(
+                "document-context",
+                &context.conversation_id,
+                ContextSource::Document,
+                document_context,
+            ));
+        }
+        claims.extend(
+            context
+                .recent_messages
+                .iter()
+                .enumerate()
+                .map(|(index, message)| {
+                    ContextClaim::new(
+                        format!("message-{index}"),
+                        &context.conversation_id,
+                        ContextSource::Conversation,
+                        message.content.clone(),
+                    )
+                }),
+        );
+        let integrity = validate_context(&context.conversation_id, claims);
+        if !integrity.quarantined.is_empty() {
+            self.store
+                .quarantine_claims(&context.conversation_id, &integrity.quarantined)?;
+            return Err(EngineError::Integrity {
+                count: integrity.quarantined.len(),
+            });
+        }
+
         let mut messages = vec![ChatMessage::new(Role::System, &self.config.system_prompt)];
         if !context.memories.is_empty() {
             messages.push(ChatMessage::new(
@@ -293,10 +401,10 @@ impl ConversationEngine {
             ));
         }
         messages.extend(context.recent_messages);
-        messages
+        Ok(messages)
     }
 
-    fn roll_summary(&self, conversation_id: &str) -> Result<(), StoreError> {
+    fn roll_summary(&self, owner_id: &str, conversation_id: &str) -> Result<(), StoreError> {
         if self.store.message_count(conversation_id)? < self.config.summary_trigger_messages {
             return Ok(());
         }
@@ -306,7 +414,7 @@ impl ConversationEngine {
         else {
             return Ok(());
         };
-        let existing = self.store.summary(conversation_id)?;
+        let existing = self.store.summary_for_owner(owner_id, conversation_id)?;
         if existing
             .as_ref()
             .is_some_and(|(_, existing_id)| *existing_id >= through_id)
@@ -328,7 +436,7 @@ impl ConversationEngine {
             .summarizer
             .summarize(existing.as_ref().map(|value| value.0.as_str()), &messages);
         self.store
-            .save_summary(conversation_id, &summary, through_id)
+            .save_summary_for_owner(owner_id, conversation_id, &summary, through_id)
     }
 }
 

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/vic-console/src-tauri",
     "apps/vic-panel-native",
     "services/voiceos-core",
     "services/voiceos-gateway-rs",

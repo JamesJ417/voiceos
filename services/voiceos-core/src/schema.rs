@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
@@ -46,6 +46,21 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             updated_at TEXT NOT NULL,
             FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
         );
+        CREATE TABLE IF NOT EXISTS context_quarantine (
+            quarantine_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            claim_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            provenance TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            relevance REAL NOT NULL,
+            content TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
+        );
+        CREATE INDEX IF NOT EXISTS context_quarantine_conversation_idx
+            ON context_quarantine(conversation_id, created_at);
         CREATE TABLE IF NOT EXISTS memories (
             memory_id TEXT PRIMARY KEY,
             device_id TEXT NOT NULL,
@@ -54,7 +69,6 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             source TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            UNIQUE(device_id, normalized_content),
             FOREIGN KEY(device_id) REFERENCES devices(device_id)
         );
         CREATE TABLE IF NOT EXISTS legacy_imports (
@@ -86,6 +100,44 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS documents_device_idx ON documents(device_id, created_at);
         CREATE INDEX IF NOT EXISTS document_chunks_document_idx ON document_chunks(document_id, ordinal);
+        CREATE TABLE IF NOT EXISTS attachments (
+            attachment_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            byte_size INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            source_bytes BLOB NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('uploaded', 'attached')),
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            FOREIGN KEY(device_id) REFERENCES devices(device_id)
+        );
+        CREATE INDEX IF NOT EXISTS attachments_owner_status_idx ON attachments(owner_id, status, created_at);
+        CREATE TABLE IF NOT EXISTS message_attachments (
+            message_id INTEGER NOT NULL,
+            attachment_id TEXT NOT NULL,
+            PRIMARY KEY(message_id, attachment_id),
+            FOREIGN KEY(message_id) REFERENCES messages(message_id) ON DELETE CASCADE,
+            FOREIGN KEY(attachment_id) REFERENCES attachments(attachment_id)
+        );
+        CREATE TABLE IF NOT EXISTS fieldy_transcript_intake (
+            intake_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            source TEXT NOT NULL CHECK(source = 'fieldy'),
+            event_id TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            raw_payload_json TEXT NOT NULL,
+            normalized_transcript TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('received', 'reviewing', 'approved', 'discarded', 'expired', 'failed')),
+            expires_at TEXT NOT NULL,
+            processing_error TEXT,
+            review_metadata_json TEXT,
+            UNIQUE(owner_id, source, event_id)
+        );
+        CREATE INDEX IF NOT EXISTS fieldy_intake_owner_status_idx ON fieldy_transcript_intake(owner_id, status, received_at);
 
         CREATE TABLE IF NOT EXISTS owners (
             owner_id TEXT PRIMARY KEY,
@@ -122,6 +174,8 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             title TEXT NOT NULL,
             observable_outcome TEXT NOT NULL,
             estimated_minutes INTEGER NOT NULL CHECK(estimated_minutes BETWEEN 1 AND 1440),
+            due_at TEXT,
+            importance TEXT NOT NULL DEFAULT 'normal' CHECK(importance IN ('low', 'normal', 'high', 'critical')),
             status TEXT NOT NULL CHECK(status IN ('proposed', 'ready', 'active', 'blocked', 'completed', 'cancelled')),
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -130,6 +184,29 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(parent_task_id) REFERENCES tasks(task_id)
         );
         CREATE INDEX IF NOT EXISTS tasks_owner_status_idx ON tasks(owner_id, status, updated_at);
+        CREATE TABLE IF NOT EXISTS focus_sessions (
+            focus_session_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            step_id TEXT,
+            mode TEXT NOT NULL CHECK(mode IN ('normal', 'five_minute', 'low_energy', 'restart')),
+            planned_minutes INTEGER NOT NULL CHECK(planned_minutes BETWEEN 1 AND 120),
+            status TEXT NOT NULL CHECK(status IN ('active', 'interrupted', 'completed', 'cancelled')),
+            next_action TEXT NOT NULL,
+            interruption_note TEXT,
+            restart_action TEXT,
+            reflection TEXT,
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            ended_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id),
+            FOREIGN KEY(step_id) REFERENCES task_steps(step_id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS one_active_focus_session_per_owner
+            ON focus_sessions(owner_id) WHERE status='active';
+        CREATE INDEX IF NOT EXISTS focus_sessions_owner_updated_idx
+            ON focus_sessions(owner_id, updated_at DESC);
         CREATE TABLE IF NOT EXISTS task_steps (
             step_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,
@@ -355,13 +432,184 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS provider_runs_owner_idx
             ON provider_runs(owner_id, provider_run_id DESC);
+        CREATE TABLE IF NOT EXISTS sleep_cycles (
+            sleep_cycle_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'dry_run' CHECK(mode IN ('dry_run', 'commit')),
+            status TEXT NOT NULL DEFAULT 'completed' CHECK(status IN ('running', 'completed', 'failed')),
+            previous_cycle_id TEXT,
+            event_watermark INTEGER NOT NULL DEFAULT 0,
+            message_watermark INTEGER NOT NULL DEFAULT 0,
+            events_inspected INTEGER NOT NULL DEFAULT 0,
+            messages_inspected INTEGER NOT NULL DEFAULT 0,
+            memories_before INTEGER NOT NULL DEFAULT 0,
+            memories_after INTEGER NOT NULL DEFAULT 0,
+            proposed_changes INTEGER NOT NULL DEFAULT 0,
+            committed_changes INTEGER NOT NULL DEFAULT 0,
+            summary TEXT NOT NULL DEFAULT '',
+            input_digest TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(previous_cycle_id) REFERENCES sleep_cycles(sleep_cycle_id),
+            UNIQUE(owner_id, idempotency_key)
+        );
+        CREATE INDEX IF NOT EXISTS sleep_cycles_owner_created_idx
+            ON sleep_cycles(owner_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS sleep_cycle_changes (
+            change_id TEXT PRIMARY KEY,
+            sleep_cycle_id TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN ('add', 'reinforce', 'link', 'supersede', 'dispute', 'expire', 'noop')),
+            memory_kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('proposed', 'verified', 'committed', 'rejected')),
+            confidence REAL,
+            evidence_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(sleep_cycle_id) REFERENCES sleep_cycles(sleep_cycle_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS sleep_cycle_changes_cycle_idx
+            ON sleep_cycle_changes(sleep_cycle_id, created_at, change_id);
         "#,
     )?;
     add_column(connection, "conversations", "owner_id", "TEXT")?;
     add_column(connection, "messages", "origin_device_id", "TEXT")?;
     add_column(connection, "messages", "request_id", "TEXT")?;
+    add_column(connection, "conversation_summaries", "owner_id", "TEXT")?;
+    add_column(connection, "conversation_summaries", "provenance", "TEXT")?;
+    add_column(connection, "tasks", "due_at", "TEXT")?;
+    add_column(
+        connection,
+        "tasks",
+        "importance",
+        "TEXT NOT NULL DEFAULT 'normal' CHECK(importance IN ('low', 'normal', 'high', 'critical'))",
+    )?;
     add_column(connection, "memories", "owner_id", "TEXT")?;
+    add_column(connection, "memories", "conversation_id", "TEXT")?;
+    add_column(
+        connection,
+        "memories",
+        "category",
+        "TEXT NOT NULL DEFAULT 'general'",
+    )?;
+    add_column(
+        connection,
+        "memories",
+        "status",
+        "TEXT NOT NULL DEFAULT 'active'",
+    )?;
+    add_column(
+        connection,
+        "memories",
+        "confidence",
+        "REAL NOT NULL DEFAULT 1.0",
+    )?;
+    add_column(
+        connection,
+        "memories",
+        "provenance",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(connection, "memories", "supersedes_memory_id", "TEXT")?;
+    migrate_memory_lifecycle_constraint(connection)?;
     add_column(connection, "documents", "owner_id", "TEXT")?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "status",
+        "TEXT NOT NULL DEFAULT 'completed'",
+    )?;
+    add_column(connection, "sleep_cycles", "previous_cycle_id", "TEXT")?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "event_watermark",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "message_watermark",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "events_inspected",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "messages_inspected",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "memories_before",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "memories_after",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "proposed_changes",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "committed_changes",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "summary",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(connection, "sleep_cycles", "completed_at", "TEXT")?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS personal_captures (
+            capture_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, source TEXT NOT NULL, source_id TEXT NOT NULL,
+            raw_content TEXT NOT NULL, display_text TEXT NOT NULL DEFAULT '', structured_content_json TEXT,
+            status TEXT NOT NULL CHECK(status IN ('received','reviewing','approved','rejected','snoozed','discarded','expired')),
+            created_at TEXT NOT NULL, expires_at TEXT NOT NULL, audit_id TEXT NOT NULL,
+            UNIQUE(owner_id, source, source_id), FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
+        );
+        CREATE INDEX IF NOT EXISTS personal_captures_owner_status_created_idx ON personal_captures(owner_id,status,created_at);
+        CREATE TABLE IF NOT EXISTS capture_proposals (
+            proposal_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, capture_id TEXT NOT NULL, title TEXT NOT NULL,
+            category TEXT NOT NULL CHECK(category IN ('task','appointment','worry','idea','note')), rationale TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('reviewing','approved','rejected','snoozed','discarded','expired')),
+            created_at TEXT NOT NULL, expires_at TEXT NOT NULL, audit_id TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id), FOREIGN KEY(capture_id) REFERENCES personal_captures(capture_id)
+        );
+        CREATE INDEX IF NOT EXISTS capture_proposals_owner_status_created_idx ON capture_proposals(owner_id,status,created_at);
+        CREATE TABLE IF NOT EXISTS daily_focus_resets (
+            reset_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, reset_date TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('received','reviewing','approved','rejected','snoozed','discarded','expired')),
+            created_at TEXT NOT NULL, expires_at TEXT NOT NULL, audit_id TEXT NOT NULL,
+            UNIQUE(owner_id,reset_date), FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
+        );
+        CREATE INDEX IF NOT EXISTS daily_focus_resets_owner_status_created_idx ON daily_focus_resets(owner_id,status,created_at);
+        "#,
+    )?;
+    add_column(
+        connection,
+        "personal_captures",
+        "display_text",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS owner_devices (
@@ -380,10 +628,117 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS messages_conversation_request_idx
             ON messages(conversation_id, request_id) WHERE request_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS memories_owner_idx ON memories(owner_id, updated_at);
+        CREATE INDEX IF NOT EXISTS memories_owner_status_idx ON memories(owner_id, status, updated_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS active_memory_owner_content_idx ON memories(owner_id, normalized_content) WHERE owner_id IS NOT NULL AND status='active';
+        CREATE UNIQUE INDEX IF NOT EXISTS active_memory_device_content_idx ON memories(device_id, normalized_content) WHERE owner_id IS NULL AND status='active';
         CREATE INDEX IF NOT EXISTS documents_owner_idx ON documents(owner_id, created_at);
         "#,
     )?;
+    migrate_sleep_cycle_mode_constraint(connection)?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "input_digest",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    connection.execute_batch(r#"
+        CREATE TABLE IF NOT EXISTS proactive_subscriptions (subscription_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, topic TEXT NOT NULL, project_id TEXT, source_type TEXT NOT NULL, cadence TEXT NOT NULL, quiet_hours TEXT, status TEXT NOT NULL, provenance TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(owner_id) REFERENCES owners(owner_id));
+        CREATE TABLE IF NOT EXISTS proactive_candidates (candidate_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, subscription_id TEXT, project_id TEXT, reason TEXT NOT NULL, evidence_json TEXT NOT NULL, priority TEXT NOT NULL, confidence REAL NOT NULL, expires_at TEXT NOT NULL, deduplication_key TEXT NOT NULL, provenance TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(owner_id) REFERENCES owners(owner_id), FOREIGN KEY(subscription_id) REFERENCES proactive_subscriptions(subscription_id), UNIQUE(owner_id, deduplication_key));
+        CREATE TABLE IF NOT EXISTS outreach_proposals (proposal_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, candidate_id TEXT NOT NULL, original_draft TEXT NOT NULL, editable_draft TEXT NOT NULL, channel TEXT NOT NULL, approval_state TEXT NOT NULL, risk_class TEXT NOT NULL, delivery_deadline TEXT, provenance TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(owner_id) REFERENCES owners(owner_id), FOREIGN KEY(candidate_id) REFERENCES proactive_candidates(candidate_id));
+        CREATE TABLE IF NOT EXISTS outreach_deliveries (delivery_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, proposal_id TEXT NOT NULL, provider TEXT NOT NULL, channel TEXT NOT NULL, result TEXT NOT NULL, idempotency_key TEXT NOT NULL, response_link TEXT, provenance TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(owner_id) REFERENCES owners(owner_id), FOREIGN KEY(proposal_id) REFERENCES outreach_proposals(proposal_id), UNIQUE(owner_id, idempotency_key));
+        CREATE TABLE IF NOT EXISTS proactive_feedback (feedback_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, proposal_id TEXT, action TEXT NOT NULL, note TEXT, provenance TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(owner_id) REFERENCES owners(owner_id), FOREIGN KEY(proposal_id) REFERENCES outreach_proposals(proposal_id));
+        CREATE TRIGGER IF NOT EXISTS proactive_subscription_audit AFTER INSERT ON proactive_subscriptions BEGIN INSERT INTO execution_events(owner_id,stream_id,event_type,actor,payload_json,occurred_at) VALUES(NEW.owner_id,NEW.subscription_id,'proactive.subscription_created','voiceos-core','{}',NEW.created_at); END;
+        CREATE TRIGGER IF NOT EXISTS proactive_candidate_audit AFTER INSERT ON proactive_candidates BEGIN INSERT INTO execution_events(owner_id,stream_id,event_type,actor,payload_json,occurred_at) VALUES(NEW.owner_id,NEW.candidate_id,'proactive.candidate_created','voiceos-core','{}',NEW.created_at); END;
+        CREATE TRIGGER IF NOT EXISTS outreach_proposal_audit AFTER INSERT ON outreach_proposals BEGIN INSERT INTO execution_events(owner_id,stream_id,event_type,actor,payload_json,occurred_at) VALUES(NEW.owner_id,NEW.proposal_id,'proactive.proposal_created','voiceos-core','{}',NEW.created_at); END;
+        CREATE TRIGGER IF NOT EXISTS outreach_delivery_audit AFTER INSERT ON outreach_deliveries BEGIN INSERT INTO execution_events(owner_id,stream_id,event_type,actor,payload_json,occurred_at) VALUES(NEW.owner_id,NEW.delivery_id,'proactive.delivery_recorded','voiceos-core','{}',NEW.created_at); END;
+        CREATE TRIGGER IF NOT EXISTS proactive_feedback_audit AFTER INSERT ON proactive_feedback BEGIN INSERT INTO execution_events(owner_id,stream_id,event_type,actor,payload_json,occurred_at) VALUES(NEW.owner_id,NEW.feedback_id,'proactive.feedback_recorded','voiceos-core','{}',NEW.created_at); END;
+    "#)?;
     Ok(())
+}
+
+fn migrate_sleep_cycle_mode_constraint(connection: &Connection) -> rusqlite::Result<()> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='sleep_cycles'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !sql
+        .as_deref()
+        .is_some_and(|value| value.contains("mode = 'dry_run'"))
+    {
+        return Ok(());
+    }
+    rebuild_table_without_foreign_keys(
+        connection,
+        "BEGIN;
+         CREATE TABLE sleep_cycles_rebuilt (
+           sleep_cycle_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+           mode TEXT NOT NULL DEFAULT 'dry_run' CHECK(mode IN ('dry_run', 'commit')),
+           status TEXT NOT NULL DEFAULT 'completed' CHECK(status IN ('running', 'completed', 'failed')),
+           previous_cycle_id TEXT, event_watermark INTEGER NOT NULL DEFAULT 0,
+           message_watermark INTEGER NOT NULL DEFAULT 0, events_inspected INTEGER NOT NULL DEFAULT 0,
+           messages_inspected INTEGER NOT NULL DEFAULT 0, memories_before INTEGER NOT NULL DEFAULT 0,
+           memories_after INTEGER NOT NULL DEFAULT 0, proposed_changes INTEGER NOT NULL DEFAULT 0,
+           committed_changes INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT '',
+           created_at TEXT NOT NULL, completed_at TEXT,
+           FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+           FOREIGN KEY(previous_cycle_id) REFERENCES sleep_cycles(sleep_cycle_id),
+           UNIQUE(owner_id, idempotency_key)
+         );
+         INSERT INTO sleep_cycles_rebuilt SELECT sleep_cycle_id, owner_id, idempotency_key, mode, status, previous_cycle_id, event_watermark, message_watermark, events_inspected, messages_inspected, memories_before, memories_after, proposed_changes, committed_changes, summary, created_at, completed_at FROM sleep_cycles;
+         DROP TABLE sleep_cycles;
+         ALTER TABLE sleep_cycles_rebuilt RENAME TO sleep_cycles;
+         CREATE INDEX IF NOT EXISTS sleep_cycles_owner_created_idx ON sleep_cycles(owner_id, created_at DESC);
+         COMMIT;",
+    )
+}
+
+fn migrate_memory_lifecycle_constraint(connection: &Connection) -> rusqlite::Result<()> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !sql
+        .as_deref()
+        .is_some_and(|value| value.contains("UNIQUE(device_id, normalized_content)"))
+    {
+        return Ok(());
+    }
+    rebuild_table_without_foreign_keys(
+        connection,
+        "BEGIN;
+         CREATE TABLE memories_rebuilt (
+           memory_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, normalized_content TEXT NOT NULL,
+           content TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+           owner_id TEXT, conversation_id TEXT, category TEXT NOT NULL DEFAULT 'general',
+           status TEXT NOT NULL DEFAULT 'active', confidence REAL NOT NULL DEFAULT 1.0,
+           provenance TEXT NOT NULL DEFAULT '', supersedes_memory_id TEXT,
+           FOREIGN KEY(device_id) REFERENCES devices(device_id));
+         INSERT INTO memories_rebuilt(memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,conversation_id,category,status,confidence,provenance,supersedes_memory_id)
+           SELECT memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,conversation_id,category,status,confidence,provenance,supersedes_memory_id FROM memories;
+         DROP TABLE memories;
+         ALTER TABLE memories_rebuilt RENAME TO memories;
+         COMMIT;",
+    )
+}
+
+fn rebuild_table_without_foreign_keys(
+    connection: &Connection,
+    statements: &str,
+) -> rusqlite::Result<()> {
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    let rebuild = connection.execute_batch(statements);
+    if rebuild.is_err() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
+    let restore = connection.pragma_update(None, "foreign_keys", "ON");
+    rebuild?;
+    restore
 }
 
 fn add_column(
