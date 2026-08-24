@@ -52,6 +52,12 @@ data class DocumentUploadResult(
     val chunkCount: Int,
 )
 
+data class AttachmentUploadResult(
+    val id: String,
+    val filename: String,
+    val mediaType: String,
+)
+
 data class SkillProposal(
     val id: String,
     val name: String,
@@ -284,11 +290,13 @@ object GatewayClient {
         sessionId: String,
         text: String,
         deviceToken: String?,
+        attachmentIds: List<String> = emptyList(),
         callback: (Result<TurnResult>) -> Unit,
     ) {
         Thread({
+            val requestId = java.util.UUID.randomUUID().toString()
             callback(runCatching {
-                retryConnection { submitTextBlocking(baseUrl, sessionId, text, deviceToken) }
+                retryConnection { submitTextBlocking(baseUrl, sessionId, text, deviceToken, requestId, attachmentIds) }
             })
         }, "voiceos-text-turn").start()
     }
@@ -370,6 +378,21 @@ object GatewayClient {
                 }
             })
         }, "voiceos-document-upload").start()
+    }
+
+    fun uploadAttachment(
+        baseUrl: String,
+        filename: String,
+        mediaType: String,
+        bytes: ByteArray,
+        deviceToken: String?,
+        callback: (Result<AttachmentUploadResult>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection { uploadAttachmentBlocking(baseUrl, filename, mediaType, bytes, deviceToken) }
+            })
+        }, "voiceos-attachment-upload").start()
     }
 
     fun getSkillProposals(
@@ -607,10 +630,14 @@ object GatewayClient {
         sessionId: String,
         text: String,
         deviceToken: String?,
+        requestId: String,
+        attachmentIds: List<String>,
     ): TurnResult {
         val request = JSONObject()
             .put("session_id", sessionId)
             .put("text", text)
+            .put("request_id", requestId)
+            .put("attachment_ids", org.json.JSONArray(attachmentIds))
             .toString()
             .toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/turns/text").openConnection() as HttpURLConnection
@@ -744,6 +771,30 @@ object GatewayClient {
                 filename = document.getString("filename"),
                 mode = document.getString("mode"),
                 chunkCount = document.optInt("chunk_count", 0),
+            )
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun uploadAttachmentBlocking(
+        baseUrl: String,
+        filename: String,
+        mediaType: String,
+        bytes: ByteArray,
+        deviceToken: String?,
+    ): AttachmentUploadResult {
+        AttachmentInput.requireUploadSize(bytes.size)
+        val encodedFilename = URLEncoder.encode(filename, Charsets.UTF_8.name()).replace("+", "%20")
+        val connection = URL("$baseUrl/v1/attachments").openConnection() as HttpURLConnection
+        try {
+            connection.setRequestProperty("X-VoiceOS-File-Name", encodedFilename)
+            configure(connection, deviceToken, bytes, mediaType)
+            val attachment = responseJson(connection).getJSONObject("attachment")
+            return AttachmentUploadResult(
+                id = attachment.getString("id"),
+                filename = attachment.getString("filename"),
+                mediaType = attachment.getString("media_type"),
             )
         } finally {
             connection.disconnect()
@@ -885,7 +936,7 @@ object GatewayClient {
             .put("priority", "check_in")
             .put("title", "VIC wants to talk")
             .put("body", "The proactive check-in system is connected. Tap Talk now to begin a conversation with me.")
-            .put("reason", "Working-model delivery test requested from the Omarchy Voice app")
+            .put("reason", "Working-model delivery test requested from the VIC app")
             .put("dedupe_key", "android-working-model-${System.currentTimeMillis()}")
             .put("actions", org.json.JSONArray(listOf("talk_now", "show_progress", "later", "dismiss")))
             .toString().toByteArray(Charsets.UTF_8)

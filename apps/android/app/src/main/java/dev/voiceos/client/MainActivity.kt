@@ -11,6 +11,7 @@ import android.content.Intent
 import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.Typeface
 import android.media.AudioAttributes
 import android.net.Uri
@@ -33,6 +34,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.UUID
 
@@ -68,6 +70,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var retryButton: Button
     private lateinit var speedButton: Button
     private lateinit var uploadButton: Button
+    private lateinit var cameraButton: Button
+    private lateinit var photoButton: Button
     private lateinit var approveButton: Button
     private lateinit var denyButton: Button
     private val stateTrackViews = mutableListOf<TextView>()
@@ -90,6 +94,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var pendingPermissionCorrection = false
     private var requestGeneration = 0
     private var latestPartialTranscript: String? = null
+    private var pendingAttachment: AttachmentUploadResult? = null
 
     private val sessionId = UUID.randomUUID().toString()
     private var lastTranscript: String? = null
@@ -275,17 +280,23 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_DOCUMENT || resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
-        val filename = DocumentInput.filename(contentResolver, uri)
-        val mediaType = contentResolver.getType(uri) ?: DocumentInput.mediaTypeForFilename(filename)
-        AlertDialog.Builder(this)
-            .setTitle("How should Omarchy Voice use this file?")
-            .setItems(arrayOf("About me — always available", "Reference — retrieve when relevant")) { _, which ->
-                uploadDocument(uri, filename, mediaType, if (which == 0) "profile" else "reference")
+        if (resultCode != RESULT_OK) return
+        when (requestCode) {
+            REQUEST_DOCUMENT -> {
+                val uri = data?.data ?: return
+                val filename = DocumentInput.filename(contentResolver, uri)
+                val mediaType = contentResolver.getType(uri) ?: DocumentInput.mediaTypeForFilename(filename)
+                AlertDialog.Builder(this)
+                    .setTitle("How should VIC use this file?")
+                    .setItems(arrayOf("About me — always available", "Reference — retrieve when relevant")) { _, which ->
+                        uploadDocument(uri, filename, mediaType, if (which == 0) "profile" else "reference")
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+            REQUEST_IMAGE -> data?.data?.let(::uploadImageFromUri)
+            REQUEST_CAMERA -> (data?.extras?.get("data") as? Bitmap)?.let(::uploadCameraPreview)
+        }
     }
 
     override fun onDestroy() {
@@ -466,7 +477,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             gravity = Gravity.CENTER_VERTICAL
         }
         brandRow.addView(HexMarkView(this), LinearLayout.LayoutParams(dp(42), dp(38)))
-        brandRow.addView(heading("Omarchy Voice", 25f).apply {
+        brandRow.addView(heading("VIC", 25f).apply {
             setPadding(dp(9), 0, 0, 0)
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         gatewayView = TextView(this).apply {
@@ -513,7 +524,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         voicePanel.addView(voiceTitleView, fullWidthWrap())
         voicePanel.addView(TextView(this).apply {
-            text = "Tap the control and speak. Omarchy Voice keeps the conversation across your enrolled devices."
+            text = "Tap the control and speak. VIC keeps the conversation connected through VoiceOS across your enrolled devices."
             textSize = 14f
             setTextColor(CarbonPalette.muted)
             setLineSpacing(0f, 1.18f)
@@ -571,7 +582,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         conversationHeader.addView(memoryStatusView)
         conversationPanel.addView(conversationHeader, fullWidthWrap())
         transcriptView = TextView(this).apply {
-            text = "Omarchy Voice\nTap Talk and speak. Your conversation will continue here."
+            text = "VIC\nTap Talk and speak. Your conversation will continue here."
             textSize = 16f
             setTextColor(CarbonPalette.white)
             setLineSpacing(dp(3).toFloat(), 1.18f)
@@ -620,6 +631,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             contentDescription = "Add a private knowledge file"
         }
         utilityPanel.addView(utilityRow("PRIVATE KNOWLEDGE", uploadButton), fullWidthWrap().apply { topMargin = dp(6) })
+        cameraButton = secondaryButton("CAMERA") { openCamera() }.apply {
+            contentDescription = "Take a photo and send it with your next request to VIC"
+        }
+        utilityPanel.addView(utilityRow("SEND A PHOTO", cameraButton), fullWidthWrap().apply { topMargin = dp(6) })
+        photoButton = secondaryButton("PHOTO LIBRARY") { openImagePicker() }.apply {
+            contentDescription = "Choose a photo and send it with your next request to VIC"
+        }
+        utilityPanel.addView(utilityRow("CHOOSE AN IMAGE", photoButton), fullWidthWrap().apply { topMargin = dp(6) })
         commandPage.addView(utilityPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
         val providerPanel = panel(17)
@@ -727,7 +746,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val systemPage = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
-            addView(kicker("Omarchy Voice infrastructure"), fullWidthWrap().apply { topMargin = dp(24) })
+            addView(kicker("VoiceOS infrastructure"), fullWidthWrap().apply { topMargin = dp(24) })
             addView(heading("System", 30f), fullWidthWrap().apply { topMargin = dp(5) })
             addView(panel(17).apply {
                 addView(kicker("Audio playback"), fullWidthWrap())
@@ -990,6 +1009,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun submitText(text: String) {
         val generation = ++requestGeneration
+        val attachment = pendingAttachment
         renderState(VoiceState.PROCESSING, "Contacting gateway")
         VoiceWidgetProvider.updateStatus(this, "Processing")
         changeFloor("claim", "processing", text)
@@ -999,11 +1019,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             sessionId,
             text,
             DeviceCredentials.token(this),
+            attachment?.let { listOf(it.id) } ?: emptyList(),
         ) { result ->
             runOnUiThread {
                 if (generation != requestGeneration || isFinishing || isDestroyed) return@runOnUiThread
                 result.fold(
                     onSuccess = { turn ->
+                        if (pendingAttachment?.id == attachment?.id) pendingAttachment = null
                         lastTranscript = turn.transcript
                         lastResponse = turn.responseText
                         failedTranscript = null
@@ -1308,6 +1330,82 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun openImagePicker() {
+        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "image/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/jpeg", "image/png", "image/webp"))
+        }, REQUEST_IMAGE)
+    }
+
+    private fun openCamera() {
+        val intent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE)
+        if (intent.resolveActivity(packageManager) == null) {
+            Toast.makeText(this, "No camera app is available on this phone.", Toast.LENGTH_LONG).show()
+            return
+        }
+        startActivityForResult(intent, REQUEST_CAMERA)
+    }
+
+    private fun uploadImageFromUri(uri: Uri) {
+        val filename = DocumentInput.filename(contentResolver, uri)
+        val mediaType = AttachmentInput.acceptedMediaType(filename, contentResolver.getType(uri))
+            ?: run {
+                showRecoverableError("Choose a JPEG, PNG, or WebP image.", speakError = false)
+                return
+            }
+        val bytes = runCatching { DocumentInput.readBytes(contentResolver, uri) }.getOrElse { error ->
+            showRecoverableError(error.message ?: "The image could not be read.", speakError = false)
+            return
+        }
+        uploadImage(filename, mediaType, bytes)
+    }
+
+    private fun uploadCameraPreview(bitmap: Bitmap) {
+        val bytes = ByteArrayOutputStream().use { output ->
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 90, output)) {
+                showRecoverableError("The camera image could not be encoded.", speakError = false)
+                return
+            }
+            output.toByteArray()
+        }
+        uploadImage("camera-${System.currentTimeMillis()}.jpg", "image/jpeg", bytes)
+    }
+
+    private fun uploadImage(filename: String, mediaType: String, bytes: ByteArray) {
+        try {
+            AttachmentInput.requireUploadSize(bytes.size)
+        } catch (error: IllegalArgumentException) {
+            showRecoverableError(error.message ?: "Image is too large.", speakError = false)
+            return
+        }
+        renderState(VoiceState.PROCESSING, "Uploading $filename")
+        transcriptView.text = "Uploading image: $filename"
+        GatewayClient.uploadAttachment(
+            GatewaySettings.baseUrl(this),
+            filename,
+            mediaType,
+            bytes,
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { attachment ->
+                        pendingAttachment = attachment
+                        val message = "${attachment.filename} is ready. Ask VIC about it in your next voice request."
+                        transcriptView.text = "VIC: $message"
+                        renderState(VoiceState.READY, "Image ready to send")
+                    },
+                    onFailure = { error ->
+                        transcriptView.text = "VIC: I couldn't upload $filename. ${error.message.orEmpty()}"
+                        renderState(VoiceState.ERROR, "Image upload failed")
+                    },
+                )
+            }
+        }
+    }
+
     private fun openDocumentPicker() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
@@ -1379,8 +1477,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun copyLastResponse() {
         val response = lastResponse ?: return
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Omarchy Voice response", response))
-        Toast.makeText(this, "Omarchy Voice response copied", Toast.LENGTH_SHORT).show()
+        clipboard.setPrimaryClip(ClipData.newPlainText("VIC response", response))
+        Toast.makeText(this, "VIC response copied", Toast.LENGTH_SHORT).show()
     }
 
     private fun cycleSpeechRate() {
@@ -1689,7 +1787,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         form.addView(outcomeInput, fullWidthWrap())
         form.addView(minutesInput, fullWidthWrap())
         AlertDialog.Builder(this)
-            .setTitle("Add Omarchy Voice task")
+            .setTitle("Add VIC task")
             .setView(form)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Add") { _, _ ->
@@ -1865,7 +1963,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun renderSkillProposals(proposals: List<SkillProposal>) {
         skillProposalContainer.removeAllViews()
         skillProposalStatusView.text = if (proposals.isEmpty()) {
-            "No proposals are waiting for review. Omarchy Voice will never enable a generated skill silently."
+            "No proposals are waiting for review. VoiceOS will never enable a generated skill silently."
         } else {
             "${proposals.size} proposal${if (proposals.size == 1) "" else "s"} waiting. Review the procedure, capabilities, and evidence before deciding."
         }
@@ -2208,6 +2306,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         private const val REQUEST_MICROPHONE = 42
         private const val REQUEST_DOCUMENT = 43
         private const val REQUEST_NOTIFICATIONS = 44
+        private const val REQUEST_IMAGE = 45
+        private const val REQUEST_CAMERA = 46
         private const val RESPONSE_UTTERANCE_ID = "voiceos-response"
         private const val CORRECTION_PROMPT_ID = "voiceos-correction-prompt"
         private const val ERROR_UTTERANCE_ID = "voiceos-error"

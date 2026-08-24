@@ -53,7 +53,7 @@ class DailyCheckinReceiver : BroadcastReceiver() {
                 "Daily planning",
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
-                description = "Omarchy Voice daily planning questions"
+                description = "VIC daily planning questions"
             },
         )
         val open = PendingIntent.getActivity(
@@ -67,7 +67,7 @@ class DailyCheckinReceiver : BroadcastReceiver() {
         )
         val notification = android.app.Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(dev.voiceos.client.R.drawable.ic_mic)
-            .setContentTitle("Omarchy Voice daily planning")
+            .setContentTitle("VIC daily planning")
             .setContentText("Continue today’s 12 questions and turn the answers into a plan.")
             .setContentIntent(open)
             .setAutoCancel(true)

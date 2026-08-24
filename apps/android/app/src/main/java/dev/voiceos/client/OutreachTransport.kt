@@ -13,7 +13,7 @@ class SseOutreachTransport(private val context: Context) : OutreachEventTranspor
     override fun start(after: Long, onOutreach: (Long, VicOutreach) -> Unit, onClosed: (Throwable?) -> Unit) {
         val token = DeviceCredentials.token(context)
         if (token.isNullOrBlank()) {
-            onClosed(IllegalStateException("Omarchy Voice enrollment is required"))
+            onClosed(IllegalStateException("VoiceOS enrollment is required"))
             return
         }
         subscription = GatewayClient.streamEvents(
