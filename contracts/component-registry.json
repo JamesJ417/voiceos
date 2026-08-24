@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "system_id": "omarchy-touch",
+  "roles": {
+    "backend_control_plane": "voiceos",
+    "voice_interface_controller": "vic",
+    "touchscreen_system_interface": "touch"
+  },
+  "components": [
+    {
+      "id": "voiceos",
+      "display_name": "VoiceOS",
+      "role": "backend_control_plane",
+      "lifecycle": "production",
+      "integration": {
+        "kind": "local_service",
+        "contract": "contracts/openapi.yaml"
+      },
+      "capabilities": ["identity", "policy", "memory", "projects", "tasks", "events", "audit"]
+    },
+    {
+      "id": "vic",
+      "display_name": "VIC",
+      "role": "voice_interface_controller",
+      "lifecycle": "production",
+      "integration": {
+        "kind": "voiceos_client",
+        "surfaces": ["android", "desktop_microphone", "touch"]
+      },
+      "capabilities": ["voice_input", "spoken_response", "conversation_continuity"]
+    },
+    {
+      "id": "touch",
+      "display_name": "Touch",
+      "role": "touchscreen_system_interface",
+      "lifecycle": "production",
+      "integration": {
+        "kind": "voiceos_client",
+        "surface": "primary_touchscreen"
+      },
+      "capabilities": ["conversation", "projects", "tasks", "memory", "history", "system_status"]
+    },
+    {
+      "id": "vic-console",
+      "display_name": "VIC Console",
+      "role": "desktop_information_surface",
+      "lifecycle": "production",
+      "integration": {
+        "kind": "typed_command_boundary",
+        "status": "connected",
+        "commands": ["show_weather", "refresh_dashboard"],
+        "transport": "owner_only_unix_socket_v1",
+        "endpoint": "/v1/console/commands"
+      },
+      "capabilities": ["weather"]
+    },
+    {
+      "id": "touch-native-preview",
+      "display_name": "Touch Native Preview",
+      "role": "touchscreen_preview",
+      "lifecycle": "preview",
+      "integration": {
+        "kind": "voiceos_client",
+        "surface": "native_preview"
+      },
+      "capabilities": ["conversation", "tasks", "memory"]
+    }
+  ]
+}

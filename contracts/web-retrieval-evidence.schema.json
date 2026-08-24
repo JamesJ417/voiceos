@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://voiceos.local/contracts/web-retrieval-evidence.schema.json",
-  "title": "Omarchy Voice web retrieval evidence",
+  "title": "VoiceOS web retrieval evidence",
   "type": "object",
   "required": ["requested_url", "final_url", "retrieved_at", "content_sha256", "markdown", "links", "truncated", "trust", "can_issue_instructions"],
   "properties": {

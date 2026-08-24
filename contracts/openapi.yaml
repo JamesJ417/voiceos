@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Omarchy Voice Gateway
+  title: VoiceOS Gateway
   version: 0.7.0
 servers:
   - url: http://127.0.0.1:8787
@@ -18,6 +18,38 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+  /v1/client/bootstrap:
+    get:
+      operationId: getClientBootstrap
+      summary: Discover the canonical VoiceOS contract and registered system components
+      responses:
+        "200":
+          description: Authenticated client contract and component registry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientBootstrap"
+        "401": { description: Device authentication required }
+  /v1/console/commands:
+    post:
+      operationId: dispatchConsoleCommand
+      summary: Deliver one allowlisted command to the local VIC Console
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsoleCommandRequest"
+      responses:
+        "200":
+          description: Command was accepted by the owner-only local Console socket
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsoleCommandResult"
+        "400": { description: Command or request shape is not allowlisted }
+        "401": { description: Device authentication required }
+        "503": { description: VIC Console is not currently available }
   /v1/tools/system.health:
     get:
       operationId: getSystemHealth
@@ -236,7 +268,7 @@ paths:
   /v1/skills/proposals:
     get:
       operationId: listSkillProposals
-      summary: List validated Hermes skill proposals mirrored into Omarchy Voice
+      summary: List validated Hermes skill proposals mirrored into VoiceOS
       parameters:
         - in: query
           name: status
@@ -287,7 +319,7 @@ paths:
   /v1/skills:
     get:
       operationId: listSkills
-      summary: List approved or disabled Omarchy Voice skills
+      summary: List approved or disabled VoiceOS skills
       parameters:
         - in: query
           name: status
@@ -382,6 +414,49 @@ paths:
       operationId: listAuditEvents
       responses:
         "200": { description: Recent enrollment and tool-decision events }
+  /v1/projects:
+    get:
+      operationId: listProjects
+      summary: List the authenticated owner's VIC projects
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+      responses:
+        "200":
+          description: Owner-scoped projects used to organize shared work
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [projects]
+                properties:
+                  projects: { type: array, items: { $ref: "#/components/schemas/Project" } }
+        "401": { description: Device authentication required }
+    post:
+      operationId: createProject
+      summary: Create a project without assigning existing work automatically
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, minLength: 1, maxLength: 160 }
+                goal_id: { type: [string, "null"], format: uuid }
+      responses:
+        "201":
+          description: Owner-scoped project created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [project]
+                properties:
+                  project: { $ref: "#/components/schemas/Project" }
+        "401": { description: Device authentication required }
   /v1/tasks:
     get:
       operationId: listTasks
@@ -424,6 +499,8 @@ paths:
                 estimated_minutes: { type: integer, minimum: 1 }
                 project_id: { type: [string, "null"] }
                 parent_task_id: { type: [string, "null"] }
+                due_at: { type: [string, "null"], format: date-time }
+                importance: { type: string, enum: [low, normal, high, critical], default: normal }
       responses:
         "201":
           description: Task created, analyzed immediately, and queued for safe proactive work
@@ -436,6 +513,154 @@ paths:
                   task: { $ref: "#/components/schemas/Task" }
                   initiative: { $ref: "#/components/schemas/TaskInitiative" }
         "401": { description: Device authentication required }
+  /v1/focus:
+    get:
+      operationId: getFocusSnapshot
+      summary: Get one recommended next action and no more than three priorities
+      parameters:
+        - in: query
+          name: mode
+          schema: { type: string, enum: [normal, five_minute, low_energy, restart], default: normal }
+      responses:
+        "200":
+          description: Owner-scoped focus state and restart point
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [focus]
+                properties:
+                  focus: { $ref: "#/components/schemas/FocusSnapshot" }
+        "401": { description: Device authentication required }
+  /v1/focus/sessions:
+    post:
+      operationId: startFocusSession
+      summary: Start a bounded session on an explicit or recommended ready task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                task_id: { type: string, format: uuid }
+                mode: { type: string, enum: [normal, five_minute, low_energy, restart], default: normal }
+                planned_minutes: { type: integer, minimum: 1, maximum: 120 }
+      responses:
+        "201":
+          description: Focus session started without changing task completion
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session, focus]
+                properties:
+                  session: { $ref: "#/components/schemas/FocusSession" }
+                  focus: { $ref: "#/components/schemas/FocusSnapshot" }
+        "400": { description: Invalid focus request or an active session already exists }
+        "401": { description: Device authentication required }
+        "409": { description: No ready focus action is available }
+  /v1/focus/captures:
+    post:
+      operationId: captureFocusIdea
+      summary: Park a new idea without replacing the current focus session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AttentionCapture" }
+      responses:
+        "201":
+          description: Idea captured as proposed work while current focus remains unchanged
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task, focus]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+                  focus: { $ref: "#/components/schemas/FocusSnapshot" }
+                  duplicate: { type: boolean }
+        "400": { description: Invalid capture }
+        "401": { description: Device authentication required }
+  /v1/focus/switch:
+    post:
+      operationId: switchFocusSafely
+      summary: Deliberately switch focus after preserving the active restart point
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FocusSwitch" }
+      responses:
+        "200":
+          description: Previous focus preserved and requested focus session active
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session, focus, previous_saved]
+                properties:
+                  session: { $ref: "#/components/schemas/FocusSession" }
+                  focus: { $ref: "#/components/schemas/FocusSnapshot" }
+                  previous_saved: { type: boolean }
+        "400": { description: Invalid focus target }
+        "401": { description: Device authentication required }
+        "409": { description: Requested task cannot be focused }
+  /v1/focus/sessions/{session_id}/actions:
+    post:
+      operationId: actOnFocusSession
+      summary: Save an interruption, resume a restart point, or end time-boxed focus
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FocusAction" }
+      responses:
+        "200":
+          description: Updated session and refreshed focus snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session, focus]
+                properties:
+                  session: { $ref: "#/components/schemas/FocusSession" }
+                  focus: { $ref: "#/components/schemas/FocusSnapshot" }
+        "400": { description: Invalid action or session state }
+        "401": { description: Device authentication required }
+  /v1/tasks/{task_id}/attention:
+    post:
+      operationId: setTaskAttention
+      summary: Set the real deadline and importance used by focus ranking
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TaskAttention" }
+      responses:
+        "200":
+          description: Updated task attention metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+        "400": { description: Invalid deadline or importance }
+        "401": { description: Device authentication required }
+        "404": { description: Task not found }
   /v1/checkins/daily:
     get:
       operationId: getDailyCheckin
@@ -577,6 +802,37 @@ paths:
                 required: [task]
                 properties:
                   task: { $ref: "#/components/schemas/Task" }
+        "401": { description: Device authentication required }
+        "404": { description: Task does not exist for the primary owner }
+  /v1/tasks/{task_id}/project:
+    post:
+      operationId: assignTaskProject
+      summary: Move a task into an owner-scoped project or back to loose work
+      parameters:
+        - in: path
+          name: task_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [project_id]
+              properties:
+                project_id: { type: [string, "null"], format: uuid }
+      responses:
+        "200":
+          description: Updated and audited task assignment
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task]
+                properties:
+                  task: { $ref: "#/components/schemas/Task" }
+        "400": { description: Project is invalid or belongs to another owner }
         "401": { description: Device authentication required }
         "404": { description: Task does not exist for the primary owner }
   /v1/tasks/{task_id}:
@@ -753,6 +1009,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Session"
+  /v1/speech/synthesize:
+    post:
+      operationId: synthesizeSpeech
+      summary: Synthesize a bounded VIC response for authenticated playback
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, minLength: 1, maxLength: 8000 }
+                voice: { type: string }
+      responses:
+        "200": { description: Audio response and playback metadata }
+        "400": { description: Speech request is invalid }
+        "401": { description: Device authentication required }
+        "503": { description: Speech synthesis is unavailable }
   /v1/speech/sessions:
     post:
       operationId: createSpeechSession
@@ -790,7 +1065,7 @@ paths:
                 url: { type: string, format: uri, maxLength: 4096 }
       responses:
         "200":
-          description: Bounded evidence that cannot issue Omarchy Voice instructions
+          description: Bounded evidence that cannot issue VoiceOS instructions
           content:
             application/json:
               schema:
@@ -853,6 +1128,171 @@ paths:
         "401": { description: Device authentication required }
         "413": { description: Audio payload is too large }
         "503": { description: Speech transcription is unavailable or no speech was detected }
+  /v1/attachments:
+    post:
+      operationId: uploadAttachment
+      summary: Upload an authenticated image for a later idempotent text turn
+      parameters:
+        - $ref: "#/components/parameters/DeviceAuthorization"
+        - in: header
+          name: X-VoiceOS-File-Name
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          image/jpeg: { schema: { type: string, format: binary, maxLength: 5242880 } }
+          image/png: { schema: { type: string, format: binary, maxLength: 5242880 } }
+          image/webp: { schema: { type: string, format: binary, maxLength: 5242880 } }
+      responses:
+        "201":
+          description: Immutable uploaded attachment metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attachment]
+                properties:
+                  attachment: { $ref: "#/components/schemas/Attachment" }
+        "400": { description: Empty upload or missing filename }
+        "401": { description: Device authentication required }
+        "413": { description: Attachment exceeds 5 MB }
+        "415": { description: Unsupported or mismatched image content }
+  /v1/attachments/{attachment_id}:
+    get:
+      operationId: getAttachmentContent
+      summary: Fetch authenticated image content for the current owner
+      parameters:
+        - in: path
+          name: attachment_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Immutable image bytes
+          content:
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+            image/webp: { schema: { type: string, format: binary } }
+        "401": { description: Device authentication required }
+        "404": { description: Attachment does not exist for the current owner }
+  /v1/memories:
+    get:
+      operationId: listMemories
+      parameters:
+        - in: query
+          name: query
+          schema: { type: string }
+        - in: query
+          name: include_inactive
+          schema: { type: boolean, default: false }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+      responses:
+        "200":
+          description: Owner-scoped durable memories
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [memories]
+                properties:
+                  memories: { type: array, items: { $ref: "#/components/schemas/Memory" } }
+    post:
+      operationId: createMemory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MemoryInput" }
+      responses:
+        "201": { description: Explicit owner memory created }
+        "400": { description: Memory content or category is invalid }
+  /v1/memories/{memory_id}:
+    delete:
+      operationId: forgetMemory
+      parameters:
+        - in: path
+          name: memory_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Memory marked forgotten }
+        "404": { description: Memory was not found }
+  /v1/memories/{memory_id}/correct:
+    post:
+      operationId: correctMemory
+      parameters:
+        - in: path
+          name: memory_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MemoryInput" }
+      responses:
+        "200": { description: Corrected memory created with retained provenance }
+        "400": { description: Memory content or category is invalid }
+  /v1/memory/sleep-cycles:
+    get:
+      operationId: listMemorySleepCycles
+      responses:
+        "200": { description: Owner-scoped sleep-cycle reports and proposals }
+    post:
+      operationId: scanMemorySleepCycle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idempotency_key]
+              properties:
+                idempotency_key: { type: string, minLength: 1 }
+      responses:
+        "201": { description: Dry-run scan persisted; no memory was changed }
+  /v1/memory/sleep-cycles/{sleep_cycle_id}:
+    parameters:
+      - in: path
+        name: sleep_cycle_id
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: getMemorySleepCycle
+      responses:
+        "200": { description: Sleep-cycle report with evidence-backed proposals }
+        "404": { description: Sleep cycle not found for the authenticated owner }
+  /v1/memory/sleep-cycles/{sleep_cycle_id}/commit:
+    parameters:
+      - in: path
+        name: sleep_cycle_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      operationId: commitMemorySleepCycleProposals
+      description: Commits only selected proposals from a persisted dry run through the structured-memory authority.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idempotency_key, change_ids]
+              properties:
+                idempotency_key: { type: string, minLength: 1 }
+                change_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  uniqueItems: true
+                  items: { type: string, format: uuid }
+      responses:
+        "201": { description: Selected proposals committed idempotently }
+        "400": { description: Invalid, unavailable, oversized, or mismatched proposal set }
+        "404": { description: Source sleep cycle not found }
   /v1/turns/text:
     post:
       operationId: submitTextTurn
@@ -871,6 +1311,14 @@ paths:
                 provider:
                   type: string
                   description: Optional explicit provider hint for trusted clients.
+                request_id:
+                  type: string
+                  description: Stable idempotency key; required when attachment_ids is non-empty.
+                attachment_ids:
+                  type: array
+                  maxItems: 10
+                  uniqueItems: true
+                  items: { type: string, format: uuid }
       responses:
         "200":
           description: Completed text turn
@@ -894,6 +1342,88 @@ components:
       schema: { type: string, pattern: "^Bearer .+" }
       description: Bearer credential issued during device enrollment.
   schemas:
+    ClientBootstrap:
+      type: object
+      required: [contract_version, device_id, authentication, component_registry, endpoints, transport]
+      properties:
+        contract_version: { type: integer, const: 1 }
+        device_id: { type: string }
+        authentication:
+          type: object
+          required: [scheme]
+          properties:
+            scheme: { type: string, const: bearer }
+        component_registry:
+          $ref: "#/components/schemas/ComponentRegistry"
+        endpoints:
+          type: object
+          required: [bootstrap, conversation, conversation_events, turn]
+          properties:
+            bootstrap: { type: string, const: /v1/client/bootstrap }
+            conversation: { type: string, const: /v1/conversations/active }
+            conversation_events: { type: string, const: /v1/conversations/active/events }
+            turn: { type: string, const: /v1/turns/text }
+        transport:
+          type: object
+          required: [private_network_required, tls_required]
+          properties:
+            private_network_required: { type: boolean }
+            tls_required: { type: boolean }
+    ComponentRegistry:
+      type: object
+      required: [schema_version, system_id, roles, components]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        system_id: { type: string, const: omarchy-touch }
+        roles:
+          type: object
+          required: [backend_control_plane, voice_interface_controller, touchscreen_system_interface]
+          properties:
+            backend_control_plane: { type: string, const: voiceos }
+            voice_interface_controller: { type: string, const: vic }
+            touchscreen_system_interface: { type: string, const: touch }
+        components:
+          type: array
+          minItems: 3
+          items:
+            $ref: "#/components/schemas/SystemComponent"
+    SystemComponent:
+      type: object
+      required: [id, display_name, role, lifecycle, integration, capabilities]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+        role: { type: string }
+        lifecycle: { type: string, enum: [production, registered, preview, retired] }
+        integration: { type: object, additionalProperties: true }
+        capabilities:
+          type: array
+          items: { type: string }
+    ConsoleCommandRequest:
+      type: object
+      additionalProperties: false
+      required: [command]
+      properties:
+        command:
+          type: string
+          enum: [show_weather, refresh_dashboard]
+    ConsoleCommandResult:
+      type: object
+      required: [handled, response_text, provider, tool_calls, approvals, results, errors, evidence]
+      properties:
+        handled: { type: boolean, const: true }
+        response_text: { type: string }
+        provider: { type: string, const: deterministic-console }
+        tool_calls: { type: array, items: { type: object } }
+        approvals: { type: array, maxItems: 0 }
+        results: { type: array, items: { type: object } }
+        errors: { type: array, maxItems: 0 }
+        evidence:
+          type: object
+          required: [console_command_delivered, command]
+          properties:
+            console_command_delivered: { type: boolean, const: true }
+            command: { type: string, enum: [show_weather, refresh_dashboard] }
     Health:
       type: object
       required: [status, gateway, speech_to_text, language_model, text_to_speech]
@@ -990,7 +1520,7 @@ components:
         created_at: { type: string, format: date-time }
     ConversationMessage:
       type: object
-      required: [sequence, conversation_id, role, content, created_at]
+      required: [sequence, conversation_id, role, content, created_at, attachments]
       properties:
         sequence: { type: integer, minimum: 1 }
         conversation_id: { type: string, format: uuid }
@@ -998,6 +1528,20 @@ components:
         content: { type: string }
         provider: { type: [string, "null"] }
         origin_device_id: { type: [string, "null"], format: uuid }
+        created_at: { type: string, format: date-time }
+        attachments:
+          type: array
+          items: { $ref: "#/components/schemas/Attachment" }
+    Attachment:
+      type: object
+      required: [id, filename, media_type, byte_size, sha256, status, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        filename: { type: string }
+        media_type: { type: string, enum: [image/jpeg, image/png, image/webp] }
+        byte_size: { type: integer, minimum: 1, maximum: 5242880 }
+        sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        status: { type: string, enum: [uploaded, attached] }
         created_at: { type: string, format: date-time }
     ConversationSnapshot:
       type: object
@@ -1059,12 +1603,43 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, conversation.floor.changed, task.changed, task.initiative.updated, task.progress.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
+          enum: [conversation.turn, conversation.floor.changed, project.changed, task.changed, task.initiative.updated, task.progress.updated, focus.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
         payload: { type: object }
         created_at: { type: string, format: date-time }
+    Project:
+      type: object
+      required: [id, owner_id, title, status, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        goal_id: { type: [string, "null"], format: uuid }
+        title: { type: string }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MemoryInput:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string, minLength: 1, maxLength: 500 }
+        category: { type: string, enum: [general, identity, preference, person, project, routine, sensitive] }
+    Memory:
+      type: object
+      required: [id, content, source, category, status, confidence, provenance, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        content: { type: string }
+        source: { type: string }
+        category: { type: string }
+        status: { type: string }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        provenance: { type: string }
+        supersedes_memory_id: { type: [string, "null"], format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     Task:
       type: object
-      required: [id, owner_id, title, observable_outcome, estimated_minutes, status, created_at, updated_at]
+      required: [id, owner_id, title, observable_outcome, estimated_minutes, due_at, importance, status, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         owner_id: { type: string }
@@ -1073,6 +1648,8 @@ components:
         title: { type: string }
         observable_outcome: { type: string }
         estimated_minutes: { type: integer, minimum: 1 }
+        due_at: { type: [string, "null"], format: date-time }
+        importance: { type: string, enum: [low, normal, high, critical] }
         status: { type: string, enum: [proposed, ready, active, blocked, completed, cancelled] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
@@ -1118,6 +1695,93 @@ components:
         artifacts: { type: array, items: { type: object } }
         approvals: { type: array, items: { type: object } }
         activity: { type: array, items: { type: object } }
+    FocusSession:
+      type: object
+      required: [id, owner_id, task_id, mode, planned_minutes, status, next_action, started_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        task_id: { type: string, format: uuid }
+        step_id: { type: [string, "null"], format: uuid }
+        mode: { type: string, enum: [normal, five_minute, low_energy, restart] }
+        planned_minutes: { type: integer, minimum: 1, maximum: 120 }
+        status: { type: string, enum: [active, interrupted, completed, cancelled] }
+        next_action: { type: string }
+        interruption_note: { type: [string, "null"] }
+        restart_action: { type: [string, "null"] }
+        reflection: { type: [string, "null"] }
+        started_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+    FocusPriority:
+      type: object
+      required: [task_id, title, observable_outcome, estimated_minutes, due_at, importance, urgency, status, next_action]
+      properties:
+        task_id: { type: string, format: uuid }
+        title: { type: string }
+        observable_outcome: { type: string }
+        estimated_minutes: { type: integer, minimum: 1 }
+        due_at: { type: [string, "null"], format: date-time }
+        importance: { type: string, enum: [low, normal, high, critical] }
+        urgency: { type: string, enum: [overdue, due_today, due_soon, due_this_week, scheduled, unscheduled] }
+        status: { type: string }
+        next_action: { type: string }
+        project_title: { type: [string, "null"] }
+        goal_title: { type: [string, "null"] }
+    FocusSnapshot:
+      type: object
+      required: [mode, active_session, priorities, recommendation, last_interrupted_session, parked]
+      properties:
+        mode: { type: string, enum: [normal, five_minute, low_energy, restart] }
+        active_session:
+          anyOf:
+            - { $ref: "#/components/schemas/FocusSession" }
+            - { type: "null" }
+        priorities:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/FocusPriority" }
+        recommendation:
+          anyOf:
+            - { $ref: "#/components/schemas/FocusPriority" }
+            - { type: "null" }
+        last_interrupted_session:
+          anyOf:
+            - { $ref: "#/components/schemas/FocusSession" }
+            - { type: "null" }
+        parked:
+          type: array
+          items: { $ref: "#/components/schemas/FocusPriority" }
+    FocusAction:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [interrupt, resume, complete] }
+        note: { type: string, maxLength: 1000 }
+        restart_action: { type: string, maxLength: 1000 }
+        reflection: { type: string, maxLength: 2000 }
+        planned_minutes: { type: integer, minimum: 1, maximum: 120 }
+    AttentionCapture:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, minLength: 1, maxLength: 240 }
+        details: { type: string, maxLength: 2000 }
+        estimated_minutes: { type: integer, minimum: 1, maximum: 1440, default: 20 }
+        due_at: { type: [string, "null"], format: date-time }
+        importance: { type: string, enum: [low, normal, high, critical], default: normal }
+    FocusSwitch:
+      type: object
+      required: [task_id]
+      properties:
+        task_id: { type: string, format: uuid }
+        planned_minutes: { type: integer, minimum: 1, maximum: 120, default: 5 }
+    TaskAttention:
+      type: object
+      required: [importance]
+      properties:
+        due_at: { type: [string, "null"], format: date-time }
+        importance: { type: string, enum: [low, normal, high, critical] }
     TaskAction:
       type: object
       required: [action]

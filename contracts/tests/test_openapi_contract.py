@@ -10,6 +10,7 @@ from pathlib import Path
 REPOSITORY = Path(__file__).resolve().parents[2]
 OPENAPI = REPOSITORY / "contracts" / "openapi.yaml"
 OWNERSHIP = REPOSITORY / "contracts" / "route-ownership.json"
+COMPONENTS = REPOSITORY / "contracts" / "component-registry.json"
 PYTHON_GATEWAY = REPOSITORY / "services" / "gateway" / "server.py"
 RUST_ROUTES = REPOSITORY / "services" / "voiceos-gateway-rs" / "src" / "api" / "mod.rs"
 HTTP_METHODS = {"get", "post", "put", "patch", "delete"}
@@ -82,6 +83,30 @@ def route_is_covered(path: str, literals: set[str]) -> bool:
 
 
 class OpenApiContractTests(unittest.TestCase):
+    def test_component_registry_defines_one_canonical_role_map(self) -> None:
+        registry = json.loads(COMPONENTS.read_text(encoding="utf-8"))
+        self.assertEqual(1, registry["schema_version"])
+        components = {component["id"]: component for component in registry["components"]}
+        self.assertEqual(len(components), len(registry["components"]))
+        self.assertEqual(
+            {
+                "backend_control_plane": "voiceos",
+                "voice_interface_controller": "vic",
+                "touchscreen_system_interface": "touch",
+            },
+            registry["roles"],
+        )
+        self.assertEqual("production", components["touch"]["lifecycle"])
+        self.assertEqual("production", components["vic-console"]["lifecycle"])
+        self.assertEqual(
+            ["show_weather", "refresh_dashboard"],
+            components["vic-console"]["integration"]["commands"],
+        )
+        self.assertEqual(
+            "owner_only_unix_socket_v1",
+            components["vic-console"]["integration"]["transport"],
+        )
+
     def test_openapi_and_ownership_inventory_have_identical_operations(self) -> None:
         documented = openapi_operations()
         owned = ownership_operations()
