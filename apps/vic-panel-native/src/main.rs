@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 use std::env;
+use std::path::PathBuf;
+use std::process::Child;
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::process::Command;
-use std::process::Child;
-use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -13,7 +13,8 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Expander,
-    Label, Orientation, ScrolledWindow, Spinner,
+    FileChooserAction, FileChooserNative, Label, Orientation, Picture, ResponseType,
+    ScrolledWindow, Spinner,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -28,6 +29,20 @@ struct Message {
     role: String,
     content: String,
     provider: Option<String>,
+    #[serde(default)]
+    attachments: Vec<Attachment>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct Attachment {
+    id: String,
+    filename: String,
+    media_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachmentResponse {
+    attachment: Attachment,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +56,7 @@ struct TurnRequest<'a> {
     session_id: Option<&'a str>,
     text: &'a str,
     request_id: String,
+    attachment_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +78,35 @@ enum UiEvent {
         result: Result<TurnResponse, String>,
     },
     Dashboard(Result<DashboardUpdate, String>),
+    AttachmentUploaded(Result<Attachment, String>),
+    MemoryReview(Result<Vec<SleepCycleReport>, String>),
+    MemoryAction(Result<(), String>),
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SleepCycleRecord {
+    id: String,
+    mode: String,
+    created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SleepCycleChange {
+    id: String,
+    detail: String,
+    status: String,
+    confidence: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct SleepCycleReport {
+    cycle: SleepCycleRecord,
+    changes: Vec<SleepCycleChange>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SleepCycleListResponse {
+    sleep_cycles: Vec<SleepCycleReport>,
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +137,7 @@ struct AppState {
     busy: bool,
     recorder: Option<Child>,
     recording_path: Option<PathBuf>,
+    pending_attachment: Option<Attachment>,
 }
 
 fn main() -> glib::ExitCode {
@@ -110,12 +156,13 @@ fn build_ui(app: &Application) {
         busy: false,
         recorder: None,
         recording_path: None,
+        pending_attachment: None,
     }));
     let (sender, receiver) = mpsc::channel::<UiEvent>();
 
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("VIC Panel · Omarchy Voice")
+        .title("Touch · VoiceOS")
         .default_width(1280)
         .default_height(820)
         .build();
@@ -159,7 +206,9 @@ fn build_ui(app: &Application) {
     voice_title.add_css_class("voice-title");
     voice_title.set_wrap(true);
     voice_title.set_halign(Align::Start);
-    let voice_hint = Label::new(Some("Type naturally below. Native microphone and push-to-talk are the next milestone."));
+    let voice_hint = Label::new(Some(
+        "Type naturally below. Native microphone and push-to-talk are the next milestone.",
+    ));
     voice_hint.add_css_class("muted");
     voice_hint.set_wrap(true);
     voice_hint.set_halign(Align::Start);
@@ -198,19 +247,75 @@ fn build_ui(app: &Application) {
     conversation_card.append(&scroll);
 
     let composer = GtkBox::new(Orientation::Horizontal, 8);
-    let entry = Entry::builder().placeholder_text("Ask VIC…").hexpand(true).build();
+    let entry = Entry::builder()
+        .placeholder_text("Ask VIC…")
+        .hexpand(true)
+        .build();
     let send = Button::with_label("Send");
+    let attach = Button::with_label("＋ Image");
+    let attachment_status = Label::new(None);
+    attachment_status.add_css_class("muted-small");
     send.add_css_class("send-button");
     let spinner = Spinner::new();
     spinner.set_visible(false);
+    composer.append(&attach);
     composer.append(&entry);
     composer.append(&spinner);
     composer.append(&send);
     conversation_card.append(&composer);
+    conversation_card.append(&attachment_status);
     content.append(&conversation_card);
+
+    {
+        let window = window.clone();
+        let state = state.clone();
+        let sender = sender.clone();
+        attach.connect_clicked(move |_| {
+            let chooser = FileChooserNative::new(
+                Some("Choose an image"),
+                Some(&window),
+                FileChooserAction::Open,
+                Some("Attach"),
+                Some("Cancel"),
+            );
+            let state = state.clone();
+            let sender = sender.clone();
+            chooser.connect_response(move |chooser, response| {
+                if response != ResponseType::Accept {
+                    return;
+                }
+                let Some(path) = chooser.file().and_then(|file| file.path()) else {
+                    return;
+                };
+                let gateway = state.borrow().gateway.clone();
+                let sender = sender.clone();
+                thread::spawn(move || {
+                    let _ = sender.send(UiEvent::AttachmentUploaded(upload_attachment(
+                        &gateway, &path,
+                    )));
+                });
+            });
+            chooser.show();
+        });
+    }
 
     let operations = GtkBox::new(Orientation::Vertical, 14);
     operations.set_size_request(280, -1);
+    let memory_review_card = GtkBox::new(Orientation::Vertical, 8);
+    memory_review_card.add_css_class("panel");
+    memory_review_card.add_css_class("memory-review-card");
+    let memory_review_header = GtkBox::new(Orientation::Horizontal, 8);
+    let memory_review_title = Label::new(Some("Memory review"));
+    memory_review_title.add_css_class("section-title-small");
+    memory_review_title.set_hexpand(true);
+    memory_review_title.set_halign(Align::Start);
+    let scan_memories = Button::with_label("Scan now");
+    scan_memories.add_css_class("secondary-button");
+    memory_review_header.append(&memory_review_title);
+    memory_review_header.append(&scan_memories);
+    let memory_review_list = GtkBox::new(Orientation::Vertical, 7);
+    memory_review_card.append(&memory_review_header);
+    memory_review_card.append(&memory_review_list);
     let activity_card = GtkBox::new(Orientation::Vertical, 8);
     activity_card.add_css_class("panel");
     let activity_title = Label::new(Some("VIC activity"));
@@ -235,12 +340,27 @@ fn build_ui(app: &Application) {
     let task_list = GtkBox::new(Orientation::Vertical, 7);
     task_card.append(&task_title);
     task_card.append(&task_list);
+    operations.append(&memory_review_card);
     operations.append(&activity_card);
     operations.append(&worker_card);
     operations.append(&task_card);
     content.append(&operations);
     root.append(&content);
     window.set_child(Some(&root));
+
+    {
+        let state = state.clone();
+        let sender = sender.clone();
+        scan_memories.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let gateway = state.borrow().gateway.clone();
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let result = start_memory_scan(&gateway).and_then(|_| load_memory_review(&gateway));
+                let _ = sender.send(UiEvent::MemoryReview(result));
+            });
+        });
+    }
 
     let submit = {
         let entry = entry.clone();
@@ -260,10 +380,19 @@ fn build_ui(app: &Application) {
             spinner.start();
             let gateway = state.borrow().gateway.clone();
             let session = state.borrow().session_id.clone();
+            let attachment_ids = state
+                .borrow()
+                .pending_attachment
+                .iter()
+                .map(|item| item.id.clone())
+                .collect();
             let tx = sender.clone();
             thread::spawn(move || {
-                let result = send_turn(&gateway, session.as_deref(), &text);
-                let _ = tx.send(UiEvent::TurnFinished { user_text: text, result });
+                let result = send_turn(&gateway, session.as_deref(), &text, attachment_ids);
+                let _ = tx.send(UiEvent::TurnFinished {
+                    user_text: text,
+                    result,
+                });
             });
         }
     };
@@ -283,9 +412,13 @@ fn build_ui(app: &Application) {
                 return;
             }
             if let Some(mut recorder) = current.recorder.take() {
-                let _ = Command::new("kill").args(["-INT", &recorder.id().to_string()]).status();
+                let _ = Command::new("kill")
+                    .args(["-INT", &recorder.id().to_string()])
+                    .status();
                 let _ = recorder.wait();
-                let Some(path) = current.recording_path.take() else { return; };
+                let Some(path) = current.recording_path.take() else {
+                    return;
+                };
                 current.busy = true;
                 status.set_text("TRANSCRIBING");
                 spinner.set_visible(true);
@@ -295,17 +428,30 @@ fn build_ui(app: &Application) {
                 let session = current.session_id.clone();
                 let tx = sender.clone();
                 thread::spawn(move || {
-                    let result = transcribe_recording(&gateway, &path)
-                        .and_then(|text| send_turn(&gateway, session.as_deref(), &text).map(|turn| (text, turn)));
+                    let result = transcribe_recording(&gateway, &path).and_then(|text| {
+                        send_turn(&gateway, session.as_deref(), &text, Vec::new())
+                            .map(|turn| (text, turn))
+                    });
                     let _ = std::fs::remove_file(path);
                     match result {
-                        Ok((text, turn)) => { let _ = tx.send(UiEvent::TurnFinished { user_text: text, result: Ok(turn) }); }
-                        Err(error) => { let _ = tx.send(UiEvent::TurnFinished { user_text: String::new(), result: Err(error) }); }
+                        Ok((text, turn)) => {
+                            let _ = tx.send(UiEvent::TurnFinished {
+                                user_text: text,
+                                result: Ok(turn),
+                            });
+                        }
+                        Err(error) => {
+                            let _ = tx.send(UiEvent::TurnFinished {
+                                user_text: String::new(),
+                                result: Err(error),
+                            });
+                        }
                     }
                 });
                 return;
             }
-            let path = env::temp_dir().join(format!("vic-native-recording-{}.wav", std::process::id()));
+            let path =
+                env::temp_dir().join(format!("vic-native-recording-{}.wav", std::process::id()));
             match Command::new("pw-record")
                 .args(["--rate", "16000", "--channels", "1", "--format", "s16"])
                 .arg(&path)
@@ -326,6 +472,7 @@ fn build_ui(app: &Application) {
     let event_status = status.clone();
     let event_spinner = spinner.clone();
     let event_entry = entry.clone();
+    let event_sender = sender.clone();
     glib::timeout_add_local(Duration::from_millis(80), move || {
         while let Ok(event) = receiver.try_recv() {
             match event {
@@ -334,7 +481,7 @@ fn build_ui(app: &Application) {
                     current.session_id = Some(active.conversation_id);
                     current.messages = active.messages;
                     event_status.set_text("ONLINE");
-                    render_messages(&message_list, &current.messages);
+                    render_messages(&message_list, &current.messages, &current.gateway);
                 }
                 UiEvent::Loaded(Err(error)) => {
                     event_status.set_text(&format!("OFFLINE · {error}"));
@@ -347,22 +494,51 @@ fn build_ui(app: &Application) {
                     event_entry.grab_focus();
                     match result {
                         Ok(turn) => {
-                            let next = current.messages.last().map_or(1, |message| message.sequence + 1);
-                            current.messages.push(Message { sequence: next, role: "user".into(), content: user_text, provider: None });
+                            let next = current
+                                .messages
+                                .last()
+                                .map_or(1, |message| message.sequence + 1);
+                            let attachments =
+                                current.pending_attachment.take().into_iter().collect();
+                            current.messages.push(Message {
+                                sequence: next,
+                                role: "user".into(),
+                                content: user_text,
+                                provider: None,
+                                attachments,
+                            });
                             let spoken_reply = turn.response_text.clone();
-                            current.messages.push(Message { sequence: next + 1, role: "assistant".into(), content: turn.response_text, provider: Some(turn.provider) });
+                            current.messages.push(Message {
+                                sequence: next + 1,
+                                role: "assistant".into(),
+                                content: turn.response_text,
+                                provider: Some(turn.provider),
+                                attachments: Vec::new(),
+                            });
                             current.session_id = Some(turn.session_id);
                             event_status.set_text("ONLINE");
-                            render_messages(&message_list, &current.messages);
+                            attachment_status.set_text("");
+                            render_messages(&message_list, &current.messages, &current.gateway);
                             let gateway = current.gateway.clone();
                             thread::spawn(move || speak_reply(&gateway, &spoken_reply));
                         }
                         Err(error) => event_status.set_text(&format!("ERROR · {error}")),
                     }
                 }
+                UiEvent::AttachmentUploaded(Ok(attachment)) => {
+                    attachment_status.set_text(&format!("{} ready", attachment.filename));
+                    event_state.borrow_mut().pending_attachment = Some(attachment);
+                }
+                UiEvent::AttachmentUploaded(Err(error)) => {
+                    event_status.set_text(&format!("IMAGE ERROR · {error}"))
+                }
                 UiEvent::Dashboard(Ok(update)) => {
                     if !update.activities.is_empty() {
-                        render_compact_list(&activity_list, &update.activities, "Execution rail ready");
+                        render_compact_list(
+                            &activity_list,
+                            &update.activities,
+                            "Execution rail ready",
+                        );
                     }
                     if !update.workers.is_empty() {
                         render_compact_list(&worker_list, &update.workers, "No active workers");
@@ -370,6 +546,33 @@ fn build_ui(app: &Application) {
                     render_compact_list(&task_list, &update.tasks, "No active tasks");
                 }
                 UiEvent::Dashboard(Err(_)) => {}
+                UiEvent::MemoryReview(Ok(reports)) => {
+                    scan_memories.set_sensitive(true);
+                    render_memory_review(
+                        &memory_review_list,
+                        &reports,
+                        &event_state.borrow().gateway,
+                        &event_sender,
+                    );
+                }
+                UiEvent::MemoryReview(Err(error)) => {
+                    scan_memories.set_sensitive(true);
+                    render_compact_list(
+                        &memory_review_list,
+                        &[format!("Memory review unavailable · {error}")],
+                        "No pending memory proposals",
+                    );
+                }
+                UiEvent::MemoryAction(Ok(())) => {
+                    let gateway = event_state.borrow().gateway.clone();
+                    let sender = event_sender.clone();
+                    thread::spawn(move || {
+                        let _ = sender.send(UiEvent::MemoryReview(load_memory_review(&gateway)));
+                    });
+                }
+                UiEvent::MemoryAction(Err(error)) => {
+                    event_status.set_text(&format!("MEMORY ERROR · {error}"));
+                }
             }
         }
         glib::ControlFlow::Continue
@@ -395,7 +598,93 @@ fn build_ui(app: &Application) {
             thread::sleep(Duration::from_secs(2));
         }
     });
+    let memory_gateway = state.borrow().gateway.clone();
+    let memory_sender = sender.clone();
+    thread::spawn(move || {
+        loop {
+            if memory_sender
+                .send(UiEvent::MemoryReview(load_memory_review(&memory_gateway)))
+                .is_err()
+            {
+                break;
+            }
+            thread::sleep(Duration::from_secs(10));
+        }
+    });
     window.present();
+}
+
+fn render_memory_review(
+    container: &GtkBox,
+    reports: &[SleepCycleReport],
+    gateway: &str,
+    sender: &mpsc::Sender<UiEvent>,
+) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+    let pending = reports
+        .iter()
+        .filter(|report| report.cycle.mode == "dry_run")
+        .flat_map(|report| {
+            report
+                .changes
+                .iter()
+                .filter(|change| change.status == "proposed")
+                .map(move |change| (&report.cycle, change))
+        })
+        .take(5)
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        let label = Label::new(Some("No pending memory proposals"));
+        label.add_css_class("muted-small");
+        label.set_halign(Align::Start);
+        container.append(&label);
+        return;
+    }
+    for (cycle, change) in pending {
+        let row = GtkBox::new(Orientation::Vertical, 6);
+        row.add_css_class("memory-proposal");
+        let detail = Label::new(Some(&change.detail));
+        detail.set_wrap(true);
+        detail.set_halign(Align::Start);
+        detail.set_xalign(0.0);
+        row.append(&detail);
+        let controls = GtkBox::new(Orientation::Horizontal, 6);
+        let confidence = Label::new(Some(&format!(
+            "{} · {:.0}%",
+            compact_date(&cycle.created_at),
+            change.confidence.unwrap_or(0.0) * 100.0
+        )));
+        confidence.add_css_class("muted-small");
+        confidence.set_hexpand(true);
+        confidence.set_halign(Align::Start);
+        let approve = Button::with_label("Remember");
+        approve.add_css_class("approve-button");
+        let gateway = gateway.to_owned();
+        let cycle_id = cycle.id.clone();
+        let change_id = change.id.clone();
+        let sender = sender.clone();
+        approve.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let gateway = gateway.clone();
+            let cycle_id = cycle_id.clone();
+            let change_id = change_id.clone();
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let result = commit_memory_proposals(&gateway, &cycle_id, &[change_id]);
+                let _ = sender.send(UiEvent::MemoryAction(result));
+            });
+        });
+        controls.append(&confidence);
+        controls.append(&approve);
+        row.append(&controls);
+        container.append(&row);
+    }
+}
+
+fn compact_date(value: &str) -> &str {
+    value.get(0..10).unwrap_or(value)
 }
 
 fn render_compact_list(container: &GtkBox, items: &[String], empty: &str) {
@@ -420,24 +709,39 @@ fn render_compact_list(container: &GtkBox, items: &[String], empty: &str) {
     }
 }
 
-fn render_messages(container: &GtkBox, messages: &[Message]) {
+fn render_messages(container: &GtkBox, messages: &[Message], gateway: &str) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
-    let latest_assistant = messages.iter().rposition(|message| message.role == "assistant");
+    let latest_assistant = messages
+        .iter()
+        .rposition(|message| message.role == "assistant");
     for (index, message) in messages.iter().enumerate() {
         if message.role != "user" && message.role != "assistant" {
             continue;
         }
         let card = GtkBox::new(Orientation::Vertical, 5);
         card.add_css_class("message");
-        card.add_css_class(if message.role == "user" { "message-user" } else { "message-vic" });
+        card.add_css_class(if message.role == "user" {
+            "message-user"
+        } else {
+            "message-vic"
+        });
         let role = if message.role == "user" { "YOU" } else { "VIC" };
         let meta = message.provider.as_deref().unwrap_or("");
         let heading = Label::new(Some(&format!("{role}  {meta}")));
         heading.add_css_class("message-role");
         heading.set_halign(Align::Start);
         card.append(&heading);
+        for attachment in &message.attachments {
+            if let Ok(path) = cache_attachment(gateway, attachment) {
+                let picture = Picture::for_filename(path);
+                picture.set_can_shrink(true);
+                picture.set_size_request(-1, 280);
+                picture.set_tooltip_text(Some(&attachment.filename));
+                card.append(&picture);
+            }
+        }
         if message.role == "assistant" && Some(index) != latest_assistant {
             let expander = Expander::new(Some(&first_sentence(&message.content)));
             let full = message_label(&message.content);
@@ -475,20 +779,138 @@ fn load_conversation(gateway: &str) -> Result<ActiveConversation, String> {
         .header("X-VoiceOS-Device-ID", DEVICE_ID)
         .call()
         .map_err(|error| error.to_string())?;
-    response.body_mut().read_json().map_err(|error| error.to_string())
+    response
+        .body_mut()
+        .read_json()
+        .map_err(|error| error.to_string())
 }
 
-fn send_turn(gateway: &str, session_id: Option<&str>, text: &str) -> Result<TurnResponse, String> {
+fn load_memory_review(gateway: &str) -> Result<Vec<SleepCycleReport>, String> {
+    let mut response = ureq::get(format!("{gateway}/v1/memory/sleep-cycles?limit=14"))
+        .header("X-VoiceOS-Device-ID", DEVICE_ID)
+        .call()
+        .map_err(|error| error.to_string())?;
+    let payload: SleepCycleListResponse = response
+        .body_mut()
+        .read_json()
+        .map_err(|error| error.to_string())?;
+    Ok(payload.sleep_cycles)
+}
+
+fn start_memory_scan(gateway: &str) -> Result<(), String> {
+    let key = format!(
+        "vic-panel-scan-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    ureq::post(format!("{gateway}/v1/memory/sleep-cycles"))
+        .header("X-VoiceOS-Device-ID", DEVICE_ID)
+        .send_json(serde_json::json!({"idempotency_key": key}))
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn commit_memory_proposals(
+    gateway: &str,
+    sleep_cycle_id: &str,
+    change_ids: &[String],
+) -> Result<(), String> {
+    let key = format!("vic-panel-commit-{sleep_cycle_id}-{}", change_ids.join("-"));
+    ureq::post(format!(
+        "{gateway}/v1/memory/sleep-cycles/{sleep_cycle_id}/commit"
+    ))
+    .header("X-VoiceOS-Device-ID", DEVICE_ID)
+    .send_json(serde_json::json!({
+        "idempotency_key": key,
+        "change_ids": change_ids,
+    }))
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn send_turn(
+    gateway: &str,
+    session_id: Option<&str>,
+    text: &str,
+    attachment_ids: Vec<String>,
+) -> Result<TurnResponse, String> {
     let request = TurnRequest {
         session_id,
         text,
-        request_id: format!("vic-native-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+        request_id: format!(
+            "vic-native-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ),
+        attachment_ids,
     };
     let mut response = ureq::post(format!("{gateway}/v1/turns/text"))
         .header("X-VoiceOS-Device-ID", DEVICE_ID)
         .send_json(&request)
         .map_err(|error| error.to_string())?;
-    response.body_mut().read_json().map_err(|error| error.to_string())
+    response
+        .body_mut()
+        .read_json()
+        .map_err(|error| error.to_string())
+}
+
+fn upload_attachment(gateway: &str, path: &PathBuf) -> Result<Attachment, String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Invalid filename")?;
+    let media_type = match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        _ => return Err("Choose a JPEG, PNG, or WebP image".into()),
+    };
+    let mut response = ureq::post(format!("{gateway}/v1/attachments"))
+        .header("X-VoiceOS-Device-ID", DEVICE_ID)
+        .header("X-VoiceOS-File-Name", filename)
+        .content_type(media_type)
+        .send(&bytes)
+        .map_err(|error| error.to_string())?;
+    let payload: AttachmentResponse = response
+        .body_mut()
+        .read_json()
+        .map_err(|error| error.to_string())?;
+    Ok(payload.attachment)
+}
+
+fn cache_attachment(gateway: &str, attachment: &Attachment) -> Result<PathBuf, String> {
+    let extension = match attachment.media_type.as_str() {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+        _ => return Err("Unsupported image type".into()),
+    };
+    let directory = env::temp_dir().join("vic-native-attachments");
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join(format!("{}.{}", attachment.id, extension));
+    if !path.is_file() {
+        let mut response = ureq::get(format!("{gateway}/v1/attachments/{}", attachment.id))
+            .header("X-VoiceOS-Device-ID", DEVICE_ID)
+            .call()
+            .map_err(|error| error.to_string())?;
+        let bytes = response
+            .body_mut()
+            .read_to_vec()
+            .map_err(|error| error.to_string())?;
+        std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    }
+    Ok(path)
 }
 
 fn transcribe_recording(gateway: &str, path: &PathBuf) -> Result<String, String> {
@@ -498,7 +920,10 @@ fn transcribe_recording(gateway: &str, path: &PathBuf) -> Result<String, String>
         .content_type("audio/wav")
         .send(&audio)
         .map_err(|error| error.to_string())?;
-    let transcription: TranscriptionResponse = response.body_mut().read_json().map_err(|error| error.to_string())?;
+    let transcription: TranscriptionResponse = response
+        .body_mut()
+        .read_json()
+        .map_err(|error| error.to_string())?;
     if transcription.transcript.trim().is_empty() {
         return Err("No speech was detected".into());
     }
@@ -507,21 +932,41 @@ fn transcribe_recording(gateway: &str, path: &PathBuf) -> Result<String, String>
 
 fn load_dashboard(gateway: &str, cursor: i64) -> Result<DashboardUpdate, String> {
     let tail = if cursor == 0 { "&tail=true" } else { "" };
-    let mut event_response = ureq::get(format!("{gateway}/v1/events/recovery?after={cursor}{tail}"))
-        .header("X-VoiceOS-Device-ID", DEVICE_ID)
-        .call()
+    let mut event_response =
+        ureq::get(format!("{gateway}/v1/events/recovery?after={cursor}{tail}"))
+            .header("X-VoiceOS-Device-ID", DEVICE_ID)
+            .call()
+            .map_err(|error| error.to_string())?;
+    let recovery: RecoveryResponse = event_response
+        .body_mut()
+        .read_json()
         .map_err(|error| error.to_string())?;
-    let recovery: RecoveryResponse = event_response.body_mut().read_json().map_err(|error| error.to_string())?;
     let mut activities = Vec::new();
     let mut workers = Vec::new();
     for event in recovery.events.iter().rev() {
-        let label = event.payload.get("label").and_then(Value::as_str).unwrap_or("VIC update");
-        let detail = event.payload.get("detail").and_then(Value::as_str).unwrap_or("");
-        let line = if detail.is_empty() { label.to_owned() } else { format!("{label} · {detail}") };
+        let label = event
+            .payload
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("VIC update");
+        let detail = event
+            .payload
+            .get("detail")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let line = if detail.is_empty() {
+            label.to_owned()
+        } else {
+            format!("{label} · {detail}")
+        };
         match event.event_type.as_str() {
             "agent.activity.updated" if activities.len() < 5 => activities.push(line),
             "agent.worker.updated" if workers.len() < 5 => {
-                let status = event.payload.get("status").and_then(Value::as_str).unwrap_or("working");
+                let status = event
+                    .payload
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("working");
                 workers.push(format!("{status} · {line}"));
             }
             _ => {}
@@ -531,23 +976,48 @@ fn load_dashboard(gateway: &str, cursor: i64) -> Result<DashboardUpdate, String>
         .header("X-VoiceOS-Device-ID", DEVICE_ID)
         .call()
         .map_err(|error| error.to_string())?;
-    let task_payload: Value = task_response.body_mut().read_json().map_err(|error| error.to_string())?;
-    let tasks = task_payload.get("details").and_then(Value::as_array).into_iter().flatten().filter_map(|detail| {
-        let task = detail.get("task")?;
-        let title = task.get("title")?.as_str()?;
-        let status = task.get("status").and_then(Value::as_str).unwrap_or("active");
-        Some(format!("{status} · {title}"))
-    }).take(5).collect();
-    Ok(DashboardUpdate { cursor: recovery.latest_event_id, activities, workers, tasks })
+    let task_payload: Value = task_response
+        .body_mut()
+        .read_json()
+        .map_err(|error| error.to_string())?;
+    let tasks = task_payload
+        .get("details")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|detail| {
+            let task = detail.get("task")?;
+            let title = task.get("title")?.as_str()?;
+            let status = task
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("active");
+            Some(format!("{status} · {title}"))
+        })
+        .take(5)
+        .collect();
+    Ok(DashboardUpdate {
+        cursor: recovery.latest_event_id,
+        activities,
+        workers,
+        tasks,
+    })
 }
 
 fn speak_reply(gateway: &str, text: &str) {
     let Ok(mut response) = ureq::post(format!("{gateway}/v1/speech/synthesize"))
         .header("X-VoiceOS-Device-ID", DEVICE_ID)
-        .send_json(serde_json::json!({"text": text})) else { return; };
-    let Ok(audio) = response.body_mut().read_to_vec() else { return; };
+        .send_json(serde_json::json!({"text": text}))
+    else {
+        return;
+    };
+    let Ok(audio) = response.body_mut().read_to_vec() else {
+        return;
+    };
     let path = env::temp_dir().join(format!("vic-native-{}.mp3", std::process::id()));
-    if std::fs::write(&path, audio).is_err() { return; }
+    if std::fs::write(&path, audio).is_err() {
+        return;
+    }
     let _ = Command::new("pw-play").arg(&path).status();
     let _ = std::fs::remove_file(path);
 }
@@ -570,6 +1040,9 @@ mod tests {
 
     #[test]
     fn summary_uses_first_sentence() {
-        assert_eq!(first_sentence("First result. More detail."), "First result.");
+        assert_eq!(
+            first_sentence("First result. More detail."),
+            "First result."
+        );
     }
 }

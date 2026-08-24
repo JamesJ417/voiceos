@@ -19,3 +19,7 @@ window.vic-window { background: #080b0d; color: #dce5e4; }
 expander title { color: #dce5e4; }
 entry { min-height: 46px; padding: 0 14px; border: 1px solid #2b393d; border-radius: 12px; background: #080c0e; color: #eef5f4; }
 .send-button { min-width: 90px; min-height: 46px; border-radius: 12px; color: #05100e; background: #35e0c1; font-weight: 800; }
+.memory-review-card { padding: 15px; }
+.memory-proposal { padding: 10px; border: 1px solid #2a383b; border-radius: 10px; background: #0b1012; }
+.secondary-button { min-height: 30px; padding: 0 10px; border-radius: 9px; color: #9fefdf; background: #172124; }
+.approve-button { min-height: 30px; padding: 0 10px; border-radius: 9px; color: #05100e; background: #35e0c1; font-weight: 800; }

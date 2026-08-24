@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=VIC Console
+Comment=Native VIC information dashboard
+Exec=vic-console
+Icon=org.omarchy.vic-console
+Terminal=false
+Categories=Utility;Office;
+Keywords=VIC;Omarchy;Weather;Dashboard;
+StartupWMClass=vic-console

@@ -1,0 +1,1 @@
+export function PlaceholderPanel({name}:{name:string}){return <section className="placeholder-panel" aria-labelledby="placeholder-title"><span className="placeholder-glyph">◇</span><p className="eyebrow">PANEL RESERVED</p><h2 id="placeholder-title">{name} is coming soon</h2><p>The navigation boundary is ready. No simulated data or inactive controls have been added.</p></section>}
