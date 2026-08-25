@@ -62,8 +62,8 @@ fn capture(owner_id: &str) -> NewPersonalCapture {
         source_id: "utterance-1".into(),
         raw_content: "  buy milk after work  ".into(),
         structured_content: Some(serde_json::json!({"text": "buy milk after work"})),
-        created_at: "2026-08-24T12:00:00Z".into(),
-        expires_at: "2026-08-25T12:00:00Z".into(),
+        created_at: (Utc::now() - Duration::minutes(1)).to_rfc3339(),
+        expires_at: (Utc::now() + Duration::days(1)).to_rfc3339(),
         audit_id: "audit-capture-1".into(),
     }
 }
