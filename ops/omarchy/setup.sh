@@ -8,7 +8,7 @@ readonly WHISPER_MODEL_SHA256="a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdf
 
 usage() {
   cat <<'EOF'
-Usage: ops/omarchy/setup.sh [--non-interactive] [--skip-tailscale]
+Usage: ops/omarchy/setup.sh [--non-interactive] [--skip-tailscale] [--profile name]
 
 Installs the Omarchy Touch add-on, configures the VIC voice controller, builds
 the Touch interface, and enables the VoiceOS backend services. Run this from a
@@ -18,10 +18,16 @@ EOF
 
 non_interactive=0
 skip_tailscale=0
+profile_name=""
 while (($#)); do
   case "$1" in
     --non-interactive) non_interactive=1 ;;
     --skip-tailscale) skip_tailscale=1 ;;
+    --profile)
+      shift
+      [[ $# -ge 1 ]] || { usage >&2; exit 2; }
+      profile_name="$1"
+      ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -43,6 +49,36 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(realpath "$script_dir/../..")"
+if [[ -n "$profile_name" ]]; then
+  if [[ ! "$profile_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
+     [[ ! -d "$script_dir/profiles/$profile_name" ]]; then
+    echo "Unknown Omarchy Touch profile: $profile_name" >&2
+    exit 2
+  fi
+fi
+load_profile_build_environment() {
+  local environment_path="$1"
+  local line
+  local key
+  local value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    if [[ "$line" != *=* ]]; then
+      echo "Invalid profile build environment line: $line" >&2
+      exit 2
+    fi
+    key="${line%%=*}"
+    value="${line#*=}"
+    if [[ ! "$key" =~ ^NEXT_PUBLIC_[A-Z0-9_]+$ ]]; then
+      echo "Profile build environment key is not allowed: $key" >&2
+      exit 2
+    fi
+    export "$key=$value"
+  done <"$environment_path"
+}
+if [[ -n "$profile_name" ]]; then
+  load_profile_build_environment "$script_dir/profiles/$profile_name/ui-build.env"
+fi
 temp_dir="$(mktemp -d)"
 trap 'rm -rf -- "$temp_dir"' EXIT
 
@@ -104,7 +140,11 @@ if ((non_interactive == 0)); then
 fi
 
 step "Installing desktop integration and services"
-"$script_dir/install.sh" --repo "$repo_root" --enable
+install_args=(--repo "$repo_root" --enable)
+if [[ -n "$profile_name" ]]; then
+  install_args+=(--profile "$profile_name")
+fi
+"$script_dir/install.sh" "${install_args[@]}"
 
 if ((skip_tailscale == 0)); then
   step "Enabling private phone access through Tailscale"

@@ -74,6 +74,17 @@
     { "method": "GET", "path": "/v1/memory/sleep-cycles", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
     { "method": "POST", "path": "/v1/memory/sleep-cycles", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
     { "method": "GET", "path": "/v1/memory/sleep-cycles/{sleep_cycle_id}", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
-    { "method": "POST", "path": "/v1/memory/sleep-cycles/{sleep_cycle_id}/commit", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" }
+    { "method": "POST", "path": "/v1/memory/sleep-cycles/{sleep_cycle_id}/commit", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane" },
+    { "method": "POST", "path": "/v1/personal/captures", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "voiceos-core" },
+    { "method": "GET", "path": "/v1/personal/inbox", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "voiceos-core" },
+    { "method": "POST", "path": "/v1/personal/captures/{capture_id}/decision", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "voiceos-core" },
+    { "method": "POST", "path": "/v1/personal/captures/{capture_id}/extract", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "hermes-and-voiceos-core" },
+    { "method": "GET", "path": "/v1/personal/proposals", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "voiceos-core" },
+    { "method": "POST", "path": "/v1/personal/proposals/{proposal_id}/approve", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "voiceos-core" },
+    { "method": "POST", "path": "/v1/personal/proposals/{proposal_id}/decision", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "voiceos-core" },
+    { "method": "GET", "path": "/v1/personal/reviews", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "voiceos-core" },
+    { "method": "GET", "path": "/v1/personal/focus-reset", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "voiceos-core" },
+    { "method": "POST", "path": "/v1/personal/daily-reset", "current_implementation": "python-proxy-rust", "target_owner": "rust-control-plane", "backend": "voiceos-core" },
+    { "method": "POST", "path": "/v1/integrations/fieldy/transcripts", "current_implementation": "python-native-rust-store", "target_owner": "rust-control-plane", "backend": "signed-fieldy-intake" }
   ]
 }

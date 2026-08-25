@@ -19,6 +19,8 @@ exposing the gateway to the public internet.
 - Connects VIC to Hermes for agent orchestration and Codex for remote reasoning.
 - Extends VIC to a Pixel phone over private Tailscale HTTPS.
 - Requires explicit approval for consequential computer actions.
+- Parks voice, Touch, and signed Fieldy brain dumps in a temporary review inbox.
+- Offers one restart action and a five-minute fallback without silently creating commitments.
 - Runs as hardened user services and does not modify packaged Omarchy files.
 
 The core voice flow is deliberately simple:
@@ -140,6 +142,20 @@ copying, private file upload, and explicit approval decisions.
 Touch enrolls as a separate VoiceOS device. Local browser origins are
 accepted for development. Production origins must be explicitly allowlisted in
 the gateway with `VOICEOS_WEB_ORIGINS`; wildcards are intentionally unsupported.
+
+Touch's **Reset** workspace is the personal-support surface. A capture remains
+temporary until VIC extracts bounded suggestions and the owner approves an
+individual task or private review record. `Capture this …`, `What should I do
+next?`, `Help me get unstuck`, and `I'm interrupted` use the same deterministic
+workflow through the normal VIC voice path.
+
+Fieldy transcript intake is optional and fail-closed. Configure
+`VOICEOS_FIELDY_WEBHOOK_SECRET` in the private gateway environment and send
+events to `POST /v1/integrations/fieldy/transcripts`. VoiceOS accepts either an
+`X-Fieldy-Signature: sha256=<hex>` HMAC header or, for Fieldy's public webhook
+service, the same secret as a `?token=` query parameter. Query tokens are
+redacted from gateway logs. Fieldy's documented payload is normalized into the
+private intake contract, and retries map to the same personal capture.
 
 ## Provider routing
 

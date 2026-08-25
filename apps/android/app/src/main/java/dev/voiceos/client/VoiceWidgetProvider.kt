@@ -30,6 +30,7 @@ class VoiceWidgetProvider : AppWidgetProvider() {
         super.onReceive(context, intent)
         when (intent.action) {
             ACTION_REFRESH_TASKS -> refreshTasks(context)
+            ACTION_START_TASK -> startTask(context, intent.getStringExtra(EXTRA_TASK_ID))
         }
     }
 
@@ -66,63 +67,76 @@ class VoiceWidgetProvider : AppWidgetProvider() {
             ?: "Ready"
 
         private fun views(context: Context, status: String): RemoteViews {
-            val tasks = TaskWidgetStore.load(context)
-                .filter { it.status !in setOf("completed", "cancelled") }
-                .sortedBy {
-                    when (it.progressLane) {
-                        "needs_me" -> 0
-                        "review" -> 1
-                        "vic_working" -> 2
-                        else -> 3
-                    }
-                }
+            val selection = FocusWidgetModel.select(TaskWidgetStore.load(context))
+            val task = selection.primary
+            val rows = listOf(
+                Triple(R.id.widget_task_row_1, R.id.widget_task_title_1, R.id.widget_task_meta_1),
+                Triple(R.id.widget_task_row_2, R.id.widget_task_title_2, R.id.widget_task_meta_2),
+                Triple(R.id.widget_task_row_3, R.id.widget_task_title_3, R.id.widget_task_meta_3),
+            )
             return RemoteViews(context.packageName, R.layout.voice_widget).apply {
-                setTextViewText(R.id.widget_status, "VIC • $status")
-                setTextViewText(R.id.widget_gateway, GatewaySettings.displayName(context))
+                setTextViewText(R.id.widget_status, "OV • $status")
+                setTextViewText(
+                    R.id.widget_gateway,
+                    if (selection.parkedCount == 0) GatewaySettings.displayName(context)
+                    else "${selection.parkedCount} safely parked • ${GatewaySettings.displayName(context)}",
+                )
                 setTextViewText(
                     R.id.widget_task_summary,
-                    if (tasks.isEmpty()) "TASK PROGRESS • CLEAR" else {
-                        val needsMe = tasks.count { it.progressLane == "needs_me" }
-                        val vic = tasks.count { it.progressLane == "vic_working" }
-                        val review = tasks.count { it.progressLane == "review" }
-                        "NEEDS ME $needsMe • VIC $vic • REVIEW $review"
+                    when {
+                        task == null -> "TODAY • CLEAR"
+                        task.status == "active" -> "★ STAY WITH #1 • OR CHOOSE ANOTHER"
+                        else -> "★ VIC RECOMMENDS #1 • TAP TO CHOOSE"
                     },
                 )
                 setOnClickPendingIntent(R.id.widget_talk, activityIntent(context, MainActivity.ACTION_WIDGET_TALK, 101))
                 setOnClickPendingIntent(R.id.widget_add_task, activityIntent(context, MainActivity.ACTION_WIDGET_ADD_TASK, 102))
                 setOnClickPendingIntent(R.id.widget_refresh, refreshIntent(context))
-                renderTaskRows(context, this, tasks.take(3))
+                setViewVisibility(R.id.widget_empty_tasks, if (task == null) View.VISIBLE else View.GONE)
+                setViewVisibility(R.id.widget_start_task, if (task == null) View.GONE else View.VISIBLE)
+                rows.forEachIndexed { index, (rowId, titleId, metaId) ->
+                    val choice = selection.choices.getOrNull(index)
+                    setViewVisibility(rowId, if (choice == null) View.GONE else View.VISIBLE)
+                    if (choice != null) {
+                        setTextViewText(titleId, "${index + 1}. ${choice.title}")
+                        setTextViewText(
+                            metaId,
+                            if (index == 0) {
+                                "★ ${FocusWidgetModel.recommendationReason(choice)} • ${FocusWidgetModel.nextAction(choice)}"
+                            } else {
+                                "${choice.estimatedMinutes.coerceAtLeast(1)} MIN • ${FocusWidgetModel.nextAction(choice)}"
+                            },
+                        )
+                        setContentDescription(
+                            rowId,
+                            if (index == 0) "VIC recommends ${choice.title}. Tap to choose it."
+                            else "Option ${index + 1}: ${choice.title}. Tap to choose it.",
+                        )
+                        setOnClickPendingIntent(rowId, startTaskIntent(context, choice.id))
+                    }
+                }
+                if (task != null) {
+                    setOnClickPendingIntent(R.id.widget_start_task, startTaskIntent(context, task.id))
+                    setTextViewText(
+                        R.id.widget_start_task,
+                        if (task.status == "active") "KEEP GOING" else "START VIC PICK",
+                    )
+                }
             }
         }
 
-        private fun renderTaskRows(context: Context, views: RemoteViews, tasks: List<VoiceTask>) {
-            val rows = intArrayOf(R.id.widget_task_row_1, R.id.widget_task_row_2, R.id.widget_task_row_3)
-            val titles = intArrayOf(R.id.widget_task_title_1, R.id.widget_task_title_2, R.id.widget_task_title_3)
-            val metadata = intArrayOf(R.id.widget_task_meta_1, R.id.widget_task_meta_2, R.id.widget_task_meta_3)
-            rows.indices.forEach { index ->
-                val task = tasks.getOrNull(index)
-                views.setViewVisibility(rows[index], if (task == null) View.GONE else View.VISIBLE)
-                if (task != null) {
-                    val marker = when (task.progressLane) {
-                        "needs_me" -> "ME"
-                        "vic_working" -> "VIC"
-                        "review" -> "REVIEW"
-                        else -> "SHARED"
-                    }
-                    views.setTextViewText(titles[index], "$marker  ${task.title}")
-                    views.setTextViewText(
-                        metadata[index],
-                        when (task.progressLane) {
-                            "needs_me" -> task.nextUserAction.ifBlank { "Your action is needed" }
-                            "vic_working" -> task.nextVicAction.ifBlank { "VIC is working" }
-                            "review" -> task.nextUserAction.ifBlank { "Ready for your review" }
-                            else -> "${task.completedSteps}/${task.totalSteps} steps • ${task.openBlockers} blockers"
-                        },
-                    )
-                    views.setOnClickPendingIntent(rows[index], openTaskIntent(context, task.id))
-                }
+        private fun startTask(context: Context, taskId: String?) {
+            if (taskId.isNullOrBlank()) return
+            updateStatus(context, "Starting focus")
+            GatewayClient.updateTaskStatus(
+                GatewaySettings.baseUrl(context),
+                taskId,
+                "active",
+                DeviceCredentials.token(context),
+            ) { result ->
+                result.onSuccess { TaskWidgetStore.replace(context, it) }
+                updateStatus(context, if (result.isSuccess) "Focus started" else "Tap to reconnect")
             }
-            views.setViewVisibility(R.id.widget_empty_tasks, if (tasks.isEmpty()) View.VISIBLE else View.GONE)
         }
 
         private fun activityIntent(context: Context, action: String, requestCode: Int): PendingIntent {
@@ -150,9 +164,22 @@ class VoiceWidgetProvider : AppWidgetProvider() {
             )
         }
 
+        private fun startTaskIntent(context: Context, taskId: String): PendingIntent {
+            val intent = Intent(context, VoiceWidgetProvider::class.java).apply {
+                action = ACTION_START_TASK
+                putExtra(EXTRA_TASK_ID, taskId)
+            }
+            return PendingIntent.getBroadcast(
+                context,
+                taskId.hashCode() xor 0x51A7,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        }
+
         private fun openTaskIntent(context: Context, taskId: String): PendingIntent {
             val intent = Intent(context, MainActivity::class.java).apply {
-                action = MainActivity.ACTION_WIDGET_OPEN_TASK
+                action = MainActivity.ACTION_WIDGET_OPEN_FEED
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 putExtra(MainActivity.EXTRA_TASK_ID, taskId)
             }
@@ -167,5 +194,7 @@ class VoiceWidgetProvider : AppWidgetProvider() {
         private const val PREFERENCES = "voiceos_widget"
         private const val STATUS = "status"
         private const val ACTION_REFRESH_TASKS = "dev.voiceos.client.action.REFRESH_TASKS"
+        private const val ACTION_START_TASK = "dev.voiceos.client.action.START_FOCUS_TASK"
+        private const val EXTRA_TASK_ID = "task_id"
     }
 }

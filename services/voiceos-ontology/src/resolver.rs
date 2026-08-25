@@ -54,6 +54,37 @@ impl DeterministicResolver {
             return Some(request("console.show_weather", [], vec![], 0.99, source));
         }
 
+        if let Some(content) = explicit_personal_capture(&normalized) {
+            if content.is_empty() {
+                return Some(request("personal.capture", [], vec![], 0.99, source));
+            }
+            return Some(request(
+                "personal.capture",
+                [("content", json!(content))],
+                vec![],
+                0.99,
+                source,
+            ));
+        }
+        if has_any(&normalized, &["what should i do next"]) {
+            return Some(request("personal.next", [], vec![], 0.99, source));
+        }
+        if has_any(&normalized, &["help me get unstuck", "get me unstuck"]) {
+            return Some(request("personal.unstuck", [], vec![], 0.99, source));
+        }
+        if has_any(&normalized, &["i m interrupted", "i am interrupted"]) {
+            return Some(request("personal.interrupt", [], vec![], 0.99, source));
+        }
+        if has_any(&normalized, &["show my captures", "show captures"]) {
+            return Some(request("personal.inbox", [], vec![], 0.99, source));
+        }
+        if has_any(&normalized, &["review that", "review this capture"]) {
+            return Some(request("personal.review", [], vec![], 0.99, source));
+        }
+        if has_any(&normalized, &["discard that", "discard this capture"]) {
+            return Some(request("personal.discard", [], vec![], 0.99, source));
+        }
+
         if let Some(title) = strip_after(
             &normalized,
             &[
@@ -726,6 +757,14 @@ fn is_task_list_request(phrase: &str) -> bool {
         ],
     );
     mentions_tasks && asks_for_list
+}
+
+fn explicit_personal_capture(phrase: &str) -> Option<&str> {
+    if phrase == "capture this" {
+        Some("")
+    } else {
+        strip_after(phrase, &["capture this "])
+    }
 }
 
 fn strip_after<'a>(phrase: &'a str, prefixes: &[&str]) -> Option<&'a str> {

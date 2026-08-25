@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use voiceos_core::{ConversationEngine, ConversationStore, ProviderRouter};
 use voiceos_ontology::Interpreter;
@@ -13,4 +15,5 @@ pub(crate) struct AppState {
     pub(crate) legacy_audit_path: PathBuf,
     pub(crate) require_device_auth: bool,
     pub(crate) primary_owner_id: String,
+    pub(crate) pending_capture_devices: Arc<Mutex<HashMap<String, Instant>>>,
 }

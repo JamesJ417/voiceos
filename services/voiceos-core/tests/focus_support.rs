@@ -63,6 +63,140 @@ fn focus_snapshot_limits_choices_and_keeps_goal_context() {
 }
 
 #[test]
+fn personal_focus_reset_recommends_one_concrete_first_action() {
+    let store = ConversationStore::in_memory().unwrap();
+    let project = store.create_project("owner", None, "Website").unwrap();
+    task(&store, "owner", &project.id, "Update home page", 20);
+
+    let reset = store.personal_focus_reset("owner", "normal").unwrap();
+
+    assert_eq!(reset.priorities.len(), 1);
+    assert_eq!(
+        reset
+            .recommendation
+            .as_ref()
+            .map(|task| task.title.as_str()),
+        Some("Update home page")
+    );
+    assert_eq!(
+        reset.first_physical_action.as_deref(),
+        Some("Open the materials for Update home page")
+    );
+    assert_eq!(
+        reset.five_minute_version.as_deref(),
+        Some("Spend five minutes: Open the materials for Update home page")
+    );
+    assert_eq!(reset.optional_question, None);
+}
+
+#[test]
+fn personal_focus_reset_uses_low_energy_ordering() {
+    let store = ConversationStore::in_memory().unwrap();
+    let project = store.create_project("owner", None, "Website").unwrap();
+    task(&store, "owner", &project.id, "Write release notes", 30);
+    task(&store, "owner", &project.id, "Open analytics", 5);
+
+    let reset = store.personal_focus_reset("owner", "low_energy").unwrap();
+
+    assert_eq!(reset.recommendation.unwrap().title, "Open analytics");
+}
+
+#[test]
+fn personal_focus_reset_limits_more_than_three_tasks_to_three_priorities() {
+    let store = ConversationStore::in_memory().unwrap();
+    let project = store.create_project("owner", None, "Website").unwrap();
+    for (title, minutes) in [
+        ("Write release notes", 30),
+        ("Open analytics", 5),
+        ("Update home page", 20),
+        ("Review feedback", 15),
+    ] {
+        task(&store, "owner", &project.id, title, minutes);
+    }
+
+    let reset = store.personal_focus_reset("owner", "normal").unwrap();
+
+    assert_eq!(reset.priorities.len(), 3);
+    assert!(reset.recommendation.is_some());
+}
+
+#[test]
+fn personal_focus_reset_with_an_empty_board_invites_a_tiny_capture() {
+    let store = ConversationStore::in_memory().unwrap();
+
+    let reset = store.personal_focus_reset("owner", "normal").unwrap();
+
+    assert!(reset.priorities.is_empty());
+    assert_eq!(reset.recommendation, None);
+    assert_eq!(
+        reset.first_physical_action.as_deref(),
+        Some("Capture the next thing pulling at you.")
+    );
+    assert_eq!(
+        reset.five_minute_version.as_deref(),
+        Some("Spend five minutes: Capture the next thing pulling at you.")
+    );
+    assert_eq!(reset.optional_question, None);
+    assert!(reset.message.contains("nothing you need to catch up on"));
+}
+
+#[test]
+fn personal_focus_reset_uses_the_saved_restart_action_after_an_interruption() {
+    let store = ConversationStore::in_memory().unwrap();
+    let project = store.create_project("owner", None, "Website").unwrap();
+    let interrupted_task = task(&store, "owner", &project.id, "Update home page", 20);
+    for title in ["Pay hosting bill", "Reply to customer", "Fix login bug"] {
+        let urgent_task = task(&store, "owner", &project.id, title, 10);
+        store
+            .set_task_attention_as(
+                "owner",
+                &urgent_task,
+                Some("2000-01-01T12:00:00Z"),
+                "critical",
+                "test",
+            )
+            .unwrap();
+    }
+    let session = store
+        .start_focus_session("owner", &interrupted_task, "normal", 20, "device:test")
+        .unwrap();
+    store
+        .interrupt_focus_session(
+            "owner",
+            &session.id,
+            "A call came in",
+            Some("Reopen the home page draft"),
+            "device:test",
+        )
+        .unwrap();
+
+    let reset = store.personal_focus_reset("owner", "normal").unwrap();
+
+    assert_eq!(
+        reset
+            .recommendation
+            .as_ref()
+            .map(|task| task.task_id.as_str()),
+        Some(interrupted_task.as_str())
+    );
+    assert_eq!(
+        reset
+            .interrupted_session
+            .as_ref()
+            .map(|session| session.id.as_str()),
+        Some(session.id.as_str())
+    );
+    assert_eq!(
+        reset.first_physical_action.as_deref(),
+        Some("Reopen the home page draft")
+    );
+    assert_eq!(
+        reset.five_minute_version.as_deref(),
+        Some("Spend five minutes: Reopen the home page draft")
+    );
+}
+
+#[test]
 fn interruption_preserves_a_restart_point_without_marking_the_task_done() {
     let store = ConversationStore::in_memory().unwrap();
     let project = store.create_project("owner", None, "Website").unwrap();

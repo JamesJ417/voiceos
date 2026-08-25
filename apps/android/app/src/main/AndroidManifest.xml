@@ -11,6 +11,10 @@
         <intent>
             <action android:name="android.media.action.IMAGE_CAPTURE" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <uses-permission android:name="android.permission.INTERNET" />
@@ -47,6 +51,21 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".AiReaderActivity"
+            android:exported="false"
+            android:label="OV Reader" />
+
+        <activity
+            android:name=".BrainDumpActivity"
+            android:exported="false"
+            android:label="OV Brain Dump" />
+
+        <activity
+            android:name=".FocusResetActivity"
+            android:exported="false"
+            android:label="OV Focus Reset" />
+
         <service
             android:name=".RecordingService"
             android:exported="false"
@@ -63,6 +82,20 @@
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
+
+        <service
+            android:name=".SocialShieldAccessibilityService"
+            android:description="@string/social_shield_description"
+            android:exported="true"
+            android:label="@string/social_shield_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/social_shield_accessibility_service" />
+        </service>
 
         <receiver android:name=".VicOutreachActionReceiver" android:exported="false" />
 

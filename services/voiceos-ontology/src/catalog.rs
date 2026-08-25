@@ -108,6 +108,48 @@ impl Catalog {
                 false,
             ),
             intent(
+                "personal.capture",
+                "Store explicitly directed personal input in the temporary review inbox.",
+                vec![string("content", false)],
+                false,
+            ),
+            intent(
+                "personal.next",
+                "Show one owner-scoped next action without creating work.",
+                vec![],
+                false,
+            ),
+            intent(
+                "personal.unstuck",
+                "Return a small owner-scoped focus reset without creating work.",
+                vec![],
+                false,
+            ),
+            intent(
+                "personal.interrupt",
+                "Preserve the owner-scoped restart point after an interruption.",
+                vec![],
+                false,
+            ),
+            intent(
+                "personal.inbox",
+                "List the owner-scoped temporary capture inbox.",
+                vec![],
+                false,
+            ),
+            intent(
+                "personal.review",
+                "Show the current owner-scoped capture for review without approving it.",
+                vec![],
+                false,
+            ),
+            intent(
+                "personal.discard",
+                "Discard the current owner-scoped capture.",
+                vec![],
+                true,
+            ),
+            intent(
                 "focus.next",
                 "Choose one concrete next action from no more than three priorities.",
                 vec![enumeration(

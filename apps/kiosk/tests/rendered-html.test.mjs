@@ -19,8 +19,17 @@ test("server-renders the Touch system interface", async () => {
   const html = await response.text();
   assert.match(html, /<title>Touch<\/title>/i);
   assert.match(html, /manifest.webmanifest/);
-  assert.match(html, /Touch · VIC voice/);
-  assert.match(html, /Talk with VIC/);
+  if (process.env.NEXT_PUBLIC_VOICEOS_INPUT_MODE === "voice-touch") {
+    assert.match(html, /VIC · DOM voice controller/);
+    assert.match(html, /Talk with DOM through VIC/);
+    assert.match(html, /Voice \+ touch only/);
+    assert.match(html, /No keyboard entry is accepted in VIC-DOM/);
+    assert.doesNotMatch(html, /Type a request/);
+    assert.doesNotMatch(html, /Connection settings/);
+  } else {
+    assert.match(html, /Touch · VIC voice/);
+    assert.match(html, /Talk with VIC/);
+  }
   assert.match(html, /Projects/);
   assert.match(html, /＋ Image/);
   assert.match(html, /VIC working/);
@@ -32,6 +41,8 @@ test("server-renders the Touch system interface", async () => {
   assert.match(html, /VIC desktop presence/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /data-input-mode/);
+  assert.match(source, /Voice cannot authorize an action/);
   assert.match(source, /Focus with VIC/);
   assert.match(source, /Only this now/);
   assert.match(source, /I got interrupted/);
@@ -42,4 +53,8 @@ test("server-renders the Touch system interface", async () => {
   assert.match(source, /When should this rise/);
   assert.match(source, /VoiceOS components/);
   assert.match(source, /VIC Console integration registry/);
+  assert.match(source, /Capture, review, then choose/);
+  assert.match(source, /Park this thought/);
+  assert.match(source, /Approve as ready task/);
+  assert.match(source, /Save today’s reset/);
 });

@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
@@ -39,6 +40,8 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     private var pauseAfterSpeech = false
     private var ttsReady = false
     private var pendingSpeech: String? = null
+    private var currentSpeech: String? = null
+    private var interruptedSpeech: String? = null
     private var latestPartial: String? = null
     private var silentAttempts = 0
     private var generation = 0
@@ -56,6 +59,30 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
 
     private val sessionTimeout = Runnable {
         if (active) speakThenStop("This conversation has reached its time limit. Say hello again whenever you are ready.")
+    }
+
+    private val resumeInterruptedSpeech = object : Runnable {
+        override fun run() {
+            if (!active || paused || stopAfterSpeech || pauseAfterSpeech) {
+                interruptedSpeech = null
+                return
+            }
+            val audioManager = getSystemService(AudioManager::class.java)
+            if (audioManager.mode in setOf(
+                    AudioManager.MODE_RINGTONE,
+                    AudioManager.MODE_IN_CALL,
+                    AudioManager.MODE_IN_COMMUNICATION,
+                )
+            ) {
+                handler.postDelayed(this, PHONE_AUDIO_RECHECK_MILLIS)
+                return
+            }
+            val text = interruptedSpeech ?: return
+            interruptedSpeech = null
+            publish(STATE_SPEAKING, response = text, detail = "VIC is resuming")
+            updateNotification("VIC is resuming", paused = false)
+            speakResponse(text)
+        }
     }
 
     private val recognitionListener = object : RecognitionListener {
@@ -116,7 +143,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         super.onCreate()
         createNotificationChannel()
         textToSpeech = TextToSpeech(this, this)
-        startFloorEvents()
+        bootstrapFloorEvents()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -152,6 +179,8 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             override fun onDone(utteranceId: String?) {
                 handler.post {
                     speaking = false
+                    currentSpeech = null
+                    interruptedSpeech = null
                     if (stopAfterSpeech) {
                         stopSession("Conversation ended")
                     } else if (pauseAfterSpeech) {
@@ -167,8 +196,29 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             override fun onError(utteranceId: String?) {
                 handler.post {
                     speaking = false
+                    currentSpeech = null
                     if (stopAfterSpeech) stopSession("Conversation ended")
                     else if (active && !paused) scheduleListening(350L)
+                }
+            }
+
+            override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                handler.post {
+                    speaking = false
+                    if (!interrupted || !active || paused || stopAfterSpeech || pauseAfterSpeech) {
+                        currentSpeech = null
+                        return@post
+                    }
+                    interruptedSpeech = currentSpeech
+                    currentSpeech = null
+                    if (interruptedSpeech.isNullOrBlank()) {
+                        scheduleListening(350L)
+                        return@post
+                    }
+                    publish(STATE_STARTING, detail = "VIC paused for phone audio")
+                    updateNotification("Reply paused — VIC will resume", paused = false)
+                    handler.removeCallbacks(resumeInterruptedSpeech)
+                    handler.postDelayed(resumeInterruptedSpeech, INTERRUPTION_RESUME_DELAY_MILLIS)
                 }
             }
         })
@@ -282,6 +332,8 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         requestInFlight = false
         stopAfterSpeech = false
         pendingSpeech = null
+        currentSpeech = null
+        interruptedSpeech = null
         handler.removeCallbacksAndMessages(null)
         releaseRecognizer()
         textToSpeech?.stop()
@@ -355,6 +407,20 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             getSharedPreferences(PLAYBACK_PREFERENCES, MODE_PRIVATE)
                 .edit().putFloat(SPEECH_RATE_KEY, resolved).apply()
             speakResponse("Voice playback speed is now ${PlaybackSpeed.label(resolved)}.")
+            return
+        }
+        InterestCommands.followTopic(text)?.let { topic ->
+            val interest = InterestStore.follow(this, topic)
+            val response = "Following ${interest.topic}. I added it to your private feed."
+            publish(
+                STATE_SPEAKING,
+                transcript = text,
+                response = response,
+                provider = "local-interest",
+                detail = "Interest followed",
+            )
+            VoiceWidgetProvider.updateStatus(this, "Interest followed")
+            speakResponse(response)
             return
         }
         if (handlePendingApproval(text)) return
@@ -445,8 +511,10 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
 
     private fun speakResponse(text: String) {
         if (!active) return
+        handler.removeCallbacks(resumeInterruptedSpeech)
         recognizer?.cancel()
         speaking = true
+        currentSpeech = text
         publish(STATE_SPEAKING, response = text, detail = "VIC is speaking")
         updateNotification("VIC is speaking", paused = false)
         if (!ttsReady) {
@@ -456,6 +524,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         textToSpeech?.setSpeechRate(currentSpeechRate())
         if (textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID) == TextToSpeech.ERROR) {
             speaking = false
+            currentSpeech = null
             if (stopAfterSpeech) stopSession("Conversation ended") else scheduleListening(350L)
         }
     }
@@ -528,8 +597,28 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         )
     }
 
-    private fun startFloorEvents() {
+    private fun bootstrapFloorEvents() {
         val token = DeviceCredentials.token(this) ?: return
+        GatewayClient.getLatestEventCursor(
+            GatewaySettings.baseUrl(this),
+            token,
+        ) { result ->
+            handler.post {
+                if (!active) return@post
+                result.fold(
+                    onSuccess = { cursor ->
+                        floorCursor = cursor
+                        startFloorEvents(token)
+                    },
+                    onFailure = {
+                        handler.postDelayed({ bootstrapFloorEvents() }, FLOOR_RECONNECT_MILLIS)
+                    },
+                )
+            }
+        }
+    }
+
+    private fun startFloorEvents(token: String) {
         floorEvents?.close()
         floorEvents = GatewayClient.streamEvents(
             GatewaySettings.baseUrl(this),
@@ -548,7 +637,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 }
             },
             onClosed = {
-                if (active) handler.postDelayed({ startFloorEvents() }, 2_000L)
+                if (active) handler.postDelayed({ startFloorEvents(token) }, FLOOR_RECONNECT_MILLIS)
             },
         )
     }
@@ -757,6 +846,9 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         private const val UTTERANCE_ID = "vic-conversation-response"
         private const val SESSION_MAX_MILLIS = 30 * 60 * 1_000L
         private const val MAX_SILENT_ATTEMPTS = 2
+        private const val INTERRUPTION_RESUME_DELAY_MILLIS = 900L
+        private const val PHONE_AUDIO_RECHECK_MILLIS = 1_000L
+        private const val FLOOR_RECONNECT_MILLIS = 2_000L
 
         private val APPROVE_COMMANDS = setOf("approve", "approved", "yes approve", "confirm")
         private val DENY_COMMANDS = setOf("deny", "denied", "no deny", "reject", "cancel")

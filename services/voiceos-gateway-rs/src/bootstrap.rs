@@ -67,6 +67,7 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         legacy_audit_path,
         require_device_auth: env::var("VOICEOS_REQUIRE_DEVICE_AUTH").as_deref() == Ok("1"),
         primary_owner_id,
+        pending_capture_devices: Arc::default(),
     })
 }
 

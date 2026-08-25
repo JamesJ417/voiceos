@@ -12,6 +12,7 @@ Environment=VOICEOS_RUST_DATA_DIR=%h/.local/state/voiceos/core
 Environment=VOICEOS_LEGACY_AUDIT_PATH=%h/.local/state/voiceos/audit.sqlite3
 Environment=VOICEOS_IMPORT_AUDIT=%h/.local/state/voiceos/audit.sqlite3
 Environment=VOICEOS_PRIMARY_OWNER_ID=omarchy-voice-owner
+EnvironmentFile=-%h/.config/voiceos/core.env
 ExecStart=@@RUST_GATEWAY@@
 Restart=on-failure
 RestartSec=3

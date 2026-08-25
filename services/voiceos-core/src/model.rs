@@ -357,6 +357,18 @@ pub struct FocusSnapshot {
     pub parked: Vec<FocusPriority>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonalFocusReset {
+    pub active_session: Option<FocusSessionRecord>,
+    pub interrupted_session: Option<FocusSessionRecord>,
+    pub priorities: Vec<FocusPriority>,
+    pub recommendation: Option<FocusPriority>,
+    pub first_physical_action: Option<String>,
+    pub five_minute_version: Option<String>,
+    pub optional_question: Option<String>,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutreachRecord {
     pub id: String,
@@ -713,19 +725,58 @@ pub struct NewCaptureProposal {
     pub expires_at: String,
     pub audit_id: String,
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CaptureProposal {
     pub id: String,
     pub owner_id: String,
     pub capture_id: String,
     pub title: String,
     pub category: String,
+    pub confidence: f64,
+    pub details: Option<String>,
+    pub suggested_next_action: String,
     pub rationale: String,
+    pub evidence_capture_ids: Vec<String>,
     pub status: String,
     pub created_at: String,
     pub expires_at: String,
     pub audit_id: String,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonalExtractionInput {
+    pub owner_id: String,
+    pub capture_id: String,
+    pub raw_content: String,
+    pub display_text: String,
+    pub capture_expires_at: String,
+}
+
+pub trait PersonalExtractionContract {
+    /// Returns structured proposals only; implementations receive no store or provider access.
+    fn extract(&self, input: &PersonalExtractionInput) -> Result<String, String>;
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonalReviewRecord {
+    pub id: String,
+    pub owner_id: String,
+    pub proposal_id: String,
+    pub capture_id: String,
+    pub category: String,
+    pub title: String,
+    pub details: Option<String>,
+    pub suggested_next_action: String,
+    pub status: String,
+    pub created_at: String,
+    pub audit_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskApprovalStatus {
+    Proposed,
+    Ready,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewDecision {
     pub id: String,

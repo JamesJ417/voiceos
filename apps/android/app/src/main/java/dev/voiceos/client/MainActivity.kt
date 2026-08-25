@@ -4,9 +4,12 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.app.Activity
+import android.app.TimePickerDialog
+import android.appwidget.AppWidgetManager
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Intent
 import android.content.Context
 import android.content.IntentFilter
@@ -17,6 +20,7 @@ import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -29,19 +33,23 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.ArrayAdapter
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import java.io.ByteArrayOutputStream
+import java.time.DayOfWeek
 import java.util.Locale
 import java.util.UUID
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private enum class VoiceState { READY, STARTING, LISTENING, PROCESSING, SPEAKING, ERROR }
-    private enum class AppPage { COMMAND, TASKS, HISTORY, SYSTEM }
-    private enum class TaskFilter { ALL, NEEDS_ME, VIC_WORKING, REVIEW }
+    private enum class AppPage { FEED, COMMAND, TASKS, HISTORY, SYSTEM }
+    private enum class TaskFilter { TODAY, PROJECTS, VIC_WORKING, REVIEW, WINS }
 
     private lateinit var statusView: TextView
     private lateinit var voiceTitleView: TextView
@@ -59,6 +67,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var historyView: TextView
     private lateinit var taskStatusView: TextView
     private lateinit var taskContainer: LinearLayout
+    private lateinit var feedStatusView: TextView
+    private lateinit var feedContainer: LinearLayout
     private lateinit var ttsStatusView: TextView
     private lateinit var voiceButton: Button
     private lateinit var rootScroll: ScrollView
@@ -79,7 +89,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private val navViews = mutableMapOf<AppPage, TextView>()
 
     private var voiceState = VoiceState.READY
-    private var currentPage = AppPage.COMMAND
+    private var currentPage = AppPage.FEED
     private var speechRecognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var textToSpeechReady = false
@@ -104,8 +114,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var eventSubscription: EventSubscription? = null
     private var conversationActive = false
     private var conversationReceiverRegistered = false
-    private var currentTaskFilter = TaskFilter.ALL
+    private var currentTaskFilter = TaskFilter.TODAY
     private var latestTasks: List<VoiceTask> = emptyList()
+    private var latestAiUpdates: List<AiUpdate> = emptyList()
+    private var aiUpdatesRefreshing = false
+    private var latestProjects: List<VoiceProject> = emptyList()
+    private val weeklyCreationInFlight = mutableSetOf<String>()
 
     private val conversationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -168,6 +182,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             if (!response.isNullOrBlank()) {
                 VoiceWidgetProvider.refreshTasks(this@MainActivity)
                 if (currentPage == AppPage.TASKS) loadTasks()
+                if (currentPage == AppPage.FEED) loadMomentumFeed()
             }
         }
     }
@@ -210,6 +225,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             transcriptView.text = "You: $text\n\nVIC: Thinking…"
             if (handleSpeechRateCommand(text)) return
             if (handlePendingApprovalSpeech(text)) return
+            if (handleInterestCommand(text)) return
             submitText(text)
         }
 
@@ -244,6 +260,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             startVicOutreachConnection()
         }
 
+        loadMomentumFeed()
         startFromWidgetIfRequested(intent)
     }
 
@@ -296,6 +313,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }
             REQUEST_IMAGE -> data?.data?.let(::uploadImageFromUri)
             REQUEST_CAMERA -> (data?.extras?.get("data") as? Bitmap)?.let(::uploadCameraPreview)
+            REQUEST_BRAIN_DUMP -> {
+                showPage(AppPage.FEED)
+                loadMomentumFeed()
+                VoiceWidgetProvider.refreshTasks(this)
+            }
         }
     }
 
@@ -497,22 +519,69 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val commandNav = navChip("⌂  COMMAND", true)
-        val tasksNav = navChip("✓  TASKS", false)
-        val historyNav = navChip("◷  HISTORY", false)
-        val systemNav = navChip("⌁  SYSTEM", false)
+        val feedNav = navChip("FEED", true)
+        val commandNav = navChip("TALK", false)
+        val tasksNav = navChip("TASKS", false)
+        val historyNav = navChip("HISTORY", false)
+        val systemNav = navChip("SYSTEM", false)
         navViews.clear()
+        navViews[AppPage.FEED] = feedNav
         navViews[AppPage.COMMAND] = commandNav
         navViews[AppPage.TASKS] = tasksNav
         navViews[AppPage.HISTORY] = historyNav
         navViews[AppPage.SYSTEM] = systemNav
-        navigation.addView(commandNav, weightedButton())
-        navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(7) })
-        navigation.addView(historyNav, weightedButton().apply { marginStart = dp(7) })
-        navigation.addView(systemNav, weightedButton().apply { marginStart = dp(7) })
+        navigation.addView(feedNav, weightedButton())
+        navigation.addView(commandNav, weightedButton().apply { marginStart = dp(5) })
+        navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(5) })
+        navigation.addView(historyNav, weightedButton().apply { marginStart = dp(5) })
+        navigation.addView(systemNav, weightedButton().apply { marginStart = dp(5) })
         content.addView(navigation, fullWidthWrap().apply { topMargin = dp(18) })
 
-        val commandPage = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val feedPage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(kicker("Your private momentum feed"), fullWidthWrap().apply { topMargin = dp(24) })
+            addView(heading("For you, from your life", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+            addView(panel(17).apply {
+                addView(kicker("Finite by design"), fullWidthWrap())
+                addView(heading("Tasks, interests, and AI updates", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "No ads, strangers, likes, or endless scroll. Your priority stays first, followed by a few official AI releases, videos, and reports."
+                    textSize = 13f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(8), 0, 0)
+                }, fullWidthWrap())
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(secondaryButton("+ INTEREST") { showFollowInterestDialog() }, weightedButton())
+                    addView(secondaryButton("SOCIAL SHIELD") { showSocialShieldSetup() }, weightedButton().apply { marginStart = dp(7) })
+                }, fullWidthWrap().apply { topMargin = dp(12) })
+                addView(actionButton("BRAIN DUMP • LET VIC SORT IT").apply {
+                    setOnClickListener {
+                        startActivityForResult(
+                            Intent(this@MainActivity, BrainDumpActivity::class.java),
+                            REQUEST_BRAIN_DUMP,
+                        )
+                    }
+                }, fullWidthWrap().apply { topMargin = dp(10) })
+                addView(secondaryButton("10-MIN RESET • SCRIPTURE + FOCUS") {
+                    startActivity(Intent(this@MainActivity, FocusResetActivity::class.java))
+                }, fullWidthWrap().apply { topMargin = dp(9) })
+                feedStatusView = TextView(this@MainActivity).apply {
+                    text = "Loading your private cards…"
+                    textSize = 13f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(12), 0, 0)
+                }
+                addView(feedStatusView, fullWidthWrap())
+            }, fullWidthWrap().apply { topMargin = dp(18) })
+            feedContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+            addView(feedContainer, fullWidthWrap())
+        }
+
+        val commandPage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
         commandPage.addView(kicker("Carbon Command"), fullWidthWrap().apply { topMargin = dp(24) })
         commandPage.addView(heading("Command center", 30f), fullWidthWrap().apply { topMargin = dp(5) })
 
@@ -682,7 +751,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
             addView(kicker("ADHD-aware execution"), fullWidthWrap().apply { topMargin = dp(24) })
-            addView(heading("Tasks", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+            addView(heading("Projects & momentum", 30f), fullWidthWrap().apply { topMargin = dp(5) })
             addView(panel(17).apply {
                 val header = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -690,11 +759,19 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 }
                 header.addView(LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
-                    addView(kicker("Shared task board"))
-                    addView(heading("What’s next", 22f).apply { setPadding(0, dp(5), 0, 0) })
+                    addView(kicker("One clear next action"))
+                    addView(heading("Move something forward", 22f).apply { setPadding(0, dp(5), 0, 0) })
                 }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-                header.addView(secondaryButton("+ ADD") { showTaskCreationDialog() })
                 addView(header, fullWidthWrap())
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(secondaryButton("+ TASK") { showTaskCreationDialog() }, weightedButton())
+                    addView(secondaryButton("+ PROJECT") { showProjectCreationDialog() }, weightedButton().apply { marginStart = dp(7) })
+                }, fullWidthWrap().apply { topMargin = dp(12) })
+                addView(
+                    secondaryButton("ADD FOCUS WIDGET") { requestFocusWidget() },
+                    fullWidthWrap().apply { topMargin = dp(7) },
+                )
                 taskStatusView = TextView(this@MainActivity).apply {
                     text = "Loading tasks…"
                     textSize = 13f
@@ -702,14 +779,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     setPadding(0, dp(12), 0, 0)
                 }
                 addView(taskStatusView, fullWidthWrap())
-                val filters = LinearLayout(this@MainActivity).apply {
+                val primaryFilters = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    addView(secondaryButton("ALL") { setTaskFilter(TaskFilter.ALL) }, weightedButton())
-                    addView(secondaryButton("NEEDS ME") { setTaskFilter(TaskFilter.NEEDS_ME) }, weightedButton().apply { marginStart = dp(5) })
+                    addView(secondaryButton("ALL TASKS") { setTaskFilter(TaskFilter.TODAY) }, weightedButton())
+                    addView(secondaryButton("PROJECTS") { setTaskFilter(TaskFilter.PROJECTS) }, weightedButton().apply { marginStart = dp(5) })
                     addView(secondaryButton("VIC") { setTaskFilter(TaskFilter.VIC_WORKING) }, weightedButton().apply { marginStart = dp(5) })
-                    addView(secondaryButton("REVIEW") { setTaskFilter(TaskFilter.REVIEW) }, weightedButton().apply { marginStart = dp(5) })
                 }
-                addView(filters, fullWidthWrap().apply { topMargin = dp(11) })
+                addView(primaryFilters, fullWidthWrap().apply { topMargin = dp(11) })
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(secondaryButton("REVIEW") { setTaskFilter(TaskFilter.REVIEW) }, weightedButton())
+                    addView(secondaryButton("WINS") { setTaskFilter(TaskFilter.WINS) }, weightedButton().apply { marginStart = dp(5) })
+                }, fullWidthWrap().apply { topMargin = dp(6) })
                 taskContainer = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
                 }
@@ -813,15 +894,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         pageViews.clear()
+        pageViews[AppPage.FEED] = feedPage
         pageViews[AppPage.COMMAND] = commandPage
         pageViews[AppPage.TASKS] = tasksPage
         pageViews[AppPage.HISTORY] = historyPage
         pageViews[AppPage.SYSTEM] = systemPage
+        content.addView(feedPage, fullWidthWrap())
         content.addView(commandPage, fullWidthWrap())
         content.addView(tasksPage, fullWidthWrap())
         content.addView(historyPage, fullWidthWrap())
         content.addView(systemPage, fullWidthWrap())
 
+        feedNav.setOnClickListener { showPage(AppPage.FEED) }
         commandNav.setOnClickListener { showPage(AppPage.COMMAND) }
         tasksNav.setOnClickListener { showPage(AppPage.TASKS) }
         historyNav.setOnClickListener { showPage(AppPage.HISTORY) }
@@ -904,9 +988,27 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun startFromWidgetIfRequested(intent: Intent?) {
+        if (intent?.action == ACTION_SOCIAL_SHIELD) {
+            val openedPackage = intent.getStringExtra(EXTRA_BLOCKED_PACKAGE)
+            intent.action = null
+            showPage(AppPage.FEED)
+            if (!openedPackage.isNullOrBlank()) showSocialShieldPrompt(openedPackage)
+            return
+        }
+        if (intent?.action == ACTION_WIDGET_OPEN_FEED) {
+            intent.action = null
+            showPage(AppPage.FEED)
+            return
+        }
+        if (intent?.action == ACTION_PIN_WIDGET) {
+            intent.action = null
+            showPage(AppPage.TASKS)
+            requestFocusWidget()
+            return
+        }
         if (intent?.action == ACTION_WIDGET_OPEN_TASK) {
             intent.action = null
-            currentTaskFilter = TaskFilter.ALL
+            currentTaskFilter = TaskFilter.TODAY
             showPage(AppPage.TASKS)
             loadTasks()
             return
@@ -931,9 +1033,24 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             loadTasks()
             return
         }
+        if (intent?.action == ACTION_SCRIPTURE_REFLECTION) {
+            intent.action = null
+            val reference = intent.getStringExtra(EXTRA_PASSAGE_REFERENCE)
+                ?.takeIf { it.isNotBlank() }
+                ?: ScriptureResetModel.passageFor().reference
+            val thoughts = intent.getStringExtra(EXTRA_SCRIPTURE_THOUGHTS).orEmpty().trim()
+            showPage(AppPage.COMMAND)
+            val display = if (thoughts.isBlank()) {
+                "I read $reference in the CSB and want to talk through what stood out."
+            } else {
+                "My reflection on $reference: $thoughts"
+            }
+            submitText(ScriptureResetModel.conversationPrompt(reference, thoughts), display)
+            return
+        }
         if (intent?.action == ACTION_DAILY_CHECKIN) {
             intent.action = null
-            submitText("Start my daily check-in")
+            startActivity(Intent(this, FocusResetActivity::class.java))
             return
         }
         if (intent?.action == ACTION_WIDGET_ADD_TASK) {
@@ -947,6 +1064,41 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         intent.action = null
         intent.removeExtra(EXTRA_AUTO_LISTEN)
         ensurePermissionAndStart(correction = false)
+    }
+
+    private fun requestFocusWidget() {
+        val manager = getSystemService(AppWidgetManager::class.java)
+        if (!manager.isRequestPinAppWidgetSupported) {
+            Toast.makeText(
+                this,
+                "Open your launcher widgets and choose VIC Focus.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+        val provider = ComponentName(this, VoiceWidgetProvider::class.java)
+        val requested = manager.requestPinAppWidget(provider, null, null)
+        if (!requested) {
+            Toast.makeText(
+                this,
+                "Open your launcher widgets and choose VIC Focus.",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    private fun handleInterestCommand(text: String): Boolean {
+        val topic = InterestCommands.followTopic(text) ?: return false
+        val interest = InterestStore.follow(this, topic)
+        val response = "Following ${interest.topic}. I added it to your private feed."
+        lastTranscript = text
+        lastResponse = response
+        transcriptView.text = "You: $text\n\nVIC: $response"
+        renderState(VoiceState.SPEAKING, "Interest followed")
+        VoiceWidgetProvider.updateStatus(this, "Interest followed")
+        if (currentPage == AppPage.FEED) loadMomentumFeed()
+        speak(response, RESPONSE_UTTERANCE_ID)
+        return true
     }
 
     private fun ensurePermissionAndStart(correction: Boolean) {
@@ -1007,7 +1159,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         VoiceWidgetProvider.updateStatus(this, "Ready")
     }
 
-    private fun submitText(text: String) {
+    private fun submitText(text: String, displayTranscript: String? = null) {
         val generation = ++requestGeneration
         val attachment = pendingAttachment
         renderState(VoiceState.PROCESSING, "Contacting gateway")
@@ -1026,11 +1178,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 result.fold(
                     onSuccess = { turn ->
                         if (pendingAttachment?.id == attachment?.id) pendingAttachment = null
-                        lastTranscript = turn.transcript
+                        val visibleTranscript = displayTranscript ?: turn.transcript
+                        lastTranscript = visibleTranscript
                         lastResponse = turn.responseText
                         failedTranscript = null
                         pendingApproval = turn.approval
-                        transcriptView.text = "You: ${turn.transcript}\n\nVIC: ${turn.responseText}"
+                        transcriptView.text = "You: $visibleTranscript\n\nVIC: ${turn.responseText}"
                         providerStatusView.text = "${turn.provider.uppercase(Locale.US)}  •  ACTIVE"
                         providerStatusView.setTextColor(CarbonPalette.teal)
                         memoryStatusView.text = "MEMORY ACTIVE"
@@ -1048,6 +1201,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         VoiceWidgetProvider.updateStatus(this, "Speaking")
                         VoiceWidgetProvider.refreshTasks(this)
                         if (currentPage == AppPage.TASKS) loadTasks()
+                        if (currentPage == AppPage.FEED) loadMomentumFeed()
                         changeFloor("update", "speaking", turn.transcript, turn.responseText)
                         speak(turn.responseText, RESPONSE_UTTERANCE_ID)
                     },
@@ -1606,6 +1760,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             view.alpha = if (active) 1f else 0.72f
         }
         rootScroll.post { rootScroll.smoothScrollTo(0, 0) }
+        if (page == AppPage.FEED) loadMomentumFeed()
         if (page == AppPage.TASKS) loadTasks()
         if (page == AppPage.HISTORY) loadHistory()
         if (page == AppPage.SYSTEM) {
@@ -1614,35 +1769,340 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun loadTasks() {
-        if (!::taskStatusView.isInitialized) return
-        taskStatusView.text = "Loading shared tasks…"
-        taskStatusView.setTextColor(CarbonPalette.muted)
+    private fun loadMomentumFeed() {
+        if (!::feedStatusView.isInitialized) return
+        val cached = TaskWidgetStore.load(this)
+        latestAiUpdates = AiUpdateStore.load(this)
+        renderMomentumFeed(cached)
+        feedStatusView.text = if (cached.isEmpty()) "Refreshing your private cards…" else "Refreshing • showing saved tasks"
+        feedStatusView.setTextColor(CarbonPalette.muted)
+        refreshAiUpdates()
         GatewayClient.getTasks(
             GatewaySettings.baseUrl(this),
             DeviceCredentials.token(this),
+            limit = 100,
         ) { result ->
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 result.fold(
                     onSuccess = { tasks ->
+                        latestTasks = tasks
                         TaskWidgetStore.save(this, tasks)
-                        VoiceWidgetProvider.updateStatus(this, "Online")
-                        renderTasks(tasks)
+                        renderMomentumFeed(tasks)
                     },
-                    onFailure = { error ->
-                        val cached = TaskWidgetStore.load(this)
-                        if (cached.isNotEmpty()) {
-                            taskStatusView.text = "Showing cached tasks • sync unavailable"
-                            taskStatusView.setTextColor(CarbonPalette.amber)
-                            renderTasks(cached, preserveStatus = true)
+                    onFailure = {
+                        renderMomentumFeed(cached)
+                        feedStatusView.text = if (cached.isEmpty()) {
+                            "Connect VIC to load your tasks. Your followed interests are still available."
                         } else {
-                            taskContainer.removeAllViews()
-                            taskStatusView.text = "Tasks are unavailable.\n${error.message.orEmpty()}"
-                            taskStatusView.setTextColor(CarbonPalette.red)
+                            "Offline • using your saved private feed"
                         }
+                        feedStatusView.setTextColor(CarbonPalette.amber)
                     },
                 )
+            }
+        }
+    }
+
+    private fun renderMomentumFeed(tasks: List<VoiceTask>) {
+        if (!::feedContainer.isInitialized) return
+        latestTasks = tasks
+        val interests = InterestStore.list(this)
+        val cards = MomentumFeedModel.build(tasks, interests)
+        val aiUpdates = AiUpdateModel.select(latestAiUpdates)
+        feedContainer.removeAllViews()
+        feedStatusView.text = when {
+            cards.isEmpty() && aiUpdates.isEmpty() -> "Your feed is clear. Follow an interest or add one small task."
+            else -> "${cards.size} focus cards • ${aiUpdates.size} official AI updates"
+        }
+        feedStatusView.setTextColor(if (cards.isEmpty() && aiUpdates.isEmpty()) CarbonPalette.green else CarbonPalette.teal)
+        var aiUpdatesRendered = false
+        cards.forEachIndexed { index, card ->
+            renderMomentumCard(index, card, tasks, interests)
+            if (index == 0) {
+                renderAiUpdates(aiUpdates)
+                aiUpdatesRendered = true
+            }
+        }
+        if (!aiUpdatesRendered) renderAiUpdates(aiUpdates)
+        feedContainer.addView(taskPanel(14).apply {
+            addView(taskKicker("YOU'RE CAUGHT UP"), fullWidthWrap())
+            addView(taskHeading("The feed ends here", 20f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = "You saw the latest official AI updates. Start a priority, talk with VIC, or leave the phone—there is no endless feed waiting below."
+                textSize = 13f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(7), 0, 0)
+            }, fullWidthWrap())
+        }, fullWidthWrap().apply { topMargin = dp(10) })
+    }
+
+    private fun refreshAiUpdates() {
+        if (aiUpdatesRefreshing) return
+        if (latestAiUpdates.isNotEmpty() && AiUpdateStore.isFresh(this)) return
+        aiUpdatesRefreshing = true
+        AiUpdateRepository.refresh { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                aiUpdatesRefreshing = false
+                result.onSuccess { updates ->
+                    latestAiUpdates = updates
+                    AiUpdateStore.save(this, updates)
+                }
+                renderMomentumFeed(latestTasks)
+                if (result.isFailure && latestAiUpdates.isEmpty()) {
+                    feedStatusView.text = "Official AI sources are unavailable • your focus cards still work"
+                    feedStatusView.setTextColor(CarbonPalette.amber)
+                }
+            }
+        }
+    }
+
+    private fun renderAiUpdates(updates: List<AiUpdate>) {
+        feedContainer.addView(taskPanel(14).apply {
+            addView(taskKicker("AI UPDATES • OFFICIAL SOURCES"), fullWidthWrap())
+            addView(taskHeading("What changed in AI", 20f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = if (updates.isEmpty() && aiUpdatesRefreshing) {
+                    "Checking OpenAI, Google DeepMind, Hugging Face, and official release videos…"
+                } else if (updates.isEmpty()) {
+                    "No fresh official updates are available right now."
+                } else {
+                    "Four fresh items, then it stops. Every article can be read aloud inside OV."
+                }
+                textSize = 12f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(7), 0, 0)
+            }, fullWidthWrap())
+        }, fullWidthWrap().apply { topMargin = dp(10) })
+        updates.forEach { update -> renderAiUpdateCard(update) }
+    }
+
+    private fun renderAiUpdateCard(update: AiUpdate) {
+        val kind = when (update.kind) {
+            AiUpdateKind.VIDEO -> "AI VIDEO"
+            AiUpdateKind.LAUNCH -> "AI LAUNCH"
+            AiUpdateKind.REPORT -> "AI REPORT"
+            AiUpdateKind.NEWS -> "AI NEWS"
+        }
+        feedContainer.addView(taskPanel(15).apply {
+            addView(taskKicker("$kind • ${update.source.uppercase()} • ${AiUpdateModel.ageLabel(update.publishedEpochSeconds)}"), fullWidthWrap())
+            addView(taskHeading(update.title, 20f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = update.summary
+                textSize = 13f
+                setTextColor(CarbonPalette.muted)
+                setLineSpacing(dp(2).toFloat(), 1.12f)
+                setPadding(0, dp(7), 0, 0)
+            }, fullWidthWrap())
+            addView(secondaryButton(if (update.kind == AiUpdateKind.VIDEO) "WATCH OR LISTEN IN OV" else "READ OR LISTEN IN OV") {
+                startActivity(Intent(this@MainActivity, AiReaderActivity::class.java).apply {
+                    putExtra(AiReaderActivity.EXTRA_URL, update.readerUrl)
+                    putExtra(AiReaderActivity.EXTRA_TITLE, update.title)
+                    putExtra(AiReaderActivity.EXTRA_SOURCE, update.source)
+                    putExtra(AiReaderActivity.EXTRA_SUMMARY, update.summary)
+                })
+            }, fullWidthWrap().apply { topMargin = dp(10) })
+        }, fullWidthWrap().apply { topMargin = dp(8) })
+    }
+
+    private fun renderMomentumCard(
+        index: Int,
+        card: MomentumCard,
+        tasks: List<VoiceTask>,
+        interests: List<VicInterest>,
+    ) {
+        val task = card.taskId?.let { id -> tasks.firstOrNull { it.id == id } }
+        val interest = card.interestId?.let { id -> interests.firstOrNull { it.id == id } }
+        val label = when (card.kind) {
+            MomentumCardKind.PRIORITY -> "DO THIS NOW"
+            MomentumCardKind.TASK -> "NEXT SMALL MOVE"
+            MomentumCardKind.VIC_PREPARED -> "VIC IS WORKING"
+            MomentumCardKind.REVIEW -> "READY FOR YOU"
+            MomentumCardKind.INTEREST -> "YOUR INTEREST"
+            MomentumCardKind.WIN -> "WIN • MOMENTUM KEPT"
+        }
+        val cardView = taskPanel(if (index == 0) 20 else 16).apply {
+            addView(taskKicker(label), fullWidthWrap())
+            addView(taskHeading(card.title, if (index == 0) 26f else 21f).apply { setPadding(0, dp(6), 0, 0) }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = card.body
+                textSize = if (index == 0) 15f else 13f
+                setTextColor(if (card.kind == MomentumCardKind.INTEREST) CarbonPalette.teal else CarbonPalette.muted)
+                setLineSpacing(dp(2).toFloat(), 1.13f)
+                setPadding(0, dp(8), 0, 0)
+            }, fullWidthWrap())
+            when (card.kind) {
+                MomentumCardKind.PRIORITY, MomentumCardKind.TASK -> if (task != null) {
+                    addView(actionButton(if (task.status == "active") "OPEN TASK" else "START 5").apply {
+                        setOnClickListener {
+                            if (task.status == "active") {
+                                currentTaskFilter = TaskFilter.TODAY
+                                showPage(AppPage.TASKS)
+                            } else {
+                                updateTaskStatus(task, "active")
+                            }
+                        }
+                    }, fullWidthWrap().apply { topMargin = dp(11) })
+                }
+                MomentumCardKind.VIC_PREPARED -> addView(secondaryButton("SHOW PROGRESS") {
+                    currentTaskFilter = TaskFilter.VIC_WORKING
+                    showPage(AppPage.TASKS)
+                }, fullWidthWrap().apply { topMargin = dp(11) })
+                MomentumCardKind.REVIEW -> addView(actionButton("REVIEW WITH VIC").apply {
+                    setOnClickListener {
+                        currentTaskFilter = TaskFilter.REVIEW
+                        showPage(AppPage.TASKS)
+                    }
+                }, fullWidthWrap().apply { topMargin = dp(11) })
+                MomentumCardKind.INTEREST -> if (interest != null) {
+                    val actions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                    actions.addView(actionButton("ASK VIC").apply {
+                        setOnClickListener {
+                            showPage(AppPage.COMMAND)
+                            submitText("Give me one useful, concise idea about my interest in ${interest.topic}, connected to my current priorities.")
+                        }
+                    }, weightedButton())
+                    actions.addView(secondaryButton("UNFOLLOW") {
+                        InterestStore.unfollow(this@MainActivity, interest.id)
+                        loadMomentumFeed()
+                    }, weightedButton().apply { marginStart = dp(7) })
+                    addView(actions, fullWidthWrap().apply { topMargin = dp(11) })
+                }
+                MomentumCardKind.WIN -> Unit
+            }
+        }
+        feedContainer.addView(cardView, fullWidthWrap().apply { topMargin = dp(10) })
+    }
+
+    private fun showFollowInterestDialog() {
+        val input = EditText(this).apply {
+            hint = "Example: woodworking, restaurant design, AI agents"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setSingleLine(true)
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Follow an interest")
+            .setMessage("Only topics you choose appear in your private feed.")
+            .setView(input)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Follow") { _, _ ->
+                val topic = input.text.toString().trim()
+                if (topic.isBlank()) {
+                    Toast.makeText(this, "Enter an interest to follow", Toast.LENGTH_SHORT).show()
+                } else {
+                    InterestStore.follow(this, topic)
+                    loadMomentumFeed()
+                }
+            }
+            .show()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun showSocialShieldSetup() {
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val knownSignals = listOf(
+            "instagram", "facebook", "tiktok", "youtube", "reddit", "twitter",
+            "threads", "snapchat", "linkedin", "pinterest", "tumblr",
+        )
+        val installed = packageManager.queryIntentActivities(launcherIntent, 0)
+            .map { info ->
+                val packageName = info.activityInfo.packageName
+                Triple(packageName, info.loadLabel(packageManager).toString(), info)
+            }
+            .filter { (packageName, label, _) ->
+                packageName != this.packageName && knownSignals.any {
+                    packageName.contains(it, ignoreCase = true) || label.contains(it, ignoreCase = true)
+                }
+            }
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase(Locale.US) }
+        if (installed.isEmpty()) {
+            Toast.makeText(this, "No common social apps were found.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val selected = SocialShieldStore.packages(this).toMutableSet()
+        val labels = installed.map { it.second }.toTypedArray()
+        val checked = installed.map { it.first in selected }.toBooleanArray()
+        AlertDialog.Builder(this)
+            .setTitle("Choose social apps")
+            .setMessage("When a priority is open, VIC will offer Start 5 before these apps. Continue anyway always remains available.")
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
+                val packageName = installed[which].first
+                if (isChecked) selected += packageName else selected -= packageName
+            }
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save and enable") { _, _ ->
+                SocialShieldStore.setPackages(this, selected)
+                AlertDialog.Builder(this)
+                    .setTitle("Enable VIC Social Shield")
+                    .setMessage("Android requires you to turn on VIC Social Shield in Accessibility. It reads only which app opens; it does not read screen content.")
+                    .setNegativeButton("Later", null)
+                    .setPositiveButton("Open settings") { _, _ ->
+                        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    }
+                    .show()
+            }
+            .show()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun showSocialShieldPrompt(openedPackage: String) {
+        val task = FocusWidgetModel.select(TaskWidgetStore.load(this)).primary ?: return
+        val label = runCatching {
+            val info = packageManager.getApplicationInfo(openedPackage, 0)
+            packageManager.getApplicationLabel(info).toString()
+        }.getOrDefault("that app")
+        AlertDialog.Builder(this)
+            .setTitle("Before $label")
+            .setMessage("You chose “${task.title}.” Give it five minutes first?")
+            .setNegativeButton("Stay with VIC", null)
+            .setPositiveButton("Start 5") { _, _ -> updateTaskStatus(task, "active") }
+            .setNeutralButton("Continue 10 min") { _, _ ->
+                SocialShieldStore.allowTemporarily(this, openedPackage)
+                packageManager.getLaunchIntentForPackage(openedPackage)?.let(::startActivity)
+            }
+            .show()
+    }
+
+    private fun loadTasks() {
+        if (!::taskStatusView.isInitialized) return
+        taskStatusView.text = "Loading projects, ownership, and next actions…"
+        taskStatusView.setTextColor(CarbonPalette.muted)
+        GatewayClient.getProjects(
+            GatewaySettings.baseUrl(this),
+            DeviceCredentials.token(this),
+        ) { projectResult ->
+            latestProjects = projectResult.getOrDefault(emptyList())
+            GatewayClient.getTasks(
+                GatewaySettings.baseUrl(this),
+                DeviceCredentials.token(this),
+                limit = 100,
+            ) { result ->
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    result.fold(
+                        onSuccess = { tasks ->
+                            TaskWidgetStore.save(this, tasks)
+                            VoiceWidgetProvider.updateStatus(this, "Online")
+                            renderTasks(tasks)
+                            ensureWeeklyTaskInstances(tasks)
+                        },
+                        onFailure = { error ->
+                            val cached = TaskWidgetStore.load(this)
+                            if (cached.isNotEmpty()) {
+                                taskStatusView.text = "Showing cached tasks • sync unavailable"
+                                taskStatusView.setTextColor(CarbonPalette.amber)
+                                renderTasks(cached, preserveStatus = true)
+                            } else {
+                                taskContainer.removeAllViews()
+                                taskStatusView.text = "Tasks are unavailable.\n${error.message.orEmpty()}"
+                                taskStatusView.setTextColor(CarbonPalette.red)
+                            }
+                        },
+                    )
+                }
             }
         }
     }
@@ -1651,75 +2111,213 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         latestTasks = tasks
         taskContainer.removeAllViews()
         val openTasks = tasks.filter { it.status !in setOf("completed", "cancelled") }
-        val visibleTasks = openTasks.filter { task ->
-            when (currentTaskFilter) {
-                TaskFilter.ALL -> true
-                TaskFilter.NEEDS_ME -> task.progressLane == "needs_me"
-                TaskFilter.VIC_WORKING -> task.progressLane == "vic_working"
-                TaskFilter.REVIEW -> task.progressLane == "review"
+        if (currentTaskFilter == TaskFilter.PROJECTS) {
+            renderProjects(tasks)
+            if (!preserveStatus) {
+                taskStatusView.text = "${latestProjects.count { it.status == "active" }} active projects • ${openTasks.size} open tasks"
+                taskStatusView.setTextColor(CarbonPalette.teal)
             }
+            return
+        }
+        if (currentTaskFilter == TaskFilter.WINS) {
+            renderWins(tasks)
+            if (!preserveStatus) {
+                val completed = tasks.count { it.status == "completed" }
+                taskStatusView.text = if (completed == 0) "No pressure. Starting and returning both build momentum." else "$completed recent wins • progress never resets"
+                taskStatusView.setTextColor(if (completed == 0) CarbonPalette.muted else CarbonPalette.green)
+            }
+            return
+        }
+
+        val visibleTasks = when (currentTaskFilter) {
+            TaskFilter.TODAY -> openTasks.sortedWith(
+                compareBy<VoiceTask> { if (it.status == "active") 0 else 1 }
+                    .thenBy { if (it.progressLane == "needs_me") 0 else 1 }
+                    .thenBy { when (it.importance) { "high" -> 0; "normal" -> 1; else -> 2 } }
+                    .thenBy { it.estimatedMinutes },
+            )
+            TaskFilter.VIC_WORKING -> openTasks.filter { it.progressLane == "vic_working" }
+            TaskFilter.REVIEW -> openTasks.filter { it.progressLane == "review" }
+            TaskFilter.PROJECTS, TaskFilter.WINS -> emptyList()
         }
         if (!preserveStatus) {
             taskStatusView.text = if (openTasks.isEmpty()) {
-                "You’re clear. Add a task or ask VIC what to do next."
+                "You’re clear. Capture one small win or let VIC prepare the next project."
             } else {
-                "${visibleTasks.size} shown • ${openTasks.size} open • ${currentTaskFilter.name.replace('_', ' ').lowercase()}"
+                when (currentTaskFilter) {
+                    TaskFilter.TODAY -> "All ${openTasks.size} unfinished tasks • VIC recommends the first one"
+                    TaskFilter.VIC_WORKING -> "${visibleTasks.size} work packets with VIC • you can keep your focus"
+                    TaskFilter.REVIEW -> "${visibleTasks.size} decisions waiting • approve only when ready"
+                    else -> "${visibleTasks.size} shown • ${openTasks.size} open"
+                }
             }
             taskStatusView.setTextColor(if (openTasks.isEmpty()) CarbonPalette.green else CarbonPalette.teal)
         }
-        visibleTasks.forEach { task ->
-            val taskPanel = taskPanel(13)
-            val marker = when (task.status) {
-                "active" -> "▶ ACTIVE"
-                "blocked" -> "! BLOCKED"
-                else -> "○ READY"
-            }
-            taskPanel.addView(taskKicker(marker), fullWidthWrap())
-            taskPanel.addView(taskHeading(task.title, 19f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
-            taskPanel.addView(TextView(this).apply {
-                val stepProgress = if (task.totalSteps > 0) "${task.completedSteps}/${task.totalSteps} steps" else "No steps yet"
-                val blockerText = if (task.openBlockers > 0) " • ${task.openBlockers} blocked" else ""
-                text = "${task.observableOutcome}\n$stepProgress$blockerText • VIC ${task.vicStatus.replace('_', ' ')}"
+        if (visibleTasks.isEmpty() && openTasks.isNotEmpty()) {
+            taskContainer.addView(taskPanel(13).apply {
+                addView(taskKicker("Nothing waiting here"), fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = if (currentTaskFilter == TaskFilter.VIC_WORKING) "VIC has no active work packets." else "You have no reviews waiting. Keep your attention on Today."
+                    textSize = 14f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(8), 0, 0)
+                }, fullWidthWrap())
+            }, fullWidthWrap().apply { topMargin = dp(9) })
+        }
+        visibleTasks.forEachIndexed { index, task ->
+            renderTaskCard(task, featured = currentTaskFilter == TaskFilter.TODAY && index == 0)
+        }
+    }
+
+    private fun renderTaskCard(task: VoiceTask, featured: Boolean = false) {
+        val card = taskPanel(if (featured) 17 else 13)
+        val projectTitle = latestProjects.firstOrNull { it.id == task.projectId }?.title
+        val weeklyLabel = WeeklyTaskStore.labelForTask(this, task.id)
+        val marker = when {
+            featured -> "DO THIS NOW • ${task.estimatedMinutes} MIN"
+            task.status == "active" -> "▶ ACTIVE"
+            task.status == "blocked" -> "! BLOCKED"
+            else -> "○ READY"
+        }
+        card.addView(taskKicker(listOfNotNull(marker, projectTitle).joinToString(" • ")), fullWidthWrap())
+        card.addView(taskHeading(task.title, if (featured) 22f else 19f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+        if (weeklyLabel != null) card.addView(TextView(this).apply {
+            text = "↻  $weeklyLabel"
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(CarbonPalette.purple)
+            setPadding(0, dp(7), 0, 0)
+        }, fullWidthWrap())
+        card.addView(TextView(this).apply {
+            val stepProgress = if (task.totalSteps > 0) "${task.completedSteps}/${task.totalSteps} steps" else "VIC is preparing the breakdown"
+            val blockerText = if (task.openBlockers > 0) " • ${task.openBlockers} blocked" else ""
+            text = "${task.observableOutcome}\n$stepProgress$blockerText • VIC ${task.vicStatus.replace('_', ' ')}"
+            textSize = 13f
+            setTextColor(CarbonPalette.muted)
+            setLineSpacing(dp(2).toFloat(), 1.12f)
+            setPadding(0, dp(7), 0, 0)
+        }, fullWidthWrap())
+        val handoffText = when (task.progressLane) {
+            "needs_me" -> "YOUR NEXT ACTION\n${task.nextUserAction.ifBlank { "Review this task with VIC" }}"
+            "vic_working" -> "VIC IS WORKING\n${task.nextVicAction.ifBlank { "Continue safe preparation work" }}"
+            "review" -> "READY FOR REVIEW\n${task.nextUserAction.ifBlank { "Review VIC's latest work" }}"
+            else -> "SHARED WORK\n${task.nextUserAction.ifBlank { "Ask VIC to choose and prepare the first physical step" }}"
+        }
+        card.addView(TextView(this).apply {
+            text = handoffText
+            textSize = 12f
+            setTextColor(if (task.progressLane == "review") CarbonPalette.amber else CarbonPalette.teal)
+            setPadding(dp(11), dp(10), dp(11), dp(10))
+            background = carbonControl(this@MainActivity, CarbonPalette.line)
+        }, fullWidthWrap().apply { topMargin = dp(9) })
+        task.steps.take(5).forEach { step ->
+            card.addView(TextView(this).apply {
+                val mark = if (step.status == "completed") "✓" else if (step.status == "active") "▶" else "○"
+                text = "$mark  ${step.title}  •  ${step.owner.uppercase(Locale.US)}"
+                textSize = 11f
+                setTextColor(if (step.status == "completed") CarbonPalette.green else CarbonPalette.muted)
+                setPadding(0, dp(6), 0, 0)
+            }, fullWidthWrap())
+        }
+        val actions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        if (task.status != "active") {
+            actions.addView(secondaryButton(if (task.estimatedMinutes <= 5) "START 5" else "START") { updateTaskStatus(task, "active") }, weightedButton())
+        }
+        actions.addView(
+            actionButton("DONE + WIN").apply { setOnClickListener { confirmTaskCompletion(task) } },
+            weightedButton().apply { if (task.status != "active") marginStart = dp(7) },
+        )
+        card.addView(actions, fullWidthWrap().apply { topMargin = dp(11) })
+        taskContainer.addView(card, fullWidthWrap().apply { topMargin = dp(9) })
+    }
+
+    private fun renderProjects(tasks: List<VoiceTask>) {
+        val activeProjects = latestProjects.filter { it.status == "active" }
+        if (activeProjects.isEmpty()) {
+            taskContainer.addView(taskPanel(15).apply {
+                addView(taskKicker("Turn outcomes into projects"), fullWidthWrap())
+                addView(taskHeading("Give the work a finish line", 20f).apply { setPadding(0, dp(6), 0, 0) }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "A project holds the outcome. VIC breaks it into owned steps and brings the pieces back together."
+                    textSize = 13f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(8), 0, 0)
+                }, fullWidthWrap())
+                addView(actionButton("CREATE FIRST PROJECT").apply { setOnClickListener { showProjectCreationDialog() } }, fullWidthWrap().apply { topMargin = dp(12) })
+            }, fullWidthWrap().apply { topMargin = dp(9) })
+        }
+        activeProjects.forEach { project ->
+            val projectTasks = tasks.filter { it.projectId == project.id && it.status != "cancelled" }
+            val completed = projectTasks.count { it.status == "completed" }
+            val total = projectTasks.size
+            val percent = if (total == 0) 0 else (completed * 100 / total)
+            taskContainer.addView(taskPanel(15).apply {
+                addView(taskKicker("PROJECT • $percent% COMPLETE"), fullWidthWrap())
+                addView(taskHeading(project.title, 21f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = if (total == 0) "No tasks yet. Let VIC make the first small move." else "$completed of $total tasks complete • ${projectTasks.count { it.status !in setOf("completed", "cancelled") }} open"
+                    textSize = 12f
+                    setTextColor(if (percent == 100 && total > 0) CarbonPalette.green else CarbonPalette.muted)
+                    setPadding(0, dp(7), 0, 0)
+                }, fullWidthWrap())
+                projectTasks.filter { it.status !in setOf("completed", "cancelled") }.take(4).forEach { task ->
+                    addView(TextView(this@MainActivity).apply {
+                        val owner = when (task.progressLane) {
+                            "needs_me" -> "YOU"
+                            "vic_working" -> "VIC"
+                            "review" -> "REVIEW"
+                            else -> "SHARED"
+                        }
+                        text = "○  ${task.title}  •  $owner"
+                        textSize = 12f
+                        setTextColor(CarbonPalette.white)
+                        setPadding(0, dp(7), 0, 0)
+                    }, fullWidthWrap())
+                }
+                addView(secondaryButton("+ TASK IN THIS PROJECT") { showTaskCreationDialog(project) }, fullWidthWrap().apply { topMargin = dp(12) })
+            }, fullWidthWrap().apply { topMargin = dp(9) })
+        }
+        val looseTasks = tasks.filter { it.projectId == null && it.status !in setOf("completed", "cancelled") }
+        if (looseTasks.isNotEmpty()) {
+            taskContainer.addView(taskPanel(13).apply {
+                addView(taskKicker("INBOX • ${looseTasks.size} UNFILED"), fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "These tasks are safe, but assigning them to a project will give VIC better context and a finish line."
+                    textSize = 12f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(7), 0, 0)
+                }, fullWidthWrap())
+            }, fullWidthWrap().apply { topMargin = dp(9) })
+        }
+    }
+
+    private fun renderWins(tasks: List<VoiceTask>) {
+        val completed = tasks.filter { it.status == "completed" }
+        val momentum = completed.sumOf { 2 + it.completedSteps.coerceAtMost(3) }
+        taskContainer.addView(taskPanel(17).apply {
+            addView(taskKicker("MOMENTUM • NEVER RESETS"), fullWidthWrap())
+            addView(taskHeading("$momentum points", 28f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = "Starting, returning, unblocking, and finishing count. A difficult day never erases your progress."
                 textSize = 13f
                 setTextColor(CarbonPalette.muted)
-                setLineSpacing(dp(2).toFloat(), 1.12f)
-                setPadding(0, dp(7), 0, 0)
+                setPadding(0, dp(8), 0, 0)
             }, fullWidthWrap())
-            val handoffText = when (task.progressLane) {
-                "needs_me" -> "YOUR NEXT ACTION\n${task.nextUserAction.ifBlank { "Review this task with VIC" }}"
-                "vic_working" -> "VIC NEXT ACTION\n${task.nextVicAction.ifBlank { "Continue safe preparation work" }}"
-                "review" -> "READY FOR REVIEW\n${task.nextUserAction.ifBlank { "Review VIC's latest work" }}"
-                else -> "SHARED WORK\nAsk VIC to break this into owned steps"
-            }
-            taskPanel.addView(TextView(this).apply {
-                text = handoffText
-                textSize = 12f
-                setTextColor(if (task.progressLane == "review") CarbonPalette.amber else CarbonPalette.teal)
-                setPadding(dp(11), dp(10), dp(11), dp(10))
-                background = carbonControl(this@MainActivity, CarbonPalette.line)
-            }, fullWidthWrap().apply { topMargin = dp(9) })
-            task.steps.take(4).forEach { step ->
-                taskPanel.addView(TextView(this).apply {
-                    val mark = if (step.status == "completed") "✓" else "○"
-                    text = "$mark  ${step.title}  •  ${step.owner.uppercase(Locale.US)}"
-                    textSize = 11f
-                    setTextColor(if (step.status == "completed") CarbonPalette.green else CarbonPalette.muted)
-                    setPadding(0, dp(6), 0, 0)
+        }, fullWidthWrap().apply { topMargin = dp(9) })
+        completed.take(10).forEach { task ->
+            taskContainer.addView(taskPanel(11).apply {
+                addView(taskKicker("✓ WIN • +${2 + task.completedSteps.coerceAtMost(3)}"), fullWidthWrap())
+                addView(taskHeading(task.title, 17f).apply { setPadding(0, dp(4), 0, 0) }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = task.observableOutcome
+                    textSize = 12f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(5), 0, 0)
                 }, fullWidthWrap())
-            }
-            val actions = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
-            }
-            if (task.status != "active") {
-                actions.addView(secondaryButton("START") { updateTaskStatus(task, "active") }, weightedButton())
-            }
-            actions.addView(
-                actionButton("DONE").apply { setOnClickListener { confirmTaskCompletion(task) } },
-                weightedButton().apply { if (task.status != "active") marginStart = dp(7) },
-            )
-            taskPanel.addView(actions, fullWidthWrap().apply { topMargin = dp(11) })
-            taskContainer.addView(taskPanel, fullWidthWrap().apply { topMargin = dp(9) })
+            }, fullWidthWrap().apply { topMargin = dp(7) })
         }
     }
 
@@ -1731,6 +2329,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun updateTaskStatus(task: VoiceTask, status: String) {
         taskStatusView.text = if (status == "completed") "Completing ${task.title}…" else "Starting ${task.title}…"
         taskStatusView.setTextColor(CarbonPalette.amber)
+        if (::feedStatusView.isInitialized) {
+            feedStatusView.text = if (status == "completed") "Saving your win…" else "Starting five minutes…"
+            feedStatusView.setTextColor(CarbonPalette.amber)
+        }
         GatewayClient.updateTaskStatus(
             GatewaySettings.baseUrl(this),
             task.id,
@@ -1740,13 +2342,24 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 result.fold(
-                    onSuccess = {
-                        Toast.makeText(this, if (status == "completed") "Task completed" else "Task started", Toast.LENGTH_SHORT).show()
-                        loadTasks()
+                    onSuccess = { updated ->
+                        TaskWidgetStore.replace(this, updated)
+                        val weekly = if (status == "completed") WeeklyTaskStore.forTask(this, task.id) else null
+                        if (weekly != null) {
+                            createNextWeeklyOccurrence(weekly, completedNow = true)
+                        } else {
+                            Toast.makeText(this, if (status == "completed") "Task completed" else "Task started", Toast.LENGTH_SHORT).show()
+                            VoiceWidgetProvider.refreshTasks(this)
+                            if (currentPage == AppPage.FEED) loadMomentumFeed() else loadTasks()
+                        }
                     },
                     onFailure = { error ->
                         taskStatusView.text = "Task update failed: ${error.message.orEmpty()}"
                         taskStatusView.setTextColor(CarbonPalette.red)
+                        if (::feedStatusView.isInitialized) {
+                            feedStatusView.text = "Task update failed. Your feed is unchanged."
+                            feedStatusView.setTextColor(CarbonPalette.red)
+                        }
                     },
                 )
             }
@@ -1754,15 +2367,22 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun confirmTaskCompletion(task: VoiceTask) {
+        val weekly = WeeklyTaskStore.forTask(this, task.id)
         AlertDialog.Builder(this)
             .setTitle("Complete this task?")
-            .setMessage("${task.title}\n\nThis removes it from the open task list. You can cancel and keep working on it.")
+            .setMessage(
+                if (weekly == null) {
+                    "${task.title}\n\nThis removes it from the open task list. You can cancel and keep working on it."
+                } else {
+                    "${task.title}\n\nThis occurrence will be completed, then OV will create the next ${WeeklyTaskModel.scheduleLabel(weekly.dayOfWeek, weekly.hour, weekly.minute).lowercase(Locale.US)} occurrence."
+                },
+            )
             .setNegativeButton("Keep open", null)
             .setPositiveButton("Mark complete") { _, _ -> updateTaskStatus(task, "completed") }
             .show()
     }
 
-    private fun showTaskCreationDialog() {
+    private fun showTaskCreationDialog(preselectedProject: VoiceProject? = null) {
         val form = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(22), dp(6), dp(22), 0)
@@ -1783,11 +2403,77 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             setText("20")
             setSingleLine(true)
         }
+        val repeatWeeklyInput = CheckBox(this).apply {
+            text = "Repeat every week"
+            setTextColor(CarbonPalette.white)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, dp(10), 0, dp(4))
+        }
+        val weekdayNames = DayOfWeek.entries.map { day ->
+            day.name.lowercase(Locale.US).replaceFirstChar(Char::uppercase)
+        }
+        val weekdayInput = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, weekdayNames)
+            setSelection(DayOfWeek.MONDAY.value - 1)
+        }
+        var selectedHour = 13
+        var selectedMinute = 0
+        lateinit var timeInput: Button
+        timeInput = secondaryButton("DUE 1:00 PM") {
+            TimePickerDialog(this, { _, hour, minute ->
+                selectedHour = hour
+                selectedMinute = minute
+                timeInput.text = "DUE ${WeeklyTaskModel.scheduleLabel(DayOfWeek.MONDAY.value, hour, minute).substringAfter("DUE ")}"
+            }, selectedHour, selectedMinute, false).show()
+        }
+        val weeklyFields = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            addView(TextView(this@MainActivity).apply {
+                text = "WEEKLY DEADLINE"
+                textSize = 10f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(CarbonPalette.purple)
+                setPadding(0, dp(6), 0, dp(3))
+            }, fullWidthWrap())
+            addView(weekdayInput, fullWidthWrap())
+            addView(timeInput, fullWidthWrap().apply { topMargin = dp(5) })
+            addView(TextView(this@MainActivity).apply {
+                text = "OV will keep one open occurrence at a time and create the next after you finish it."
+                textSize = 11f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(6), 0, 0)
+            }, fullWidthWrap())
+        }
+        repeatWeeklyInput.setOnCheckedChangeListener { _, checked ->
+            weeklyFields.visibility = if (checked) View.VISIBLE else View.GONE
+        }
+        val activeProjects = (listOfNotNull(preselectedProject) + latestProjects.filter { it.status == "active" })
+            .distinctBy { it.id }
+        val projectChoices = listOf<VoiceProject?>(null) + activeProjects
+        val projectInput = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                projectChoices.map { it?.title ?: "No project • task inbox" },
+            )
+            setSelection(projectChoices.indexOfFirst { it?.id == preselectedProject?.id }.coerceAtLeast(0))
+        }
         form.addView(titleInput, fullWidthWrap())
         form.addView(outcomeInput, fullWidthWrap())
         form.addView(minutesInput, fullWidthWrap())
+        form.addView(repeatWeeklyInput, fullWidthWrap())
+        form.addView(weeklyFields, fullWidthWrap())
+        form.addView(TextView(this).apply {
+            text = "PROJECT"
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(CarbonPalette.muted)
+            setPadding(0, dp(12), 0, dp(4))
+        }, fullWidthWrap())
+        form.addView(projectInput, fullWidthWrap())
         AlertDialog.Builder(this)
-            .setTitle("Add VIC task")
+            .setTitle("Add a task or weekly commitment")
             .setView(form)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Add") { _, _ ->
@@ -1798,28 +2484,49 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 }
                 val outcome = outcomeInput.text.toString().trim().ifBlank { "$title is complete" }
                 val minutes = minutesInput.text.toString().toIntOrNull()?.coerceIn(1, 1440) ?: 20
-                createTask(title, outcome, minutes)
+                val project = projectChoices.getOrNull(projectInput.selectedItemPosition)
+                val weekly = if (repeatWeeklyInput.isChecked) WeeklyTaskDraft(
+                    dayOfWeek = weekdayInput.selectedItemPosition + 1,
+                    hour = selectedHour,
+                    minute = selectedMinute,
+                ) else null
+                createTask(title, outcome, minutes, project?.id, weekly)
             }
             .show()
     }
 
-    private fun createTask(title: String, outcome: String, minutes: Int) {
+    private fun createTask(
+        title: String,
+        outcome: String,
+        minutes: Int,
+        projectId: String?,
+        weekly: WeeklyTaskDraft? = null,
+    ) {
         if (::taskStatusView.isInitialized) {
             taskStatusView.text = "Adding $title…"
             taskStatusView.setTextColor(CarbonPalette.amber)
         }
+        val dueAt = weekly?.let(WeeklyTaskModel::firstDue)
         GatewayClient.createTask(
             GatewaySettings.baseUrl(this),
             title,
             outcome,
             minutes,
+            projectId,
+            dueAt,
+            if (weekly == null) "normal" else "high",
             DeviceCredentials.token(this),
         ) { result ->
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 result.fold(
                     onSuccess = { task ->
-                        val message = task.vicSummary.ifBlank { "Task added. VIC is analyzing it." }
+                        if (weekly != null && dueAt != null) {
+                            WeeklyTaskStore.create(this, title, outcome, minutes, projectId, weekly, task.id, dueAt)
+                        }
+                        val message = if (weekly != null) {
+                            "Weekly task added • ${WeeklyTaskModel.scheduleLabel(weekly.dayOfWeek, weekly.hour, weekly.minute)}"
+                        } else task.vicSummary.ifBlank { "Task added. VIC is analyzing it." }
                         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
                         showPage(AppPage.TASKS)
                     },
@@ -1829,6 +2536,105 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 )
             }
         }
+    }
+
+    private fun ensureWeeklyTaskInstances(tasks: List<VoiceTask>) {
+        WeeklyTaskStore.needingNextInstance(this, tasks).forEach { template ->
+            createNextWeeklyOccurrence(template, completedNow = false)
+        }
+    }
+
+    private fun createNextWeeklyOccurrence(template: WeeklyTaskTemplate, completedNow: Boolean) {
+        if (!weeklyCreationInFlight.add(template.id)) return
+        val dueAt = WeeklyTaskModel.nextDue(template)
+        GatewayClient.createTask(
+            GatewaySettings.baseUrl(this),
+            template.title,
+            template.observableOutcome,
+            template.estimatedMinutes,
+            template.projectId,
+            dueAt,
+            "high",
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                weeklyCreationInFlight.remove(template.id)
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { next ->
+                        WeeklyTaskStore.updateActive(this, template.id, next.id, dueAt)
+                        TaskWidgetStore.replace(this, next)
+                        val label = WeeklyTaskModel.scheduleLabel(template.dayOfWeek, template.hour, template.minute)
+                        Toast.makeText(
+                            this,
+                            if (completedNow) "Completed • next occurrence created • $label" else "Weekly task restored • $label",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                        VoiceWidgetProvider.refreshTasks(this)
+                        if (currentPage == AppPage.FEED) loadMomentumFeed() else loadTasks()
+                    },
+                    onFailure = { error ->
+                        if (completedNow) {
+                            Toast.makeText(
+                                this,
+                                "This occurrence is complete. OV will retry creating next week’s task when it reconnects.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                            renderTasks(latestTasks.map { if (it.id == template.activeTaskId) it.copy(status = "completed") else it })
+                        } else {
+                            taskStatusView.text = "Weekly task could not renew yet • ${error.message.orEmpty()}"
+                            taskStatusView.setTextColor(CarbonPalette.amber)
+                        }
+                    },
+                )
+            }
+        }
+    }
+
+    private fun showProjectCreationDialog() {
+        val titleInput = EditText(this).apply {
+            hint = "Project outcome, such as Launch the new task system"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setSingleLine(false)
+            maxLines = 2
+            setPadding(dp(22), dp(8), dp(22), dp(8))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Create an outcome-based project")
+            .setMessage("Use a project when the result needs more than one focused work session. VIC will help break it into owned steps.")
+            .setView(titleInput)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Create") { _, _ ->
+                val title = titleInput.text.toString().trim()
+                if (title.isBlank()) {
+                    Toast.makeText(this, "Project outcome is required", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                taskStatusView.text = "Creating $title…"
+                taskStatusView.setTextColor(CarbonPalette.amber)
+                GatewayClient.createProject(
+                    GatewaySettings.baseUrl(this),
+                    title,
+                    DeviceCredentials.token(this),
+                ) { result ->
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        result.fold(
+                            onSuccess = { project ->
+                                currentTaskFilter = TaskFilter.PROJECTS
+                                Toast.makeText(this, "Project created. Add the first small task.", Toast.LENGTH_LONG).show()
+                                loadTasks()
+                                showTaskCreationDialog(project)
+                            },
+                            onFailure = { error ->
+                                taskStatusView.text = "Project could not be created: ${error.message.orEmpty()}"
+                                taskStatusView.setTextColor(CarbonPalette.red)
+                            },
+                        )
+                    }
+                }
+            }
+            .show()
     }
 
     private fun loadSkillProposals() {
@@ -2297,17 +3103,25 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         const val ACTION_WIDGET_TALK = "dev.voiceos.client.action.WIDGET_TALK"
         const val ACTION_WIDGET_ADD_TASK = "dev.voiceos.client.action.WIDGET_ADD_TASK"
         const val ACTION_WIDGET_OPEN_TASK = "dev.voiceos.client.action.WIDGET_OPEN_TASK"
+        const val ACTION_WIDGET_OPEN_FEED = "dev.voiceos.client.action.WIDGET_OPEN_FEED"
+        const val ACTION_PIN_WIDGET = "dev.voiceos.client.action.PIN_WIDGET"
+        const val ACTION_SOCIAL_SHIELD = "dev.voiceos.client.action.SOCIAL_SHIELD"
         const val ACTION_DAILY_CHECKIN = "dev.voiceos.client.action.DAILY_CHECKIN"
+        const val ACTION_SCRIPTURE_REFLECTION = "dev.voiceos.client.action.SCRIPTURE_REFLECTION"
         const val ACTION_VIC_TALK = "dev.voiceos.client.action.VIC_TALK"
         const val ACTION_VIC_SHOW_PROGRESS = "dev.voiceos.client.action.VIC_SHOW_PROGRESS"
         const val ACTION_VIC_TEST_CHECKIN = "dev.voiceos.client.action.VIC_TEST_CHECKIN"
         const val EXTRA_AUTO_LISTEN = "dev.voiceos.client.extra.AUTO_LISTEN"
         const val EXTRA_TASK_ID = "dev.voiceos.client.extra.TASK_ID"
+        const val EXTRA_BLOCKED_PACKAGE = "dev.voiceos.client.extra.BLOCKED_PACKAGE"
+        const val EXTRA_PASSAGE_REFERENCE = "dev.voiceos.client.extra.PASSAGE_REFERENCE"
+        const val EXTRA_SCRIPTURE_THOUGHTS = "dev.voiceos.client.extra.SCRIPTURE_THOUGHTS"
         private const val REQUEST_MICROPHONE = 42
         private const val REQUEST_DOCUMENT = 43
         private const val REQUEST_NOTIFICATIONS = 44
         private const val REQUEST_IMAGE = 45
         private const val REQUEST_CAMERA = 46
+        private const val REQUEST_BRAIN_DUMP = 47
         private const val RESPONSE_UTTERANCE_ID = "voiceos-response"
         private const val CORRECTION_PROMPT_ID = "voiceos-correction-prompt"
         private const val ERROR_UTTERANCE_ID = "voiceos-error"

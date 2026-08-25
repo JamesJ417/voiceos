@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 axum = "0.8"
+chrono.workspace = true
 async-stream = "0.3"
 futures-util = "0.3"
 rusqlite.workspace = true
@@ -17,3 +18,7 @@ urlencoding = "2"
 uuid.workspace = true
 voiceos-core = { path = "../voiceos-core" }
 voiceos-ontology = { path = "../voiceos-ontology" }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

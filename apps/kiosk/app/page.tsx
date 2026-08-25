@@ -6,13 +6,16 @@ import {
   ComponentRegistry,
   DEFAULT_VOICEOS_GATEWAY,
   FocusSnapshot,
+  PersonalCapture,
+  PersonalFocusReset,
+  PersonalProposal,
   VoiceOSClient,
   cleanGateway,
   VOICEOS_ENDPOINTS,
 } from "./lib/voiceos-client";
 
 type VoiceState = "ready" | "listening" | "processing" | "speaking" | "error";
-type ViewName = "command" | "focus" | "projects" | "tasks" | "memory" | "history" | "system";
+type ViewName = "command" | "reset" | "focus" | "projects" | "tasks" | "memory" | "history" | "system";
 
 type Message = {
   id: string;
@@ -99,6 +102,8 @@ const STORAGE = {
 };
 
 const suggestedGateway = DEFAULT_VOICEOS_GATEWAY;
+const voiceTouchOnly = process.env.NEXT_PUBLIC_VOICEOS_INPUT_MODE === "voice-touch";
+const vicDomDeployment = process.env.NEXT_PUBLIC_VOICEOS_DEPLOYMENT === "vic-dom";
 
 const voiceCopy: Record<VoiceState, { eyebrow: string; title: string; action: string }> = {
   ready: { eyebrow: "Voice channel ready", title: "What can I help with?", action: "Talk" },
@@ -131,6 +136,17 @@ export default function Home() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!voiceTouchOnly) return;
+    const blockKeyboardInput = (event: KeyboardEvent) => {
+      if (!document.querySelector('[data-input-mode="voice-touch"]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    document.addEventListener("keydown", blockKeyboardInput, true);
+    return () => document.removeEventListener("keydown", blockKeyboardInput, true);
+  }, []);
+
   const [view, setView] = useState<ViewName>("command");
   const [voiceState, setVoiceState] = useState<VoiceState>("ready");
   const [gateway, setGateway] = useState("");
@@ -160,6 +176,10 @@ export default function Home() {
   const [tasks, setTasks] = useState<TaskDetail[]>([]);
   const [focus, setFocus] = useState<FocusSnapshot | null>(null);
   const [focusBusy, setFocusBusy] = useState(false);
+  const [personalCaptures, setPersonalCaptures] = useState<PersonalCapture[]>([]);
+  const [personalProposals, setPersonalProposals] = useState<PersonalProposal[]>([]);
+  const [personalReset, setPersonalReset] = useState<PersonalFocusReset | null>(null);
+  const [personalBusy, setPersonalBusy] = useState<string | null>(null);
   const [taskFilter, setTaskFilter] = useState<"all" | "needs_me" | "vic_working" | "review">("all");
   const [showSettings, setShowSettings] = useState(false);
   const [overlayExpanded, setOverlayExpanded] = useState(false);
@@ -303,6 +323,97 @@ export default function Home() {
     setFocus(await client.focus(mode));
   }, [client]);
 
+  const loadPersonal = useCallback(async (mode = "normal") => {
+    const [captures, proposals, reset] = await Promise.all([
+      client.personalInbox(),
+      client.personalProposals(),
+      client.personalFocusReset(mode),
+    ]);
+    setPersonalCaptures(captures);
+    setPersonalProposals(proposals);
+    setPersonalReset(reset);
+  }, [client]);
+
+  const capturePersonal = useCallback(async (text: string) => {
+    setPersonalBusy("capture");
+    try {
+      await client.capturePersonal(text, `touch-${makeId()}`);
+      await loadPersonal();
+      setStatusMessage("Captured without changing your current focus.");
+    } catch (error) {
+      setStatusMessage(errorText(error));
+      throw error;
+    } finally {
+      setPersonalBusy(null);
+    }
+  }, [client, loadPersonal]);
+
+  const extractPersonal = useCallback(async (captureId: string) => {
+    setPersonalBusy(captureId);
+    try {
+      const proposals = await client.extractPersonal(captureId);
+      await loadPersonal();
+      setStatusMessage(proposals.length ? "VIC prepared review suggestions. Nothing was committed." : "VIC found no useful commitment in that capture.");
+    } catch (error) {
+      setStatusMessage(errorText(error));
+    } finally {
+      setPersonalBusy(null);
+    }
+  }, [client, loadPersonal]);
+
+  const discardPersonal = useCallback(async (captureId: string) => {
+    setPersonalBusy(captureId);
+    try {
+      await client.discardPersonalCapture(captureId, `touch-discard-${makeId()}`);
+      await loadPersonal();
+      setStatusMessage("Capture cleared. No task or memory was created.");
+    } catch (error) {
+      setStatusMessage(errorText(error));
+    } finally {
+      setPersonalBusy(null);
+    }
+  }, [client, loadPersonal]);
+
+  const approvePersonal = useCallback(async (proposal: PersonalProposal) => {
+    setPersonalBusy(proposal.id);
+    try {
+      await client.approvePersonalProposal(proposal, `touch-approve-${makeId()}`);
+      await Promise.all([loadPersonal(), loadTasks(), loadFocus()]);
+      setStatusMessage(proposal.category === "task" ? "Approved and added to your ready task list." : "Approved into your private review record.");
+    } catch (error) {
+      setStatusMessage(errorText(error));
+    } finally {
+      setPersonalBusy(null);
+    }
+  }, [client, loadFocus, loadPersonal, loadTasks]);
+
+  const discardProposal = useCallback(async (proposalId: string) => {
+    setPersonalBusy(proposalId);
+    try {
+      await client.discardPersonalProposal(proposalId, `touch-proposal-discard-${makeId()}`);
+      await loadPersonal();
+      setStatusMessage("Suggestion discarded. Nothing was committed.");
+    } catch (error) {
+      setStatusMessage(errorText(error));
+    } finally {
+      setPersonalBusy(null);
+    }
+  }, [client, loadPersonal]);
+
+  const recordDailyReset = useCallback(async () => {
+    setPersonalBusy("reset");
+    try {
+      const now = new Date();
+      const resetDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+      await client.recordDailyReset(resetDate, `touch-reset-${resetDate}-${makeId()}`);
+      setStatusMessage("Today’s reset point is saved.");
+    } catch (error) {
+      setStatusMessage(errorText(error));
+    } finally {
+      setPersonalBusy(null);
+    }
+  }, [client]);
+
   const startFocus = useCallback(async (minutes: 5 | 20, taskId?: string) => {
     setFocusBusy(true);
     try {
@@ -396,6 +507,7 @@ export default function Home() {
         loadProjects().catch(() => undefined),
         loadTasks().catch(() => undefined),
         loadFocus().catch(() => undefined),
+        loadPersonal().catch(() => undefined),
         loadFloor().catch(() => undefined),
       ]);
       setConnected(true);
@@ -406,7 +518,7 @@ export default function Home() {
       setStatusMessage(errorText(error));
       setVoiceState("error");
     }
-  }, [client, gateway, loadFloor, loadFocus, loadHistory, loadProjects, loadSkillProposals, loadSkills, loadTasks, request]);
+  }, [client, gateway, loadFloor, loadFocus, loadHistory, loadPersonal, loadProjects, loadSkillProposals, loadSkills, loadTasks, request]);
 
   useEffect(() => {
     const restore = window.setTimeout(() => {
@@ -509,6 +621,10 @@ export default function Home() {
               setStatusMessage("VIC saved the latest focus state.");
               void loadFocus();
             }
+            if (event.type === "personal.updated") {
+              setStatusMessage("VIC updated your capture and reset workspace.");
+              void loadPersonal();
+            }
             if (event.type === "project.changed") {
               setStatusMessage("VIC project list updated.");
               void Promise.all([loadProjects(), loadTasks()]);
@@ -573,7 +689,7 @@ export default function Home() {
       controller.abort();
       if (reconnectTimer) clearTimeout(reconnectTimer);
     };
-  }, [client, gateway, loadFocus, loadHistory, loadProjects, loadTasks]);
+  }, [client, gateway, loadFocus, loadHistory, loadPersonal, loadProjects, loadTasks]);
 
   useEffect(() => () => {
     recorder.current?.stop();
@@ -582,11 +698,17 @@ export default function Home() {
     speechSynthesis.cancel();
   }, []);
 
-  async function sendText(text: string) {
+  async function sendText(text: string, source: "voice" | "typed" = "typed") {
     const normalized = text.trim();
     if (!normalized || voiceState === "processing") return;
     const approvalDecision = pendingApproval ? approvalDecisionFromText(normalized) : null;
     if (approvalDecision) {
+      if (voiceTouchOnly && source === "voice") {
+        setLiveTranscript(normalized);
+        setVoiceState("ready");
+        setStatusMessage("Use the Approve or Deny button on Touch. Voice cannot authorize an action.");
+        return;
+      }
       setDraft("");
       setMessages((current) => [...current, { id: makeId(), role: "You", body: normalized, meta: "Now" }]);
       await decideApproval(approvalDecision === "approve");
@@ -732,7 +854,7 @@ export default function Home() {
             setVoiceState("ready");
             setStatusMessage("Conversation moved to this touch panel.");
           } else {
-            void sendText(transcript);
+            void sendText(transcript, "voice");
           }
         }).catch((error) => {
           setStatusMessage(errorText(error));
@@ -909,12 +1031,17 @@ export default function Home() {
   const vicOverlayExpanded = overlayExpanded;
 
   return (
-    <main className="shell">
+    <main
+      className="shell"
+      data-input-mode={voiceTouchOnly ? "voice-touch" : "voice-touch-keyboard"}
+      data-deployment={vicDomDeployment ? "vic-dom" : "vic"}
+    >
       <aside className="rail" aria-label="Touch navigation">
-        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>Touch</span></div>
+        <div className="brand"><span className="brand-mark" aria-hidden="true"><i /></span><span>{vicDomDeployment ? "DOM Touch" : "Touch"}</span></div>
         <nav className="nav-list">
           <NavButton active={view === "command"} label="Command" icon="⌂" onClick={() => setView("command")} />
-          <NavButton active={view === "focus"} label="Focus" icon="◎" onClick={() => { setView("focus"); void loadFocus(); }} />
+          {!vicDomDeployment && <NavButton active={view === "reset"} label="Reset" icon="◇" onClick={() => { setView("reset"); void loadPersonal(); }} />}
+          {!vicDomDeployment && <NavButton active={view === "focus"} label="Focus" icon="◎" onClick={() => { setView("focus"); void loadFocus(); }} />}
           <NavButton active={view === "projects"} label="Projects" icon="▦" onClick={() => { setView("projects"); void Promise.all([loadProjects(), loadTasks()]); }} />
           <NavButton active={view === "tasks"} label="Tasks" icon="✓" onClick={() => { setView("tasks"); void loadTasks(); }} />
           <NavButton active={view === "memory"} label="Memory" icon="◈" onClick={() => { setView("memory"); void Promise.all([loadMemories(), loadMemoryReview()]); }} />
@@ -926,10 +1053,10 @@ export default function Home() {
 
       <section className="workspace">
         <header className="topbar">
-          <div><p className="kicker">Touch · VIC voice</p><h1>{view === "command" ? "Talk with VIC" : view === "focus" ? "Focus with VIC" : view === "projects" ? "Projects with VIC" : view === "tasks" ? "Shared task operations" : view === "memory" ? "What VIC remembers" : view === "history" ? "Conversation history" : "System status"}</h1></div>
+          <div><p className="kicker">{vicDomDeployment ? "VIC · DOM voice controller" : "Touch · VIC voice"}</p><h1>{view === "command" ? (vicDomDeployment ? "Talk with DOM through VIC" : "Talk with VIC") : view === "reset" ? "Clear your head with VIC" : view === "focus" ? "Focus with VIC" : view === "projects" ? "Projects with VIC" : view === "tasks" ? "Shared task operations" : view === "memory" ? (vicDomDeployment ? "Restaurant knowledge" : "What VIC remembers") : view === "history" ? "Conversation history" : "System status"}</h1></div>
           <div className="top-actions">
             <span className={`online-pill ${connected ? "" : "offline-pill"}`}><span className={`status-dot ${connected ? "" : "offline"}`} /> {connected ? "Online" : "Offline"}</span>
-            <button className="icon-button" aria-label="Open connection settings" onClick={() => setShowSettings(true)}>⚙</button>
+            {!voiceTouchOnly && <button className="icon-button" aria-label="Open connection settings" onClick={() => setShowSettings(true)}>⚙</button>}
           </div>
         </header>
 
@@ -938,18 +1065,18 @@ export default function Home() {
         {view === "command" && (
           <div className="dashboard-grid">
             <section className={`voice-panel panel state-${voiceState}`}>
-              <div className="voice-copy"><p className="kicker">{copy.eyebrow}</p><h2>{copy.title}</h2><p>{liveTranscript || "Talk naturally. Touch joins the same continuing VIC conversation as your phone."}</p></div>
+              <div className="voice-copy"><p className="kicker">{copy.eyebrow}</p><h2>{copy.title}</h2><p>{liveTranscript || (vicDomDeployment ? "Talk naturally about Brick and Copper operations. VIC will use only the DOM data sources and permissions that have been connected." : "Talk naturally. Touch joins the same continuing VIC conversation as your phone.")}</p></div>
               <div className="voice-stage">
                 <div className="signal-ring ring-one" /><div className="signal-ring ring-two" />
                 <button className="talk-hex" onClick={handleTalk} aria-label={`${copy.action}. ${copy.title}`}><span className="mic" aria-hidden="true"><i /></span><strong>{copy.action}</strong><small>{voiceState === "ready" ? "Touch to begin" : copy.eyebrow}</small></button>
               </div>
               <div className="state-track" aria-label={`Current state: ${voiceState}`}>{(["ready", "listening", "processing", "speaking"] as VoiceState[]).map((state) => <span key={state} className={state === voiceState ? "active" : ""}>{state}</span>)}</div>
               {floorIsRemote && <button className="continue-here" onClick={startListening}>Continue here from {floor?.holder_display_name ?? "the other device"}</button>}
-              <form className="text-composer" onSubmit={(event) => { event.preventDefault(); void sendText(draft); }}>
+              {voiceTouchOnly ? <div className="voice-touch-only"><div><strong>Voice + touch only</strong><span>No keyboard entry is accepted in VIC-DOM.</span></div><button type="button" onClick={() => imageInput.current?.click()}>＋ Image</button>{pendingImage && <span>{pendingImage.filename} ready</span>}</div> : <form className="text-composer" onSubmit={(event) => { event.preventDefault(); void sendText(draft, "typed"); }}>
                 <label htmlFor="voiceos-text">Type a request</label>
                 <div><input id="voiceos-text" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask VIC…" /><button disabled={!draft.trim() || voiceState === "processing"}>Send</button></div>
                 <div><button type="button" onClick={() => imageInput.current?.click()}>＋ Image</button>{pendingImage && <span>{pendingImage.filename} ready</span>}</div>
-              </form>
+              </form>}
               <input ref={imageInput} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void uploadImage(event)} />
             </section>
 
@@ -979,11 +1106,13 @@ export default function Home() {
 
         {view === "history" && <section className="wide-panel panel"><div className="panel-heading"><div><p className="kicker">Persistent timeline</p><h2>Shared conversation with VIC</h2></div><button className="secondary-button" onClick={() => void loadHistory()}>Refresh</button></div><div className="history-list">{messages.length ? messages.map((message) => <MessageCard key={message.id} message={message} latestVic={message.id === latestVicMessageId} />) : <EmptyState text="No conversation history is available yet." />}</div></section>}
 
-        {view === "memory" && <MemoryPanel memories={memories} sleepCycles={sleepCycles} reviewBusy={memoryReviewBusy} onScan={scanMemoryProposals} onApprove={approveMemoryProposal} onSearch={loadMemories} onAdd={addMemory} onCorrect={correctMemory} onForget={forgetMemory} />}
+        {view === "memory" && <MemoryPanel memories={memories} sleepCycles={sleepCycles} reviewBusy={memoryReviewBusy} voiceOnly={voiceTouchOnly} restaurantMode={vicDomDeployment} onScan={scanMemoryProposals} onApprove={approveMemoryProposal} onSearch={loadMemories} onAdd={addMemory} onCorrect={correctMemory} onForget={forgetMemory} />}
 
-        {view === "focus" && <FocusPanel focus={focus} busy={focusBusy} onRefresh={() => void loadFocus()} onLowEnergy={() => void loadFocus("low_energy")} onStart={(minutes, taskId) => void startFocus(minutes, taskId)} onSwitch={(taskId) => void switchFocus(taskId)} onCapture={captureFocus} onPromote={(taskId) => void promoteCapture(taskId)} onAction={(sessionId, action, nextAction) => void actFocus(sessionId, action, nextAction)} />}
+        {!vicDomDeployment && view === "reset" && <PersonalSupportPanel captures={personalCaptures} proposals={personalProposals} reset={personalReset} busy={personalBusy} voiceOnly={voiceTouchOnly} onRefresh={() => void loadPersonal()} onCapture={capturePersonal} onExtract={(captureId) => void extractPersonal(captureId)} onDiscardCapture={(captureId) => void discardPersonal(captureId)} onApprove={(proposal) => void approvePersonal(proposal)} onDiscardProposal={(proposalId) => void discardProposal(proposalId)} onRecordReset={() => void recordDailyReset()} onOpenFocus={() => setView("focus")} />}
 
-        {view === "projects" && <ProjectsPanel projects={projects} tasks={tasks} onRefresh={() => void Promise.all([loadProjects(), loadTasks()])} onCreate={async (title) => {
+        {!vicDomDeployment && view === "focus" && <FocusPanel focus={focus} busy={focusBusy} voiceOnly={voiceTouchOnly} onRefresh={() => void loadFocus()} onLowEnergy={() => void loadFocus("low_energy")} onStart={(minutes, taskId) => void startFocus(minutes, taskId)} onSwitch={(taskId) => void switchFocus(taskId)} onCapture={captureFocus} onPromote={(taskId) => void promoteCapture(taskId)} onAction={(sessionId, action, nextAction) => void actFocus(sessionId, action, nextAction)} />}
+
+        {view === "projects" && <ProjectsPanel projects={projects} tasks={tasks} voiceOnly={voiceTouchOnly} onRefresh={() => void Promise.all([loadProjects(), loadTasks()])} onCreate={async (title) => {
           await request("/v1/projects", { method: "POST", body: JSON.stringify({ title }) });
           await loadProjects();
           setStatusMessage(`${title} is now connected to VIC.`);
@@ -994,7 +1123,7 @@ export default function Home() {
           setStatusMessage(project ? `Task moved into ${project.title}.` : "Task moved back to Loose work.");
         }} />}
 
-        {view === "tasks" && <TaskBoard projects={projects} tasks={tasks} activity={agentActivity} filter={taskFilter} onFilter={setTaskFilter} onRefresh={() => void Promise.all([loadProjects(), loadTasks()])} onAttention={async (taskId, input) => {
+        {view === "tasks" && <TaskBoard projects={projects} tasks={tasks} activity={agentActivity} filter={taskFilter} voiceOnly={voiceTouchOnly} onFilter={setTaskFilter} onRefresh={() => void Promise.all([loadProjects(), loadTasks()])} onAttention={async (taskId, input) => {
           await request(`/v1/tasks/${encodeURIComponent(taskId)}/attention`, { method: "POST", body: JSON.stringify(input) });
           await Promise.all([loadTasks(), loadFocus()]);
           setStatusMessage("VIC updated when this work should rise to the top.");
@@ -1006,10 +1135,10 @@ export default function Home() {
           setStatusMessage(`VIC started working on ${input.title}. Progress will appear on the task.`);
         }} />}
 
-        {view === "system" && <div className="system-layout"><ComponentRegistryPanel registry={componentRegistry} /><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The screen stores only its Touch device credential and preferences. VIC conversation memory, provider routing, approvals, documents, and audit history remain inside the local VoiceOS services.</p><button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button></section></div>}
+        {view === "system" && <div className="system-layout"><ComponentRegistryPanel registry={componentRegistry} /><SkillProposalPanel proposals={skillProposals} onDecision={(proposal, approve) => void decideSkillProposal(proposal, approve)} onRefresh={() => { void loadSkillProposals(); void loadSkills(); }} /><SkillCatalogPanel skills={skills} usages={skillUsages} onDisable={(skill) => void setSkillEnabled(skill, false)} onFeedback={(usage, correct) => void reviewSkillUsage(usage, correct)} /><ProviderPanel providers={providers} active={health.language_model} wide /><HealthPanel gatewayHealth={health} hostHealth={hostHealth} connected={connected} wide /><section className="panel system-note"><p className="kicker">Privacy boundary</p><h2>Private by default</h2><p>The screen stores only its Touch device credential and preferences. VIC conversation memory, provider routing, approvals, documents, and audit history remain inside the local VoiceOS services.</p>{voiceTouchOnly ? <p className="voice-admin-note">Connection and enrollment settings are maintained outside the restaurant kiosk.</p> : <button className="secondary-button" onClick={() => setShowSettings(true)}>Connection settings</button>}</section></div>}
       </section>
 
-      {showSettings && <SettingsDialog gateway={gateway} enrollmentCode={enrollmentCode} setEnrollmentCode={setEnrollmentCode} onSaveGateway={saveGateway} onEnroll={enroll} onClose={() => setShowSettings(false)} hasToken={Boolean(token)} onForget={() => { localStorage.removeItem(STORAGE.token); localStorage.removeItem(STORAGE.deviceId); setToken(""); setConnected(false); setStatusMessage("Browser enrollment removed."); }} />}
+      {!voiceTouchOnly && showSettings && <SettingsDialog gateway={gateway} enrollmentCode={enrollmentCode} setEnrollmentCode={setEnrollmentCode} onSaveGateway={saveGateway} onEnroll={enroll} onClose={() => setShowSettings(false)} hasToken={Boolean(token)} onForget={() => { localStorage.removeItem(STORAGE.token); localStorage.removeItem(STORAGE.deviceId); setToken(""); setConnected(false); setStatusMessage("Browser enrollment removed."); }} />}
 
       <aside className={`vic-overlay state-${voiceState} ${vicOverlayExpanded ? "expanded" : "collapsed"}`} aria-label="VIC desktop presence">
         <button className="vic-orb" onClick={() => setOverlayExpanded((current) => !current)} aria-expanded={vicOverlayExpanded} aria-label={vicOverlayExpanded ? "Collapse VIC desktop presence" : "Open VIC desktop presence"}>
@@ -1032,7 +1161,51 @@ function SettingsDialog({ gateway, enrollmentCode, setEnrollmentCode, onSaveGate
   return <div className="dialog-backdrop" role="presentation"><section className="settings-dialog panel" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div className="panel-heading"><div><p className="kicker">Private connection</p><h2 id="settings-title">Connect this screen</h2></div><button className="icon-button" aria-label="Close settings" onClick={onClose}>×</button></div><label>VoiceOS gateway URL<input type="url" value={gatewayDraft} onChange={(event) => setGatewayDraft(event.target.value)} placeholder={suggestedGateway} /></label><button className="primary-button" onClick={() => onSaveGateway(gatewayDraft)}>Save and test connection</button><div className="dialog-divider" /><form onSubmit={onEnroll}><label>One-time enrollment code<input inputMode="numeric" autoComplete="one-time-code" value={enrollmentCode} onChange={(event) => setEnrollmentCode(event.target.value)} placeholder="Enter the code from VoiceOS" /></label><button className="primary-button" disabled={!gatewayDraft.trim() || !enrollmentCode.trim()}>{hasToken ? "Replace screen credential" : "Enroll screen"}</button></form>{hasToken && <button className="danger-button" onClick={onForget}>Forget this screen</button>}<p className="dialog-help">The gateway must use HTTPS when this page is opened from a secure URL. Add this site’s exact origin to the gateway’s allowed web origins.</p></section></div>;
 }
 
-function FocusPanel({ focus, busy, onRefresh, onLowEnergy, onStart, onSwitch, onCapture, onPromote, onAction }: { focus: FocusSnapshot | null; busy: boolean; onRefresh: () => void; onLowEnergy: () => void; onStart: (minutes: 5 | 20, taskId?: string) => void; onSwitch: (taskId: string) => void; onCapture: (input: { title: string; due_at?: string; importance?: "low" | "normal" | "high" | "critical" }) => Promise<void>; onPromote: (taskId: string) => void; onAction: (sessionId: string, action: "interrupt" | "resume" | "complete", nextAction?: string) => void }) {
+function PersonalSupportPanel({ captures, proposals, reset, busy, voiceOnly, onRefresh, onCapture, onExtract, onDiscardCapture, onApprove, onDiscardProposal, onRecordReset, onOpenFocus }: { captures: PersonalCapture[]; proposals: PersonalProposal[]; reset: PersonalFocusReset | null; busy: string | null; voiceOnly: boolean; onRefresh: () => void; onCapture: (text: string) => Promise<void>; onExtract: (captureId: string) => void; onDiscardCapture: (captureId: string) => void; onApprove: (proposal: PersonalProposal) => void; onDiscardProposal: (proposalId: string) => void; onRecordReset: () => void; onOpenFocus: () => void }) {
+  const [captureText, setCaptureText] = useState("");
+  const [captureError, setCaptureError] = useState("");
+  const submitCapture = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!captureText.trim() || busy) return;
+    setCaptureError("");
+    try {
+      await onCapture(captureText.trim());
+      setCaptureText("");
+    } catch (error) {
+      setCaptureError(errorText(error));
+    }
+  };
+  return <section className="personal-screen panel" aria-labelledby="personal-title">
+    <div className="panel-heading personal-heading"><div><p className="kicker">External working memory</p><h2 id="personal-title">Capture, review, then choose</h2></div><button className="secondary-button" disabled={Boolean(busy)} onClick={onRefresh}>Refresh</button></div>
+    <p className="personal-intro">Put everything down without promising to do it. VIC can suggest what it might mean, but only you can approve a commitment.</p>
+
+    <section className="reset-card" aria-label="Today’s focus reset">
+      <div><p className="kicker">Right now</p><h3>{reset?.message ?? "VIC is finding one small place to begin."}</h3><p>{reset?.first_physical_action ?? "Capture the next thing pulling at your attention."}</p>{reset?.five_minute_version && <small>{reset.five_minute_version}</small>}</div>
+      <div className="reset-actions"><button className="personal-primary" onClick={onOpenFocus}>Open one-task focus</button><button disabled={busy === "reset"} onClick={onRecordReset}>{busy === "reset" ? "Saving…" : "Save today’s reset"}</button></div>
+    </section>
+
+    {voiceOnly ? <VoiceOnlyNotice text="Use the microphone to capture a thought. Review and approve suggestions with Touch." /> : <form className="brain-dump" onSubmit={(event) => void submitCapture(event)}>
+      <label htmlFor="personal-capture"><span>What is taking up space in your head?</span><small>One thought or a full brain dump—neither becomes a task yet.</small></label>
+      <textarea id="personal-capture" value={captureText} onChange={(event) => setCaptureText(event.target.value)} placeholder="Say it all here…" maxLength={100000} rows={4} />
+      <button className="personal-primary" disabled={!captureText.trim() || busy === "capture"}>{busy === "capture" ? "Parking it…" : "Park this thought"}</button>
+      {captureError && <p className="project-error" role="alert">{captureError}</p>}
+    </form>}
+
+    <div className="personal-columns">
+      <section className="capture-inbox" aria-labelledby="capture-inbox-title">
+        <div className="personal-section-title"><div><p className="kicker">No commitment yet</p><h3 id="capture-inbox-title">Capture inbox</h3></div><span>{captures.length}</span></div>
+        <div className="personal-card-list">{captures.length ? captures.map((capture) => <article className="capture-card" key={capture.id}><header><span>{capture.source}</span><small>{formatTime(capture.created_at)}</small></header><p>{capture.display_text}</p><footer>{capture.status === "received" ? <button className="personal-primary" disabled={busy === capture.id} onClick={() => onExtract(capture.id)}>{busy === capture.id ? "VIC is reviewing…" : "Find possible next steps"}</button> : <span className="review-ready">Suggestions ready</span>}<button className="quiet-danger" disabled={busy === capture.id} onClick={() => onDiscardCapture(capture.id)}>Clear</button></footer></article>) : <EmptyState text="Your head is clear here. New captures will wait without becoming obligations." />}</div>
+      </section>
+
+      <section className="proposal-inbox" aria-labelledby="proposal-inbox-title">
+        <div className="personal-section-title"><div><p className="kicker">Your decision</p><h3 id="proposal-inbox-title">Review suggestions</h3></div><span>{proposals.length}</span></div>
+        <div className="personal-card-list">{proposals.length ? proposals.map((proposal) => <article className="proposal-card" key={proposal.id}><header><span>{proposal.category}</span><small>{Math.round(proposal.confidence * 100)}% confidence</small></header><h4>{proposal.title}</h4>{proposal.details && <p>{proposal.details}</p>}<div className="next-action"><span>Smallest next action</span><strong>{proposal.suggested_next_action}</strong></div><footer><button className="personal-primary" disabled={busy === proposal.id} onClick={() => onApprove(proposal)}>{busy === proposal.id ? "Saving…" : proposal.category === "task" ? "Approve as ready task" : "Keep in private review"}</button><button className="quiet-danger" disabled={busy === proposal.id} onClick={() => onDiscardProposal(proposal.id)}>Not for me</button></footer></article>) : <EmptyState text="Ask VIC to review a capture, then choose what deserves a place in your system." />}</div>
+      </section>
+    </div>
+  </section>;
+}
+
+function FocusPanel({ focus, busy, voiceOnly, onRefresh, onLowEnergy, onStart, onSwitch, onCapture, onPromote, onAction }: { focus: FocusSnapshot | null; busy: boolean; voiceOnly: boolean; onRefresh: () => void; onLowEnergy: () => void; onStart: (minutes: 5 | 20, taskId?: string) => void; onSwitch: (taskId: string) => void; onCapture: (input: { title: string; due_at?: string; importance?: "low" | "normal" | "high" | "critical" }) => Promise<void>; onPromote: (taskId: string) => void; onAction: (sessionId: string, action: "interrupt" | "resume" | "complete", nextAction?: string) => void }) {
   const active = focus?.active_session;
   const interrupted = !active ? focus?.last_interrupted_session : null;
   const recommendation = focus?.recommendation;
@@ -1081,11 +1254,11 @@ function FocusPanel({ focus, busy, onRefresh, onLowEnergy, onStart, onSwitch, on
         <p className="kicker">When the day feels heavy</p><h3>Make the next step smaller</h3><p>Show the shortest available action. Starting for five minutes is enough.</p><button disabled={busy} onClick={onLowEnergy}>I’m overwhelmed or low energy</button>
       </aside>
     </div>
-    <section className="attention-capture" aria-labelledby="capture-title">
+    {voiceOnly ? <VoiceOnlyNotice text="Say the idea to VIC, then use Touch to choose whether it should become active work." /> : <section className="attention-capture" aria-labelledby="capture-title">
       <div><p className="kicker">Capture without switching</p><h3 id="capture-title">New direction? Park it, don’t pivot.</h3><p>VIC keeps the thought, deadline, and importance outside the active focus queue until you deliberately promote it.</p></div>
       <form onSubmit={(event) => void submitCapture(event)}><label><span>Idea or task</span><input value={captureTitle} onChange={(event) => setCaptureTitle(event.target.value)} placeholder="Something I suddenly want to do…" maxLength={240} /></label><label><span>Deadline, if real</span><input type="datetime-local" value={captureDue} onChange={(event) => setCaptureDue(event.target.value)} /></label><label><span>Importance</span><select value={captureImportance} onChange={(event) => setCaptureImportance(event.target.value as typeof captureImportance)}><option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="critical">Critical</option></select></label><button disabled={busy || !captureTitle.trim()}>Park without switching</button></form>
       {captureError && <p className="project-error" role="alert">{captureError}</p>}
-    </section>
+    </section>}
     <section className="focus-priorities" aria-label="Up to three focus priorities">
       <div className="focus-priority-heading"><div><p className="kicker">Protected attention</p><h3>Up to three priorities</h3></div><span>{focus?.priorities.length ?? 0} shown</span></div>
       <div className="focus-priority-grid">{focus?.priorities.length ? focus.priorities.map((priority, index) => <article className={priority.task_id === recommendation?.task_id ? "recommended" : ""} key={priority.task_id}><header><span>{index + 1}</span><small>{focusPriorityLabel(priority)}</small></header><h4>{priority.title}</h4><p>{priority.next_action}</p><footer><span>{priority.project_title ?? "Loose work"}</span>{active && active.task_id !== priority.task_id ? <button disabled={busy} onClick={() => onSwitch(priority.task_id)}>Switch here safely</button> : !active ? <button disabled={busy} onClick={() => onStart(5, priority.task_id)}>Focus 5 min</button> : null}</footer></article>) : <EmptyState text="Add a ready task with a clear next action and VIC will put it here." />}</div>
@@ -1094,19 +1267,19 @@ function FocusPanel({ focus, busy, onRefresh, onLowEnergy, onStart, onSwitch, on
   </section>;
 }
 
-function MemoryPanel({ memories, sleepCycles, reviewBusy, onScan, onApprove, onSearch, onAdd, onCorrect, onForget }: { memories: VicMemory[]; sleepCycles: SleepCycleReport[]; reviewBusy: boolean; onScan: () => Promise<void>; onApprove: (cycleId: string, changeId: string) => Promise<void>; onSearch: (query?: string) => Promise<void>; onAdd: (content: string, category: string) => Promise<void>; onCorrect: (memory: VicMemory) => Promise<void>; onForget: (memory: VicMemory) => Promise<void> }) {
+function MemoryPanel({ memories, sleepCycles, reviewBusy, voiceOnly, restaurantMode, onScan, onApprove, onSearch, onAdd, onCorrect, onForget }: { memories: VicMemory[]; sleepCycles: SleepCycleReport[]; reviewBusy: boolean; voiceOnly: boolean; restaurantMode: boolean; onScan: () => Promise<void>; onApprove: (cycleId: string, changeId: string) => Promise<void>; onSearch: (query?: string) => Promise<void>; onAdd: (content: string, category: string) => Promise<void>; onCorrect: (memory: VicMemory) => Promise<void>; onForget: (memory: VicMemory) => Promise<void> }) {
   const [query, setQuery] = useState("");
   const [content, setContent] = useState("");
   const [category, setCategory] = useState("general");
   const proposals = sleepCycles.flatMap((report) => report.cycle.mode === "dry_run" ? report.changes.filter((change) => change.status === "proposed").map((change) => ({ cycleId: report.cycle.id, change })) : []);
   return <section className="wide-panel panel memory-screen">
-    <div className="panel-heading"><div><p className="kicker">Durable personal context</p><h2>VIC memory</h2></div><span className="memory-pill">{memories.length} active</span></div>
+    <div className="panel-heading"><div><p className="kicker">{restaurantMode ? "Reviewed restaurant context" : "Durable personal context"}</p><h2>{restaurantMode ? "DOM knowledge" : "VIC memory"}</h2></div><span className="memory-pill">{memories.length} active</span></div>
     <section className="memory-review"><div className="panel-heading"><div><p className="kicker">Sleep-cycle review</p><h3>Proposed memories</h3></div><button className="secondary-button" disabled={reviewBusy} onClick={() => void onScan()}>{reviewBusy ? "Working…" : "Scan now"}</button></div><p className="memory-review-note">VIC will not save these automatically. Approve only the facts you want carried into future conversations.</p><div className="memory-proposal-list">{proposals.length ? proposals.slice(0, 20).map(({ cycleId, change }) => <article className="memory-proposal-card" key={change.id}><div><span>Proposed</span><small>{Math.round((change.confidence ?? 0) * 100)}% confidence · {formatTime(change.created_at)}</small></div><p>{change.detail}</p><button className="approve" disabled={reviewBusy} onClick={() => void onApprove(cycleId, change.id)}>Remember this</button></article>) : <EmptyState text="No memory proposals are waiting for review." />}</div></section>
-    <div className="memory-controls">
+    {voiceOnly ? <VoiceOnlyNotice text={restaurantMode ? "Ask VIC to remember or find restaurant information. Use Touch to approve, correct, or forget reviewed knowledge." : "Ask VIC to remember or find information, then use Touch to review it."} /> : <div className="memory-controls">
       <form onSubmit={(event) => { event.preventDefault(); void onSearch(query); }}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search what VIC knows…" /><button>Search</button></form>
       <form onSubmit={(event) => { event.preventDefault(); if (!content.trim()) return; void onAdd(content.trim(), category).then(() => setContent("")); }}><input value={content} onChange={(event) => setContent(event.target.value)} placeholder="Add a fact VIC should remember…" maxLength={500} /><select value={category} onChange={(event) => setCategory(event.target.value)}><option value="general">General</option><option value="identity">Identity</option><option value="preference">Preference</option><option value="person">Person</option><option value="project">Project</option><option value="routine">Routine</option><option value="sensitive">Sensitive</option></select><button>Remember</button></form>
-    </div>
-    <div className="memory-list">{memories.length ? memories.map((memory) => <article className="memory-card" key={memory.id}><div><span>{memory.category}</span><small>{Math.round(memory.confidence * 100)}% confidence · {memory.source.replaceAll("-", " ")}</small></div><p>{memory.content}</p><footer><small>{memory.provenance || "Local conversation"} · {formatTime(memory.updated_at)}</small><button onClick={() => void onCorrect(memory)}>Correct</button><button className="deny" onClick={() => void onForget(memory)}>Forget</button></footer></article>) : <EmptyState text="VIC has no matching durable memories yet. Say “remember that…” or add one above." />}</div>
+    </div>}
+    <div className="memory-list">{memories.length ? memories.map((memory) => <article className="memory-card" key={memory.id}><div><span>{memory.category}</span><small>{Math.round(memory.confidence * 100)}% confidence · {memory.source.replaceAll("-", " ")}</small></div><p>{memory.content}</p><footer><small>{memory.provenance || "Local conversation"} · {formatTime(memory.updated_at)}</small>{!voiceOnly && <button onClick={() => void onCorrect(memory)}>Correct</button>}<button className="deny" onClick={() => void onForget(memory)}>Forget</button></footer></article>) : <EmptyState text={restaurantMode ? "DOM has no reviewed restaurant knowledge yet. Connect a read-only source or teach VIC by voice." : "VIC has no matching durable memories yet. Say “remember that…” or add one above."} />}</div>
   </section>;
 }
 
@@ -1137,6 +1310,10 @@ function EmptyState({ text }: { text: string }) {
   return <div className="empty-state"><span aria-hidden="true">⬡</span><p>{text}</p></div>;
 }
 
+function VoiceOnlyNotice({ text }: { text: string }) {
+  return <div className="voice-only-notice"><span aria-hidden="true">◉</span><div><strong>Voice + touch only</strong><p>{text}</p></div></div>;
+}
+
 function CommandTaskSummary({ tasks, onOpenLane }: { tasks: TaskDetail[]; onOpenLane: (lane: "needs_me" | "vic_working" | "review") => void }) {
   const lanes: Array<{ lane: "vic_working" | "needs_me" | "review"; label: string; detail: string }> = [
     { lane: "vic_working", label: "VIC working", detail: "In progress" },
@@ -1153,7 +1330,7 @@ function CommandTaskSummary({ tasks, onOpenLane }: { tasks: TaskDetail[]; onOpen
   </section>;
 }
 
-function ProjectsPanel({ projects, tasks, onCreate, onAssign, onRefresh }: { projects: VicProject[]; tasks: TaskDetail[]; onCreate: (title: string) => Promise<void>; onAssign: (taskId: string, projectId: string | null) => Promise<void>; onRefresh: () => void }) {
+function ProjectsPanel({ projects, tasks, voiceOnly, onCreate, onAssign, onRefresh }: { projects: VicProject[]; tasks: TaskDetail[]; voiceOnly: boolean; onCreate: (title: string) => Promise<void>; onAssign: (taskId: string, projectId: string | null) => Promise<void>; onRefresh: () => void }) {
   const [title, setTitle] = useState("");
   const [creating, setCreating] = useState(false);
   const [movingTaskId, setMovingTaskId] = useState<string | null>(null);
@@ -1175,8 +1352,8 @@ function ProjectsPanel({ projects, tasks, onCreate, onAssign, onRefresh }: { pro
   };
   return <section className="projects-screen panel">
     <div className="panel-heading"><div><p className="kicker">One place for active work</p><h2>Projects with VIC</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div>
-    <p className="projects-intro">Create the project names you want, then use the large selectors to place existing work. Nothing is grouped automatically.</p>
-    <form className="project-create" onSubmit={create}><label htmlFor="project-title">New project</label><div><input id="project-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="VIC touchscreen, SMB Sentinel, Sunday brunch…" maxLength={160} /><button disabled={creating || !title.trim()}>{creating ? "Creating…" : "Create project"}</button></div></form>
+    <p className="projects-intro">{voiceOnly ? "Create projects by voice, then use the large Touch selectors to place existing work." : "Create the project names you want, then use the large selectors to place existing work. Nothing is grouped automatically."}</p>
+    {voiceOnly ? <VoiceOnlyNotice text="Say “VIC, create a project…” then review the result here." /> : <form className="project-create" onSubmit={create}><label htmlFor="project-title">New project</label><div><input id="project-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="VIC touchscreen, SMB Sentinel, Sunday brunch…" maxLength={160} /><button disabled={creating || !title.trim()}>{creating ? "Creating…" : "Create project"}</button></div></form>}
     {error && <p className="project-error" role="alert">{error}</p>}
     <section className="loose-work" aria-labelledby="loose-work-title"><div className="project-section-heading"><div><p className="kicker">Needs a home</p><h3 id="loose-work-title">Loose work</h3></div><span>{looseTasks.length} task{looseTasks.length === 1 ? "" : "s"}</span></div>{looseTasks.length ? <div className="project-task-list">{looseTasks.map((detail) => <ProjectTaskRow key={detail.task.id} detail={detail} projects={projects} busy={movingTaskId === detail.task.id} onAssign={assign} />)}</div> : <EmptyState text="Every open task is connected to a VIC project." />}</section>
     <div className="project-grid">{projects.length ? projects.map((project) => { const projectTasks = tasks.filter((detail) => detail.task.project_id === project.id); return <article className="project-card" key={project.id}><header><div><span>{project.status}</span><h3>{project.title}</h3></div><strong>{projectTasks.length}</strong></header><p>{projectTasks.length ? `${projectTasks.length} open task${projectTasks.length === 1 ? "" : "s"} connected` : "Ready for its first task"}</p><div className="project-task-list">{projectTasks.map((detail) => <ProjectTaskRow key={detail.task.id} detail={detail} projects={projects} busy={movingTaskId === detail.task.id} onAssign={assign} />)}</div></article>; }) : <EmptyState text="Create your first project, then connect the work VIC already knows about." />}</div>
@@ -1187,7 +1364,7 @@ function ProjectTaskRow({ detail, projects, busy, onAssign }: { detail: TaskDeta
   return <article className="project-task-row"><div><strong>{detail.task.title}</strong><small>{detail.progress.lane.replaceAll("_", " ")} · {detail.task.estimated_minutes} min</small></div><label><span className="visually-hidden">Project for {detail.task.title}</span><select aria-label={`Project for ${detail.task.title}`} disabled={busy} value={detail.task.project_id ?? ""} onChange={(event) => void onAssign(detail.task.id, event.target.value || null)}><option value="">Loose work</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label></article>;
 }
 
-function TaskBoard({ projects, tasks, activity, filter, onFilter, onRefresh, onAttention, onStart }: { projects: VicProject[]; tasks: TaskDetail[]; activity: AgentActivity[]; filter: "all" | "needs_me" | "vic_working" | "review"; onFilter: (value: "all" | "needs_me" | "vic_working" | "review") => void; onRefresh: () => void; onAttention: (taskId: string, input: { due_at: string | null; importance: TaskDetail["task"]["importance"] }) => Promise<void>; onStart: (input: { title: string; observable_outcome: string; estimated_minutes: number; project_id?: string }) => Promise<void> }) {
+function TaskBoard({ projects, tasks, activity, filter, voiceOnly, onFilter, onRefresh, onAttention, onStart }: { projects: VicProject[]; tasks: TaskDetail[]; activity: AgentActivity[]; filter: "all" | "needs_me" | "vic_working" | "review"; voiceOnly: boolean; onFilter: (value: "all" | "needs_me" | "vic_working" | "review") => void; onRefresh: () => void; onAttention: (taskId: string, input: { due_at: string | null; importance: TaskDetail["task"]["importance"] }) => Promise<void>; onStart: (input: { title: string; observable_outcome: string; estimated_minutes: number; project_id?: string }) => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [outcome, setOutcome] = useState("");
   const [minutes, setMinutes] = useState(20);
@@ -1200,11 +1377,45 @@ function TaskBoard({ projects, tasks, activity, filter, onFilter, onRefresh, onA
     event.preventDefault();
     if (!title.trim() || !outcome.trim() || starting) return;
     setStarting(true); setStartError("");
-    try { await onStart({ title: title.trim(), observable_outcome: outcome.trim(), estimated_minutes: minutes, ...(projectId ? { project_id: projectId } : {}) }); setTitle(""); setOutcome(""); setMinutes(20); }
-    catch (error) { setStartError(errorText(error)); }
-    finally { setStarting(false); }
+    try {
+      await onStart({ title: title.trim(), observable_outcome: outcome.trim(), estimated_minutes: minutes, ...(projectId ? { project_id: projectId } : {}) });
+      setTitle(""); setOutcome(""); setMinutes(20);
+    } catch (error) {
+      setStartError(errorText(error));
+    } finally {
+      setStarting(false);
+    }
   };
-  return <section className="task-board panel"><div className="panel-heading"><div><p className="kicker">Human + agent execution</p><h2>Task responsibility board</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div><form className="task-intake" onSubmit={submit}><div><label htmlFor="task-title">What should VIC work on?</label><input id="task-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Build the customer follow-up workflow" /></div><div><label htmlFor="task-outcome">What does done look like?</label><input id="task-outcome" value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder="A tested workflow is ready for my review" /></div><div><label htmlFor="task-project">Project</label><select id="task-project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Loose work</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></div><div className="task-duration"><label htmlFor="task-minutes">Estimate</label><input id="task-minutes" type="number" min="1" max="1440" value={minutes} onChange={(event) => setMinutes(Math.max(1, Number(event.target.value) || 1))} /><span>min</span></div><button disabled={starting || !title.trim() || !outcome.trim()}>{starting ? "Starting…" : "Start task with VIC"}</button>{startError && <p className="task-intake-error">{startError}</p>}</form><p className="task-intake-note">VIC begins safe research, drafting, planning, or project inspection immediately. Approvals remain required for external or consequential actions.</p><div className="task-rollups"><button className={filter === "needs_me" ? "active" : ""} onClick={() => onFilter("needs_me")}><span>Needs me</span><strong>{count("needs_me")}</strong></button><button className={filter === "vic_working" ? "active" : ""} onClick={() => onFilter("vic_working")}><span>VIC working</span><strong>{count("vic_working")}</strong></button><button className={filter === "review" ? "active" : ""} onClick={() => onFilter("review")}><span>Ready for review</span><strong>{count("review")}</strong></button><button className={filter === "all" ? "active" : ""} onClick={() => onFilter("all")}><span>All open</span><strong>{tasks.length}</strong></button></div><div className="task-grid">{visible.length ? visible.map((detail) => { const live = activity.filter((item) => item.taskId === detail.task.id).slice(0, 3); const recorded = detail.activity?.filter((item) => item.event_type === "task.progress.recorded").slice(-3).reverse() ?? []; return <article className={`task-card lane-${detail.progress.lane}`} key={detail.task.id}><div className="task-card-head"><span>{detail.progress.lane.replaceAll("_", " ")}</span><strong>{detail.progress.total_steps ? `${detail.progress.completed_steps}/${detail.progress.total_steps} steps` : "No steps"}</strong></div><h3>{detail.task.title}</h3><p>{detail.task.observable_outcome}</p><div className="task-handoff"><small>{detail.progress.lane === "vic_working" ? "VIC NEXT ACTION" : detail.progress.lane === "review" ? "READY FOR REVIEW" : "YOUR NEXT ACTION"}</small><strong>{detail.progress.lane === "vic_working" ? detail.progress.next_vic_action || "Continue safe work" : detail.progress.next_user_action || "Review with VIC"}</strong></div>{(live.length > 0 || recorded.length > 0) && <div className="task-updates"><small>PROGRESS UPDATES</small>{live.map((item) => <div className="task-update live" key={item.id}><span className="thinking-pulse" /><p><strong>{item.label}</strong>{item.detail && <small>{item.detail}</small>}</p></div>)}{live.length === 0 && recorded.map((item, index) => <div className="task-update" key={item.id ?? `${item.occurred_at}-${index}`}><span>✓</span><p>{String(item.payload.summary ?? "VIC recorded progress")}</p></div>)}</div>}<div className="task-steps">{detail.steps.slice(0, 5).map((step) => <div key={step.id}><span>{step.status === "completed" ? "✓" : "○"}</span><p>{step.title}</p><small>{step.owner}</small></div>)}</div><TaskAttentionEditor detail={detail} onSave={onAttention} /><footer><span>VIC {detail.progress.vic_status.replaceAll("_", " ")}</span><span>{detail.progress.open_blockers} blockers</span><span>{detail.artifacts.length} artifacts</span></footer></article>; }) : <EmptyState text="No tasks are in this responsibility lane." />}</div></section>;
+  return <section className="task-board panel">
+    <div className="panel-heading"><div><p className="kicker">Human + agent execution</p><h2>Task responsibility board</h2></div><button className="secondary-button" onClick={onRefresh}>Refresh</button></div>
+    {voiceOnly ? <VoiceOnlyNotice text="Tell VIC the task, the result you need, and any real deadline. Use Touch to review responsibility and approvals." /> : <form className="task-intake" onSubmit={submit}>
+      <div><label htmlFor="task-title">What should VIC work on?</label><input id="task-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Build the customer follow-up workflow" /></div>
+      <div><label htmlFor="task-outcome">What does done look like?</label><input id="task-outcome" value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder="A tested workflow is ready for my review" /></div>
+      <div><label htmlFor="task-project">Project</label><select id="task-project" value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">Loose work</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></div>
+      <div className="task-duration"><label htmlFor="task-minutes">Estimate</label><input id="task-minutes" type="number" min="1" max="1440" value={minutes} onChange={(event) => setMinutes(Math.max(1, Number(event.target.value) || 1))} /><span>min</span></div>
+      <button disabled={starting || !title.trim() || !outcome.trim()}>{starting ? "Starting…" : "Start task with VIC"}</button>{startError && <p className="task-intake-error">{startError}</p>}
+    </form>}
+    <p className="task-intake-note">VIC begins safe research, drafting, planning, or project inspection immediately. Approvals remain required for external or consequential actions.</p>
+    <div className="task-rollups">
+      <button className={filter === "needs_me" ? "active" : ""} onClick={() => onFilter("needs_me")}><span>Needs me</span><strong>{count("needs_me")}</strong></button>
+      <button className={filter === "vic_working" ? "active" : ""} onClick={() => onFilter("vic_working")}><span>VIC working</span><strong>{count("vic_working")}</strong></button>
+      <button className={filter === "review" ? "active" : ""} onClick={() => onFilter("review")}><span>Ready for review</span><strong>{count("review")}</strong></button>
+      <button className={filter === "all" ? "active" : ""} onClick={() => onFilter("all")}><span>All open</span><strong>{tasks.length}</strong></button>
+    </div>
+    <div className="task-grid">{visible.length ? visible.map((detail) => {
+      const live = activity.filter((item) => item.taskId === detail.task.id).slice(0, 3);
+      const recorded = detail.activity?.filter((item) => item.event_type === "task.progress.recorded").slice(-3).reverse() ?? [];
+      return <article className={`task-card lane-${detail.progress.lane}`} key={detail.task.id}>
+        <div className="task-card-head"><span>{detail.progress.lane.replaceAll("_", " ")}</span><strong>{detail.progress.total_steps ? `${detail.progress.completed_steps}/${detail.progress.total_steps} steps` : "No steps"}</strong></div>
+        <h3>{detail.task.title}</h3><p>{detail.task.observable_outcome}</p>
+        <div className="task-handoff"><small>{detail.progress.lane === "vic_working" ? "VIC NEXT ACTION" : detail.progress.lane === "review" ? "READY FOR REVIEW" : "YOUR NEXT ACTION"}</small><strong>{detail.progress.lane === "vic_working" ? detail.progress.next_vic_action || "Continue safe work" : detail.progress.next_user_action || "Review with VIC"}</strong></div>
+        {(live.length > 0 || recorded.length > 0) && <div className="task-updates"><small>PROGRESS UPDATES</small>{live.map((item) => <div className="task-update live" key={item.id}><span className="thinking-pulse" /><p><strong>{item.label}</strong>{item.detail && <small>{item.detail}</small>}</p></div>)}{live.length === 0 && recorded.map((item, index) => <div className="task-update" key={item.id ?? `${item.occurred_at}-${index}`}><span>✓</span><p>{String(item.payload.summary ?? "VIC recorded progress")}</p></div>)}</div>}
+        <div className="task-steps">{detail.steps.slice(0, 5).map((step) => <div key={step.id}><span>{step.status === "completed" ? "✓" : "○"}</span><p>{step.title}</p><small>{step.owner}</small></div>)}</div>
+        <TaskAttentionEditor detail={detail} onSave={onAttention} />
+        <footer><span>VIC {detail.progress.vic_status.replaceAll("_", " ")}</span><span>{detail.progress.open_blockers} blockers</span><span>{detail.artifacts.length} artifacts</span></footer>
+      </article>;
+    }) : <EmptyState text="No tasks are in this responsibility lane." />}</div>
+  </section>;
 }
 
 function TaskAttentionEditor({ detail, onSave }: { detail: TaskDetail; onSave: (taskId: string, input: { due_at: string | null; importance: TaskDetail["task"]["importance"] }) => Promise<void> }) {

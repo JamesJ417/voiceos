@@ -15,9 +15,13 @@ object TaskWidgetStore {
                 put(
                     JSONObject()
                         .put("id", task.id)
+                        .put("project_id", task.projectId)
+                        .put("parent_task_id", task.parentTaskId)
                         .put("title", task.title)
                         .put("observable_outcome", task.observableOutcome)
                         .put("estimated_minutes", task.estimatedMinutes)
+                        .put("due_at", task.dueAt)
+                        .put("importance", task.importance)
                         .put("status", task.status)
                         .put("updated_at", task.updatedAt)
                         .put("progress_lane", task.progressLane)
@@ -49,9 +53,13 @@ object TaskWidgetStore {
                     add(
                         VoiceTask(
                             id = task.getString("id"),
+                            projectId = task.optString("project_id").takeIf { it.isNotBlank() && it != "null" },
+                            parentTaskId = task.optString("parent_task_id").takeIf { it.isNotBlank() && it != "null" },
                             title = task.getString("title"),
                             observableOutcome = task.optString("observable_outcome"),
                             estimatedMinutes = task.optInt("estimated_minutes", 20),
+                            dueAt = task.optString("due_at").takeIf { it.isNotBlank() && it != "null" },
+                            importance = task.optString("importance", "normal"),
                             status = task.optString("status", "ready"),
                             updatedAt = task.optString("updated_at"),
                             progressLane = task.optString("progress_lane", "shared"),
@@ -66,6 +74,16 @@ object TaskWidgetStore {
                 }
             }
         }.getOrDefault(emptyList())
+    }
+
+    fun replace(context: Context, updated: VoiceTask) {
+        val current = load(context)
+        val found = current.any { it.id == updated.id }
+        save(
+            context,
+            if (found) current.map { if (it.id == updated.id) updated else it }
+            else listOf(updated) + current,
+        )
     }
 
     fun lastSyncMillis(context: Context): Long =

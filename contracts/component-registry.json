@@ -16,7 +16,7 @@
         "kind": "local_service",
         "contract": "contracts/openapi.yaml"
       },
-      "capabilities": ["identity", "policy", "memory", "projects", "tasks", "events", "audit"]
+      "capabilities": ["identity", "policy", "memory", "projects", "tasks", "personal_capture", "focus_reset", "fieldy_intake", "events", "audit"]
     },
     {
       "id": "vic",
@@ -27,7 +27,7 @@
         "kind": "voiceos_client",
         "surfaces": ["android", "desktop_microphone", "touch"]
       },
-      "capabilities": ["voice_input", "spoken_response", "conversation_continuity"]
+      "capabilities": ["voice_input", "spoken_response", "conversation_continuity", "capture_inbox", "attention_recovery"]
     },
     {
       "id": "touch",
@@ -38,7 +38,7 @@
         "kind": "voiceos_client",
         "surface": "primary_touchscreen"
       },
-      "capabilities": ["conversation", "projects", "tasks", "memory", "history", "system_status"]
+      "capabilities": ["conversation", "projects", "tasks", "capture_inbox", "proposal_review", "focus_reset", "memory", "history", "system_status"]
     },
     {
       "id": "vic-console",

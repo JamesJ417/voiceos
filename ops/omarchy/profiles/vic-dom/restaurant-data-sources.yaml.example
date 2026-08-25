@@ -1,0 +1,51 @@
+schema_version: 1
+deployment_id: vic-dom
+organization: Brick and Copper Restaurant
+
+# This file is a review manifest, not a credential store. Add one entry only
+# after the source owner, backup, interface, and permission scope are verified.
+sources:
+  - id: dom-operations
+    display_name: Existing DOM operations system
+    status: discovery_required
+    connector_type: not_selected
+    endpoint: ""
+    credential_file: ""
+    access_mode: read_only
+    datasets: []
+    freshness_seconds: 300
+    contains_employee_data: unknown
+    contains_customer_data: unknown
+    contains_payment_data: unknown
+    write_capabilities: []
+
+policy:
+  default_access: deny
+  require_source_provenance: true
+  require_freshness_timestamp: true
+  reject_unlisted_datasets: true
+  direct_database_writes: false
+  model_generated_queries: false
+  cache_sensitive_rows: false
+  log_secret_values: false
+  writes_require_typed_capability: true
+  consequential_writes_require_touch_approval: true
+
+read_first_rollout:
+  - opening_and_closing_status
+  - shift_handoff
+  - maintenance_status
+  - inventory_snapshot
+  - approved_schedule_view
+  - approved_vendor_directory
+
+blocked_until_separately_reviewed:
+  - payroll
+  - payment_cards
+  - bank_accounts
+  - employee_private_records
+  - customer_private_records
+  - refunds
+  - purchases
+  - vendor_orders
+  - schedule_publication

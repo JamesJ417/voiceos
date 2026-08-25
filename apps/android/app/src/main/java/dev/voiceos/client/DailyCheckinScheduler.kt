@@ -50,10 +50,10 @@ class DailyCheckinReceiver : BroadcastReceiver() {
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ID,
-                "Daily planning",
+                "10-minute VIC reset",
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
-                description = "VIC daily planning questions"
+                description = "Scripture, reflection, and one focused next action with VIC"
             },
         )
         val open = PendingIntent.getActivity(
@@ -67,8 +67,8 @@ class DailyCheckinReceiver : BroadcastReceiver() {
         )
         val notification = android.app.Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(dev.voiceos.client.R.drawable.ic_mic)
-            .setContentTitle("VIC daily planning")
-            .setContentText("Continue today’s 12 questions and turn the answers into a plan.")
+            .setContentTitle("Your 10-minute VIC reset")
+            .setContentText("Read today’s CSB passage, reflect with VIC, and choose one next action.")
             .setContentIntent(open)
             .setAutoCancel(true)
             .build()

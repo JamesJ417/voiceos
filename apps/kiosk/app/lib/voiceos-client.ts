@@ -7,6 +7,9 @@ export const VOICEOS_ENDPOINTS = {
   systemHealth: "/v1/tools/system.health",
   events: "/v1/events",
   focus: "/v1/focus",
+  personalInbox: "/v1/personal/inbox",
+  personalProposals: "/v1/personal/proposals",
+  personalFocusReset: "/v1/personal/focus-reset",
 } as const;
 
 export type FocusSession = {
@@ -47,6 +50,43 @@ export type FocusSnapshot = {
   recommendation: FocusPriority | null;
   last_interrupted_session: FocusSession | null;
   parked: FocusPriority[];
+};
+
+export type PersonalCapture = {
+  id: string;
+  owner_id: string;
+  source: string;
+  source_id: string;
+  raw_content: string;
+  display_text: string;
+  status: "received" | "reviewing";
+  created_at: string;
+  expires_at: string;
+};
+
+export type PersonalProposal = {
+  id: string;
+  capture_id: string;
+  title: string;
+  category: "task" | "appointment" | "worry" | "idea" | "note";
+  confidence: number;
+  details: string | null;
+  suggested_next_action: string;
+  rationale: string;
+  status: "reviewing";
+  created_at: string;
+  expires_at: string;
+};
+
+export type PersonalFocusReset = {
+  active_session: FocusSession | null;
+  interrupted_session: FocusSession | null;
+  priorities: FocusPriority[];
+  recommendation: FocusPriority | null;
+  first_physical_action: string | null;
+  five_minute_version: string | null;
+  optional_question: string | null;
+  message: string;
 };
 
 export type SystemComponent = {
@@ -183,5 +223,76 @@ export class VoiceOSClient {
       body: JSON.stringify(input),
     });
     return payload.focus;
+  }
+
+  async personalInbox(): Promise<PersonalCapture[]> {
+    const payload = await this.request<{ captures: PersonalCapture[] }>(
+      VOICEOS_ENDPOINTS.personalInbox,
+    );
+    return payload.captures;
+  }
+
+  async capturePersonal(text: string, sourceId: string): Promise<PersonalCapture> {
+    const payload = await this.request<{ capture: PersonalCapture }>("/v1/personal/captures", {
+      method: "POST",
+      body: JSON.stringify({ source: "touch", source_id: sourceId, text }),
+    });
+    return payload.capture;
+  }
+
+  async personalProposals(): Promise<PersonalProposal[]> {
+    const payload = await this.request<{ proposals: PersonalProposal[] }>(
+      `${VOICEOS_ENDPOINTS.personalProposals}?limit=50`,
+    );
+    return payload.proposals;
+  }
+
+  async extractPersonal(captureId: string): Promise<PersonalProposal[]> {
+    const payload = await this.request<{ proposals: PersonalProposal[] }>(
+      `/v1/personal/captures/${encodeURIComponent(captureId)}/extract`,
+      { method: "POST", body: "{}" },
+    );
+    return payload.proposals;
+  }
+
+  async discardPersonalCapture(captureId: string, auditId: string): Promise<void> {
+    await this.request(`/v1/personal/captures/${encodeURIComponent(captureId)}/decision`, {
+      method: "POST",
+      body: JSON.stringify({ status: "discarded", audit_id: auditId }),
+    });
+  }
+
+  async approvePersonalProposal(
+    proposal: PersonalProposal,
+    auditId: string,
+  ): Promise<void> {
+    await this.request(`/v1/personal/proposals/${encodeURIComponent(proposal.id)}/approve`, {
+      method: "POST",
+      body: JSON.stringify({
+        audit_id: auditId,
+        ...(proposal.category === "task" ? { status: "Ready", estimated_minutes: 30 } : {}),
+      }),
+    });
+  }
+
+  async discardPersonalProposal(proposalId: string, auditId: string): Promise<void> {
+    await this.request(`/v1/personal/proposals/${encodeURIComponent(proposalId)}/decision`, {
+      method: "POST",
+      body: JSON.stringify({ status: "discarded", audit_id: auditId }),
+    });
+  }
+
+  async personalFocusReset(mode = "normal"): Promise<PersonalFocusReset> {
+    const payload = await this.request<{ focus_reset: PersonalFocusReset }>(
+      `${VOICEOS_ENDPOINTS.personalFocusReset}?mode=${encodeURIComponent(mode)}`,
+    );
+    return payload.focus_reset;
+  }
+
+  async recordDailyReset(resetDate: string, auditId: string): Promise<void> {
+    await this.request("/v1/personal/daily-reset", {
+      method: "POST",
+      body: JSON.stringify({ reset_date: resetDate, audit_id: auditId }),
+    });
   }
 }

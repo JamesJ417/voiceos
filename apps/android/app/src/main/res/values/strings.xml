@@ -1,5 +1,7 @@
 <resources>
-    <string name="app_name">VIC</string>
-    <string name="widget_name">VIC Command</string>
-    <string name="widget_description">Tasks, status, and voice access for VIC through your private VoiceOS backend.</string>
+    <string name="app_name">Omarchy Voice</string>
+    <string name="widget_name">OV Focus</string>
+    <string name="widget_description">Three focus choices, a clear VIC recommendation, and immediate voice help.</string>
+    <string name="social_shield_name">VIC Social Shield</string>
+    <string name="social_shield_description">Offers your chosen five-minute priority before selected social apps. It observes app changes only and never reads screen content.</string>
 </resources>

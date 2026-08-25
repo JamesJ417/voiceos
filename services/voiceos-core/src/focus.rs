@@ -6,7 +6,8 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::{
-    ConversationStore, FocusPriority, FocusSessionRecord, FocusSnapshot, StoreError, TaskDetail,
+    ConversationStore, FocusPriority, FocusSessionRecord, FocusSnapshot, PersonalFocusReset,
+    StoreError, TaskDetail,
 };
 
 const FOCUS_MODES: &[&str] = &["normal", "five_minute", "low_energy", "restart"];
@@ -57,13 +58,25 @@ impl ConversationStore {
         }
 
         priorities.sort_by(|left, right| focus_order(left, right, mode));
-        if let Some(session) = &active_session
-            && let Some(position) = priorities
+        if let Some(session) = &active_session {
+            if let Some(position) = priorities
                 .iter()
                 .position(|priority| priority.task_id == session.task_id)
-        {
-            priorities.swap(0, position);
-            priorities[0].next_action = session.next_action.clone();
+            {
+                priorities.swap(0, position);
+                priorities[0].next_action = session.next_action.clone();
+            }
+        } else if let Some(session) = &last_interrupted_session {
+            if let Some(position) = priorities
+                .iter()
+                .position(|priority| priority.task_id == session.task_id)
+            {
+                priorities.swap(0, position);
+                priorities[0].next_action = session
+                    .restart_action
+                    .clone()
+                    .unwrap_or_else(|| session.next_action.clone());
+            }
         }
         priorities.truncate(3);
         let recommendation = priorities.first().cloned();
@@ -74,6 +87,65 @@ impl ConversationStore {
             recommendation,
             last_interrupted_session,
             parked,
+        })
+    }
+
+    pub fn personal_focus_reset(
+        &self,
+        owner_id: &str,
+        mode: &str,
+    ) -> Result<PersonalFocusReset, StoreError> {
+        let mut snapshot = self.focus_snapshot(owner_id, mode)?;
+        if snapshot.active_session.is_none() {
+            if let Some(interrupted) = &snapshot.last_interrupted_session {
+                if let Some(position) = snapshot
+                    .priorities
+                    .iter()
+                    .position(|priority| priority.task_id == interrupted.task_id)
+                {
+                    snapshot.priorities.swap(0, position);
+                    snapshot.recommendation = snapshot.priorities.first().cloned();
+                }
+            }
+        }
+
+        let restart_action = snapshot
+            .last_interrupted_session
+            .as_ref()
+            .filter(|_| snapshot.active_session.is_none())
+            .and_then(|session| session.restart_action.clone())
+            .or_else(|| {
+                snapshot
+                    .recommendation
+                    .as_ref()
+                    .map(|task| task.next_action.clone())
+            });
+        let has_recommendation = snapshot.recommendation.is_some();
+        let message = if snapshot.active_session.is_some() {
+            "You already have a small focus session in progress. You can return to its next step."
+        } else if snapshot.last_interrupted_session.is_some() {
+            "You were interrupted; your restart point is saved. You can begin there."
+        } else if has_recommendation {
+            "You do not need to solve everything right now. Start with this one small step."
+        } else {
+            "There is nothing you need to catch up on right now. We can start with one small capture."
+        };
+        let first_physical_action = restart_action.or_else(|| {
+            (!has_recommendation).then(|| "Capture the next thing pulling at you.".to_owned())
+        });
+        let five_minute_version = first_physical_action
+            .as_ref()
+            .map(|action| format!("Spend five minutes: {action}"));
+
+        Ok(PersonalFocusReset {
+            active_session: snapshot.active_session,
+            interrupted_session: snapshot.last_interrupted_session,
+            priorities: snapshot.priorities,
+            recommendation: snapshot.recommendation,
+            first_physical_action,
+            five_minute_version,
+            optional_question: None,
+            message: message.to_owned(),
         })
     }
 

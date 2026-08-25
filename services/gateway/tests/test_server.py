@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
+import os
 import tempfile
 import threading
 import unittest
@@ -14,12 +17,23 @@ from services.gateway.providers import ProviderResponse
 from services.gateway.tools import ToolBroker
 from services.gateway.server import (
     _clean_hermes_completion_report,
+    _normalize_fieldy_webhook,
     _render_conversation_context,
+    _single_json_object,
     create_server,
 )
+from services.gateway.coordinator import CoordinatedResponse
 
 
 class GatewayTest(unittest.TestCase):
+    def test_personal_extraction_accepts_only_one_json_object(self) -> None:
+        self.assertEqual(
+            {"candidates": []},
+            _single_json_object('```json\n{"candidates":[]}\n```'),
+        )
+        self.assertIsNone(_single_json_object('{"candidates":[]} trailing'))
+        self.assertIsNone(_single_json_object('[{"candidates":[]}]'))
+
     def test_cleans_hermes_completion_transport_envelope(self) -> None:
         raw = """[ASYNC DELEGATION BATCH COMPLETE — deleg_1234]
 Transport explanation.
@@ -294,6 +308,38 @@ Second result.
         self.assertEqual(503, status)
         self.assertEqual("skill_memory_unavailable", payload["error"])
 
+    def test_personal_support_routes_fail_closed_without_rust_authority(self) -> None:
+        status, payload = self.request("GET", "/v1/personal/inbox")
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        capture = json.dumps(
+            {"source": "touch", "source_id": "capture-1", "text": "Call Lee"}
+        ).encode()
+        status, payload = self.request(
+            "POST", "/v1/personal/captures", capture, content_type="application/json"
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
+        status, payload = self.request(
+            "POST",
+            "/v1/personal/captures/capture-1/extract",
+            b"{}",
+            content_type="application/json",
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("personal_support_unavailable", payload["error"])
+
+        status, payload = self.request(
+            "POST",
+            "/v1/integrations/fieldy/transcripts",
+            b"{}",
+            content_type="application/json",
+        )
+        self.assertEqual(503, status)
+        self.assertEqual("fieldy_webhook_not_configured", payload["error"])
+
     def test_isolated_capability_routes_fail_closed_when_workers_are_absent(self) -> None:
         status, payload = self.request("GET", "/v1/capabilities/speech/health")
         self.assertEqual(503, status)
@@ -448,6 +494,48 @@ Second result.
             self.assertIn("providers", payload)
         finally:
             self.server.require_device_auth = False
+
+    def test_optional_auth_preserves_enrolled_device_identity(self) -> None:
+        class BootstrapStub(BaseHTTPRequestHandler):
+            forwarded_device_id: str | None = None
+
+            def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+                type(self).forwarded_device_id = self.headers.get("X-VoiceOS-Device-ID")
+                body = json.dumps(
+                    {"device_id": type(self).forwarded_device_id}
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        code, _ = self.audit_store.create_enrollment_code()
+        credential = self.audit_store.exchange_enrollment_code(code, "Conversation Pixel")
+        self.assertIsNotNone(credential)
+        assert credential is not None
+        core = ThreadingHTTPServer(("127.0.0.1", 0), BootstrapStub)
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        try:
+            status, payload = self.request(
+                "GET",
+                "/v1/client/bootstrap",
+                headers={"Authorization": f"Bearer {credential['device_token']}"},
+            )
+            self.assertEqual(200, status)
+            self.assertEqual(credential["device_id"], payload["device_id"])
+            self.assertEqual(credential["device_id"], BootstrapStub.forwarded_device_id)
+        finally:
+            self.server.memory_url = original_memory_url
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
 
     def test_audio_turn(self) -> None:
         status, payload = self.request("POST", "/v1/turns/audio", b"\x00\x01" * 400)
@@ -749,6 +837,313 @@ Second result.
             core.shutdown()
             core.server_close()
             thread.join(timeout=2)
+
+    def test_spoken_personal_capture_is_dispatched_before_focus_and_model(self) -> None:
+        class PersonalCoreStub(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(length) or b"{}")
+                if self.path == "/internal/v1/personal/command":
+                    self.server.seen = request  # type: ignore[attr-defined]
+                    payload = {
+                        "handled": True,
+                        "response_text": "Captured. It is safely parked for review.",
+                        "provider": "deterministic-personal",
+                        "tool_calls": [
+                            {"name": "personal.capture", "status": "completed"}
+                        ],
+                        "approvals": [],
+                        "results": [{"capture": {"id": "capture-1"}}],
+                        "errors": [],
+                        "evidence": {"personal_state_changed": True},
+                    }
+                else:
+                    payload = {}
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), PersonalCoreStub)
+        core.seen = None  # type: ignore[attr-defined]
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        try:
+            body = json.dumps({"text": "Capture this call the dentist"}).encode()
+            status, payload = self.request(
+                "POST", "/v1/turns/text", body, content_type="application/json"
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("deterministic-personal", payload["provider"])
+            self.assertEqual("personal.capture", payload["tool_calls"][0]["name"])
+            self.assertTrue(payload["evidence"]["personal_state_changed"])
+            self.assertEqual(
+                "Capture this call the dentist",
+                core.seen["text"],  # type: ignore[index,attr-defined]
+            )
+        finally:
+            self.server.memory_url = original_memory_url
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_personal_extraction_uses_provider_then_submits_bounded_json_to_rust(self) -> None:
+        expiry = "2026-08-25T20:00:00Z"
+
+        class PersonalCoreStub(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                payload = {
+                    "captures": [
+                        {
+                            "id": "capture-1",
+                            "owner_id": "owner-a",
+                            "raw_content": "Call the dentist tomorrow",
+                            "display_text": "Call the dentist tomorrow",
+                            "status": "received",
+                            "expires_at": expiry,
+                        }
+                    ]
+                }
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(length) or b"{}")
+                self.server.seen = request  # type: ignore[attr-defined]
+                payload = {"proposals": request["output"]["candidates"]}
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        class ExtractionCoordinator:
+            prompt = ""
+            allowed_tools: set[str] | None = None
+
+            def respond(self, prompt: str, **kwargs: object) -> CoordinatedResponse:
+                self.prompt = prompt
+                self.allowed_tools = kwargs.get("allowed_tools")  # type: ignore[assignment]
+                return CoordinatedResponse(
+                    provider="hermes",
+                    text=json.dumps(
+                        {
+                            "owner_id": "owner-a",
+                            "capture_id": "capture-1",
+                            "candidates": [
+                                {
+                                    "category": "task",
+                                    "confidence": 0.93,
+                                    "title": "Call the dentist",
+                                    "details": "Ask about the next available visit.",
+                                    "suggested_next_action": "Find the dentist phone number.",
+                                    "rationale": "The capture names a clear follow-up.",
+                                    "evidence_capture_ids": ["capture-1"],
+                                    "expires_at": expiry,
+                                }
+                            ],
+                        }
+                    ),
+                )
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), PersonalCoreStub)
+        core.seen = None  # type: ignore[attr-defined]
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        original_coordinator = self.server.coordinator
+        coordinator = ExtractionCoordinator()
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        self.server.coordinator = coordinator  # type: ignore[assignment]
+        try:
+            status, payload = self.request(
+                "POST",
+                "/v1/personal/captures/capture-1/extract",
+                b"{}",
+                content_type="application/json",
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("Call the dentist", payload["proposals"][0]["title"])
+            self.assertEqual("owner-a", core.seen["output"]["owner_id"])  # type: ignore[index,attr-defined]
+            self.assertIn("UNTRUSTED_CAPTURE_JSON", coordinator.prompt)
+            self.assertEqual(set(), coordinator.allowed_tools)
+        finally:
+            self.server.memory_url = original_memory_url
+            self.server.coordinator = original_coordinator
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_fieldy_webhook_requires_valid_signature_before_rust_intake(self) -> None:
+        class FieldyCoreStub(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(length)
+                self.server.seen = json.loads(body)  # type: ignore[attr-defined]
+                payload = {"capture": {"id": "fieldy-capture", "source": "fieldy"}}
+                encoded = json.dumps(payload).encode()
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), FieldyCoreStub)
+        core.seen = None  # type: ignore[attr-defined]
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        original_secret = os.environ.get("VOICEOS_FIELDY_WEBHOOK_SECRET")
+        secret = "fieldy-test-secret"
+        os.environ["VOICEOS_FIELDY_WEBHOOK_SECRET"] = secret
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        event = json.dumps(
+            {
+                "event_id": "fieldy-1",
+                "occurred_at": "2026-08-24T20:00:00Z",
+                "transcript": "Review the screen mount measurements",
+                "recording_id": None,
+                "session_id": None,
+                "speakers": [],
+                "metadata": {},
+            },
+            separators=(",", ":"),
+        ).encode()
+        signature = "sha256=" + hmac.new(
+            secret.encode(), event, hashlib.sha256
+        ).hexdigest()
+        try:
+            rejected, _ = self.request(
+                "POST",
+                "/v1/integrations/fieldy/transcripts",
+                event,
+                content_type="application/json",
+                headers={"X-Fieldy-Signature": "sha256=bad"},
+            )
+            status, payload = self.request(
+                "POST",
+                "/v1/integrations/fieldy/transcripts",
+                event,
+                content_type="application/json",
+                headers={"X-Fieldy-Signature": signature},
+            )
+            self.assertEqual(401, rejected)
+            self.assertEqual(201, status)
+            self.assertEqual("fieldy", payload["capture"]["source"])
+            self.assertEqual("fieldy-1", core.seen["event_id"])  # type: ignore[index,attr-defined]
+        finally:
+            self.server.memory_url = original_memory_url
+            if original_secret is None:
+                os.environ.pop("VOICEOS_FIELDY_WEBHOOK_SECRET", None)
+            else:
+                os.environ["VOICEOS_FIELDY_WEBHOOK_SECRET"] = original_secret
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_fieldy_public_webhook_payload_accepts_url_token_and_normalizes(self) -> None:
+        class FieldyCoreStub(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                self.server.seen = json.loads(self.rfile.read(length))  # type: ignore[attr-defined]
+                encoded = json.dumps({"capture": {"id": "fieldy-capture"}}).encode()
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), FieldyCoreStub)
+        core.seen = None  # type: ignore[attr-defined]
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        original_secret = os.environ.get("VOICEOS_FIELDY_WEBHOOK_SECRET")
+        os.environ["VOICEOS_FIELDY_WEBHOOK_SECRET"] = "fieldy-test-secret"
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        event = json.dumps(
+            {
+                "date": "2026-08-24T20:00:00.100907+00:00",
+                "transcription": "Review the screen mount measurements",
+                "transcriptions": [
+                    {
+                        "text": "Review the screen mount measurements",
+                        "speaker": "A",
+                        "start": 0.04,
+                        "end": 4.4,
+                        "duration": 4.36,
+                    }
+                ],
+            },
+            separators=(",", ":"),
+        ).encode()
+        try:
+            rejected, _ = self.request(
+                "POST",
+                "/v1/integrations/fieldy/transcripts?token=wrong",
+                event,
+                content_type="application/json",
+            )
+            status, payload = self.request(
+                "POST",
+                "/v1/integrations/fieldy/transcripts?token=fieldy-test-secret",
+                event,
+                content_type="application/json",
+            )
+            self.assertEqual(401, rejected)
+            self.assertEqual(201, status)
+            self.assertEqual("fieldy-capture", payload["capture"]["id"])
+            self.assertEqual(
+                "Review the screen mount measurements",
+                core.seen["transcript"],  # type: ignore[index,attr-defined]
+            )
+            self.assertTrue(core.seen["event_id"].startswith("fieldy-"))  # type: ignore[index,attr-defined]
+            self.assertEqual("A", core.seen["speakers"][0]["speaker"])  # type: ignore[index,attr-defined]
+        finally:
+            self.server.memory_url = original_memory_url
+            if original_secret is None:
+                os.environ.pop("VOICEOS_FIELDY_WEBHOOK_SECRET", None)
+            else:
+                os.environ["VOICEOS_FIELDY_WEBHOOK_SECRET"] = original_secret
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_fieldy_normalization_is_stable_and_rejects_unknown_shapes(self) -> None:
+        event = json.dumps(
+            {
+                "date": "2026-08-24T20:00:00Z",
+                "transcription": "Call the dentist",
+                "transcriptions": [],
+            }
+        ).encode()
+        first = json.loads(_normalize_fieldy_webhook(event))
+        second = json.loads(_normalize_fieldy_webhook(event))
+        self.assertEqual(first["event_id"], second["event_id"])
+        with self.assertRaises(ValueError):
+            _normalize_fieldy_webhook(b'{"transcription":"missing date"}')
 
     def test_spoken_console_command_is_dispatched_to_rust_before_the_model(self) -> None:
         class ConsoleCoreStub(BaseHTTPRequestHandler):

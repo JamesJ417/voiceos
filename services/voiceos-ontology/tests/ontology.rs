@@ -130,6 +130,69 @@ fn adhd_focus_phrases_resolve_without_claiming_task_completion() {
 }
 
 #[test]
+fn personal_support_phrases_resolve_to_narrow_canonical_requests() {
+    let interpreter = interpreter();
+    let cases = [
+        ("Capture this buy milk", "personal.capture"),
+        ("What should I do next?", "personal.next"),
+        ("Help me get unstuck", "personal.unstuck"),
+        ("I'm interrupted", "personal.interrupt"),
+        ("Show my captures", "personal.inbox"),
+        ("Review that", "personal.review"),
+        ("Discard that", "personal.discard"),
+    ];
+
+    for (phrase, intent) in cases {
+        let decision = interpreter.interpret("owner", phrase).unwrap();
+        assert_eq!(decision.status, DecisionStatus::Resolved, "{phrase}");
+        assert_eq!(
+            decision.interpretation.unwrap().intent.0,
+            intent,
+            "{phrase}"
+        );
+    }
+    let capture = interpreter
+        .interpret("owner", "Capture this buy milk")
+        .unwrap()
+        .interpretation
+        .unwrap();
+    assert_eq!(
+        capture.arguments,
+        BTreeMap::from([("content".to_owned(), json!("buy milk"))])
+    );
+}
+
+#[test]
+fn personal_capture_requires_an_explicit_capture_command() {
+    let interpreter = interpreter();
+    for phrase in [
+        "Buy milk after work",
+        "I was thinking about picking up milk",
+        "Can you tell me about captures?",
+        "My next meeting is at noon",
+    ] {
+        let decision = interpreter.interpret("owner", phrase).unwrap();
+        assert_eq!(decision.status, DecisionStatus::Unrecognized, "{phrase}");
+    }
+}
+
+#[test]
+fn model_fallback_cannot_turn_ordinary_conversation_into_personal_capture() {
+    let candidate = ModelCandidate {
+        intent: IntentId("personal.capture".to_owned()),
+        entities: vec![],
+        arguments: BTreeMap::from([("content".to_owned(), json!("buy milk"))]),
+        confidence: 0.99,
+    };
+    let interpreter = interpreter().with_fallback(Arc::new(FixedFallback(candidate)));
+    let decision = interpreter
+        .interpret("owner", "I was thinking about milk")
+        .unwrap();
+    assert_eq!(decision.status, DecisionStatus::Unrecognized);
+    assert!(decision.interpretation.is_none());
+}
+
+#[test]
 fn model_fallback_is_structured_and_validated_against_the_catalog() {
     let candidate = ModelCandidate {
         intent: IntentId("voice.playback_speed.set".to_owned()),

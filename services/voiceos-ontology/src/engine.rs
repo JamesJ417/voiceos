@@ -82,6 +82,7 @@ impl Interpreter {
             && let Some(fallback) = &self.fallback
         {
             match fallback.resolve(phrase, &self.catalog) {
+                Ok(Some(candidate)) if candidate.intent.0 == "personal.capture" => {}
                 Ok(Some(candidate)) => {
                     let confidence_valid = candidate.confidence.is_finite()
                         && (0.0..=1.0).contains(&candidate.confidence);

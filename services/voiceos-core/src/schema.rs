@@ -589,12 +589,24 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS personal_captures_owner_status_created_idx ON personal_captures(owner_id,status,created_at);
         CREATE TABLE IF NOT EXISTS capture_proposals (
             proposal_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, capture_id TEXT NOT NULL, title TEXT NOT NULL,
-            category TEXT NOT NULL CHECK(category IN ('task','appointment','worry','idea','note')), rationale TEXT NOT NULL,
+            category TEXT NOT NULL CHECK(category IN ('task','appointment','worry','idea','note')), confidence REAL NOT NULL DEFAULT 0.0,
+            details TEXT, suggested_next_action TEXT NOT NULL DEFAULT '', rationale TEXT NOT NULL,
+            evidence_capture_ids_json TEXT NOT NULL DEFAULT '[]',
             status TEXT NOT NULL CHECK(status IN ('reviewing','approved','rejected','snoozed','discarded','expired')),
             created_at TEXT NOT NULL, expires_at TEXT NOT NULL, audit_id TEXT NOT NULL,
             FOREIGN KEY(owner_id) REFERENCES owners(owner_id), FOREIGN KEY(capture_id) REFERENCES personal_captures(capture_id)
         );
         CREATE INDEX IF NOT EXISTS capture_proposals_owner_status_created_idx ON capture_proposals(owner_id,status,created_at);
+        CREATE TABLE IF NOT EXISTS personal_review_records (
+            record_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, proposal_id TEXT NOT NULL UNIQUE,
+            capture_id TEXT NOT NULL, category TEXT NOT NULL CHECK(category IN ('appointment','worry','idea','note')),
+            title TEXT NOT NULL, details TEXT, suggested_next_action TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL CHECK(status='reviewable'), created_at TEXT NOT NULL, audit_id TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(proposal_id) REFERENCES capture_proposals(proposal_id),
+            FOREIGN KEY(capture_id) REFERENCES personal_captures(capture_id)
+        );
+        CREATE INDEX IF NOT EXISTS personal_review_records_owner_category_created_idx ON personal_review_records(owner_id,category,created_at);
         CREATE TABLE IF NOT EXISTS daily_focus_resets (
             reset_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, reset_date TEXT NOT NULL,
             status TEXT NOT NULL CHECK(status IN ('received','reviewing','approved','rejected','snoozed','discarded','expired')),
@@ -609,6 +621,25 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "personal_captures",
         "display_text",
         "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(
+        connection,
+        "capture_proposals",
+        "confidence",
+        "REAL NOT NULL DEFAULT 0.0",
+    )?;
+    add_column(connection, "capture_proposals", "details", "TEXT")?;
+    add_column(
+        connection,
+        "capture_proposals",
+        "suggested_next_action",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(
+        connection,
+        "capture_proposals",
+        "evidence_capture_ids_json",
+        "TEXT NOT NULL DEFAULT '[]'",
     )?;
     connection.execute_batch(
         r#"

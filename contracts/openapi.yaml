@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: VoiceOS Gateway
-  version: 0.7.0
+  version: 0.8.0
 servers:
   - url: http://127.0.0.1:8787
 security:
@@ -513,6 +513,239 @@ paths:
                   task: { $ref: "#/components/schemas/Task" }
                   initiative: { $ref: "#/components/schemas/TaskInitiative" }
         "401": { description: Device authentication required }
+  /v1/personal/captures:
+    post:
+      operationId: createPersonalCapture
+      summary: Park a temporary thought for later review without creating a task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [source, source_id, text]
+              properties:
+                source: { type: string, enum: [voice, touch, android, fieldy] }
+                source_id: { type: string, minLength: 1, maxLength: 200 }
+                text: { type: string, minLength: 1, maxLength: 100000 }
+                retention_hours: { type: integer, minimum: 1, default: 48 }
+      responses:
+        "201":
+          description: Temporary owner-scoped capture
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capture]
+                properties:
+                  capture: { $ref: "#/components/schemas/PersonalCapture" }
+        "400": { description: Invalid capture }
+        "401": { description: Device authentication required }
+  /v1/personal/inbox:
+    get:
+      operationId: listPersonalCaptures
+      summary: List only active captures still waiting for review
+      responses:
+        "200":
+          description: Active capture inbox
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [captures]
+                properties:
+                  captures:
+                    type: array
+                    items: { $ref: "#/components/schemas/PersonalCapture" }
+        "401": { description: Device authentication required }
+  /v1/personal/captures/{capture_id}/decision:
+    post:
+      operationId: decidePersonalCapture
+      summary: Discard, reject, snooze, or close one active capture
+      parameters:
+        - in: path
+          name: capture_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PersonalDecision" }
+      responses:
+        "200": { description: Capture decision recorded }
+        "400": { description: Capture is unavailable or already decided }
+        "401": { description: Device authentication required }
+  /v1/personal/captures/{capture_id}/extract:
+    post:
+      operationId: extractPersonalCapture
+      summary: Ask the configured VIC provider for bounded review suggestions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                provider: { type: string, description: Optional configured provider override }
+      responses:
+        "200":
+          description: Suggestions validated by VoiceOS and waiting for explicit review
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposals]
+                properties:
+                  proposals:
+                    type: array
+                    maxItems: 8
+                    items: { $ref: "#/components/schemas/PersonalProposal" }
+        "400": { description: Provider output failed the bounded extraction contract }
+        "401": { description: Device authentication required }
+        "502": { description: Provider returned malformed structured output }
+        "503": { description: VIC provider or personal support is unavailable }
+  /v1/personal/proposals:
+    get:
+      operationId: listPersonalProposals
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Reviewable suggestions, never automatic commitments
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [proposals]
+                properties:
+                  proposals:
+                    type: array
+                    items: { $ref: "#/components/schemas/PersonalProposal" }
+        "401": { description: Device authentication required }
+  /v1/personal/proposals/{proposal_id}/approve:
+    post:
+      operationId: approvePersonalProposal
+      summary: Convert an explicitly approved suggestion into a task or typed review record
+      parameters:
+        - in: path
+          name: proposal_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [audit_id]
+              properties:
+                status: { type: string, enum: [Proposed, Ready] }
+                estimated_minutes: { type: integer, minimum: 1, maximum: 1440, default: 30 }
+                audit_id: { type: string, minLength: 1 }
+      responses:
+        "200": { description: Approved task or typed review record }
+        "400": { description: Proposal is unavailable or already decided }
+        "401": { description: Device authentication required }
+  /v1/personal/proposals/{proposal_id}/decision:
+    post:
+      operationId: decidePersonalProposal
+      summary: Reject, snooze, or discard a review suggestion without downstream action
+      parameters:
+        - in: path
+          name: proposal_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PersonalDecision" }
+      responses:
+        "200": { description: Proposal decision recorded }
+        "400": { description: Proposal is unavailable or already decided }
+        "401": { description: Device authentication required }
+  /v1/personal/reviews:
+    get:
+      operationId: listPersonalReviewRecords
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200": { description: Approved local notes, ideas, worries, and appointments }
+        "401": { description: Device authentication required }
+  /v1/personal/focus-reset:
+    get:
+      operationId: getPersonalFocusReset
+      summary: Return one restart action, a five-minute version, and no more than three priorities
+      parameters:
+        - in: query
+          name: mode
+          schema: { type: string, enum: [normal, five_minute, low_energy, restart], default: normal }
+      responses:
+        "200":
+          description: Gentle owner-scoped reset with no outbound side effects
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [focus_reset]
+                properties:
+                  focus_reset: { $ref: "#/components/schemas/PersonalFocusReset" }
+        "401": { description: Device authentication required }
+  /v1/personal/daily-reset:
+    post:
+      operationId: createPersonalDailyReset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reset_date, audit_id]
+              properties:
+                reset_date: { type: string, format: date }
+                audit_id: { type: string, minLength: 1 }
+      responses:
+        "201": { description: Daily reset checkpoint recorded }
+        "400": { description: Invalid or duplicate reset request }
+        "401": { description: Device authentication required }
+  /v1/integrations/fieldy/transcripts:
+    post:
+      operationId: receiveFieldyTranscript
+      security: []
+      summary: Receive a signed Fieldy transcript as a temporary personal capture
+      parameters:
+        - in: header
+          name: X-Fieldy-Signature
+          required: true
+          schema: { type: string, pattern: "^sha256=[0-9a-fA-F]{64}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FieldyTranscriptEvent" }
+      responses:
+        "201":
+          description: Transcript captured idempotently by Fieldy event ID
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capture]
+                properties:
+                  capture: { $ref: "#/components/schemas/PersonalCapture" }
+        "400": { description: Invalid Fieldy event }
+        "401": { description: Invalid webhook signature }
+        "413": { description: Webhook body exceeds one megabyte }
+        "503": { description: Fieldy intake is not configured }
   /v1/focus:
     get:
       operationId: getFocusSnapshot
@@ -1603,7 +1836,7 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, conversation.floor.changed, project.changed, task.changed, task.initiative.updated, task.progress.updated, focus.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
+          enum: [conversation.turn, conversation.floor.changed, project.changed, task.changed, task.initiative.updated, task.progress.updated, focus.updated, personal.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
         payload: { type: object }
         created_at: { type: string, format: date-time }
     Project:
@@ -1695,6 +1928,76 @@ components:
         artifacts: { type: array, items: { type: object } }
         approvals: { type: array, items: { type: object } }
         activity: { type: array, items: { type: object } }
+    PersonalCapture:
+      type: object
+      required: [id, owner_id, source, source_id, raw_content, display_text, status, created_at, expires_at, audit_id]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        source: { type: string }
+        source_id: { type: string }
+        raw_content: { type: string }
+        display_text: { type: string }
+        structured_content: { type: [object, "null"] }
+        status: { type: string, enum: [received, reviewing, approved, rejected, snoozed, discarded] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        audit_id: { type: string }
+    PersonalProposal:
+      type: object
+      required: [id, owner_id, capture_id, title, category, confidence, suggested_next_action, rationale, evidence_capture_ids, status, created_at, expires_at, audit_id]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        capture_id: { type: string, format: uuid }
+        title: { type: string }
+        category: { type: string, enum: [task, appointment, worry, idea, note] }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        details: { type: [string, "null"] }
+        suggested_next_action: { type: string }
+        rationale: { type: string }
+        evidence_capture_ids:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items: { type: string, format: uuid }
+        status: { type: string, enum: [reviewing, approved, rejected, snoozed, discarded] }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        audit_id: { type: string }
+    PersonalDecision:
+      type: object
+      additionalProperties: false
+      required: [status, audit_id]
+      properties:
+        status: { type: string, enum: [rejected, snoozed, discarded] }
+        audit_id: { type: string, minLength: 1 }
+    PersonalFocusReset:
+      type: object
+      required: [priorities, message]
+      properties:
+        active_session: { oneOf: [{ $ref: "#/components/schemas/FocusSession" }, { type: "null" }] }
+        interrupted_session: { oneOf: [{ $ref: "#/components/schemas/FocusSession" }, { type: "null" }] }
+        priorities:
+          type: array
+          maxItems: 3
+          items: { $ref: "#/components/schemas/FocusPriority" }
+        recommendation: { oneOf: [{ $ref: "#/components/schemas/FocusPriority" }, { type: "null" }] }
+        first_physical_action: { type: [string, "null"] }
+        five_minute_version: { type: [string, "null"] }
+        optional_question: { type: [string, "null"] }
+        message: { type: string }
+    FieldyTranscriptEvent:
+      type: object
+      required: [event_id, occurred_at, transcript, speakers, metadata]
+      properties:
+        event_id: { type: string, minLength: 1 }
+        occurred_at: { type: string, format: date-time }
+        transcript: { type: string, minLength: 1, maxLength: 100000 }
+        recording_id: { type: [string, "null"] }
+        session_id: { type: [string, "null"] }
+        speakers: { type: array, items: { type: object } }
+        metadata: { type: object }
     FocusSession:
       type: object
       required: [id, owner_id, task_id, mode, planned_minutes, status, next_action, started_at, updated_at]

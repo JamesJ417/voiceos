@@ -21,8 +21,8 @@ pub use engine::{
     MemoryExtractor, OwnerTurnInput, Summarizer,
 };
 pub use fieldy::{
-    FieldyTranscriptEvent, FieldyTranscriptIntake, FieldyWebhookError, FieldyWebhookStore,
-    MAX_FIELDY_BODY_BYTES, verify_fieldy_signature,
+    DEFAULT_FIELDY_RETENTION_DAYS, FieldyTranscriptEvent, FieldyTranscriptIntake,
+    FieldyWebhookError, FieldyWebhookStore, MAX_FIELDY_BODY_BYTES, verify_fieldy_signature,
 };
 pub use integrity::{
     ContextClaim, ContextSource, IntegrityReport, QuarantinedClaim, validate_context,
@@ -34,12 +34,13 @@ pub use model::{
     JobRecord, LiveMemoryChange, Memory, NewCaptureProposal, NewOutreachDelivery,
     NewOutreachProposal, NewPersonalCapture, NewProactiveCandidate, NewProactiveFeedback,
     NewProactiveSubscription, OutreachDelivery, OutreachPolicy, OutreachProposal, OutreachRecord,
-    PersonalCapture, ProactiveCandidate, ProactiveDraftingContract, ProactiveDraftingInput,
+    PersonalCapture, PersonalExtractionContract, PersonalExtractionInput, PersonalFocusReset,
+    PersonalReviewRecord, ProactiveCandidate, ProactiveDraftingContract, ProactiveDraftingInput,
     ProactiveFeedback, ProactiveSubscription, ProjectRecord, ProviderCompletion, ProviderRequest,
     ProviderRunMetric, QuarantineRecord, ReviewDecision, Role, SkillProposal, SkillUsage,
-    SleepCycleChange, SleepCycleRecord, SleepCycleReport, TaskArtifactRecord, TaskBlockerRecord,
-    TaskDetail, TaskHandoffRecord, TaskInitiative, TaskProgress, TaskRecord, TaskStepRecord,
-    ToolCall, ToolDefinition, Usage,
+    SleepCycleChange, SleepCycleRecord, SleepCycleReport, TaskApprovalStatus, TaskArtifactRecord,
+    TaskBlockerRecord, TaskDetail, TaskHandoffRecord, TaskInitiative, TaskProgress, TaskRecord,
+    TaskStepRecord, ToolCall, ToolDefinition, Usage,
 };
 pub use provider::{
     CodexBridgeProvider, MockProvider, OllamaProvider, Provider, ProviderError, ProviderRouter,

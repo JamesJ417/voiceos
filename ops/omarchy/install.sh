@@ -2,17 +2,23 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [--enable] [--repo /absolute/path/to/voiceos]" >&2
+  echo "Usage: $0 [--enable] [--repo /absolute/path/to/voiceos] [--profile name]" >&2
 }
 
 enable=0
 repo_root=""
+profile_name=""
 while (($#)); do
   case "$1" in
     --enable) enable=1; shift ;;
     --repo)
       [[ $# -ge 2 ]] || { usage; exit 2; }
       repo_root="$2"
+      shift 2
+      ;;
+    --profile)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      profile_name="$2"
       shift 2
       ;;
     *) usage; exit 2 ;;
@@ -31,6 +37,45 @@ fi
 if [[ "$repo_root" == *'|'* || "$repo_root" == *$'\n'* ]]; then
   echo "Repository path cannot contain a pipe or newline." >&2
   exit 2
+fi
+
+profile_dir=""
+if [[ -n "$profile_name" ]]; then
+  if [[ ! "$profile_name" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+    echo "Profile names may contain only lowercase letters, numbers, and hyphens." >&2
+    exit 2
+  fi
+  profile_dir="$script_dir/profiles/$profile_name"
+  for profile_file in gateway.env.example core.env.example ui-build.env deployment-context.md SOUL.md AGENTS.md; do
+    if [[ ! -f "$profile_dir/$profile_file" ]]; then
+      echo "Incomplete VoiceOS profile: missing $profile_dir/$profile_file" >&2
+      exit 2
+    fi
+  done
+fi
+
+load_profile_build_environment() {
+  local environment_path="$1"
+  local line
+  local key
+  local value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    if [[ "$line" != *=* ]]; then
+      echo "Invalid profile build environment line: $line" >&2
+      exit 2
+    fi
+    key="${line%%=*}"
+    value="${line#*=}"
+    if [[ ! "$key" =~ ^NEXT_PUBLIC_[A-Z0-9_]+$ ]]; then
+      echo "Profile build environment key is not allowed: $key" >&2
+      exit 2
+    fi
+    export "$key=$value"
+  done <"$environment_path"
+}
+if [[ -n "$profile_dir" ]]; then
+  load_profile_build_environment "$profile_dir/ui-build.env"
 fi
 
 python_bin="$(command -v python3 || true)"
@@ -85,7 +130,7 @@ fi
 if [[ ! -d "$repo_root/apps/kiosk/node_modules" ]]; then
   "$npm_bin" ci --prefix "$repo_root/apps/kiosk"
 fi
-if [[ ! -d "$repo_root/apps/kiosk/dist" ]]; then
+if [[ -n "$profile_dir" || ! -d "$repo_root/apps/kiosk/dist" ]]; then
   "$npm_bin" run build --prefix "$repo_root/apps/kiosk"
 fi
 
@@ -96,7 +141,48 @@ bin_dir="${XDG_BIN_HOME:-$HOME/.local/bin}"
 
 install -d -m 0700 "$config_dir" "$state_dir"
 install -d -m 0755 "$unit_dir" "$bin_dir"
-if [[ ! -f "$config_dir/gateway.env" ]]; then
+profile_conflicts=0
+install_profile_candidate() {
+  local source_path="$1"
+  local target_path="$2"
+  local mode="$3"
+  local accepted_marker="${4:-}"
+  local rendered_path
+  local proposed_path
+  rendered_path="$(mktemp)"
+  sed -e "s|%h|$HOME|g" -e "s|%t|${XDG_RUNTIME_DIR:-/run/user/$(id -u)}|g" \
+    "$source_path" >"$rendered_path"
+  if [[ ! -e "$target_path" ]]; then
+    install -m "$mode" "$rendered_path" "$target_path"
+  elif cmp --silent "$rendered_path" "$target_path"; then
+    :
+  elif [[ -n "$accepted_marker" ]] && grep --fixed-strings --quiet "$accepted_marker" "$target_path"; then
+    echo "Existing VIC-DOM profile content accepted: $target_path"
+  else
+    proposed_path="$target_path.$profile_name.proposed"
+    install -m "$mode" "$rendered_path" "$proposed_path"
+    echo "Existing file preserved: $target_path" >&2
+    echo "Review proposed VIC-DOM file: $proposed_path" >&2
+    profile_conflicts=1
+  fi
+  rm -f -- "$rendered_path"
+}
+
+if [[ -n "$profile_dir" ]]; then
+  hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+  install -d -m 0700 "$hermes_home"
+  install -d -m 0755 "$hermes_home/workspace"
+  install_profile_candidate "$profile_dir/gateway.env.example" "$config_dir/gateway.env" 0600
+  install_profile_candidate "$profile_dir/core.env.example" "$config_dir/core.env" 0600
+  install_profile_candidate "$profile_dir/deployment-context.md" "$config_dir/deployment-context.md" 0600
+  install_profile_candidate "$profile_dir/SOUL.md" "$hermes_home/SOUL.md" 0600 "# VIC for DOM"
+  install_profile_candidate "$profile_dir/AGENTS.md" "$hermes_home/workspace/AGENTS.md" 0600 "# VIC-DOM Hermes workspace"
+  if ((profile_conflicts)); then
+    echo "VIC-DOM was not enabled because existing configuration needs review." >&2
+    echo "No existing file was overwritten. Re-run after resolving the proposed files." >&2
+    exit 3
+  fi
+elif [[ ! -f "$config_dir/gateway.env" ]]; then
   sed -e "s|%h|$HOME|g" -e "s|%t|${XDG_RUNTIME_DIR:-/run/user/$(id -u)}|g" \
     "$script_dir/gateway.env.example" >"$config_dir/gateway.env"
   chmod 0600 "$config_dir/gateway.env"

@@ -81,9 +81,13 @@ data class SkillUsage(
 
 data class VoiceTask(
     val id: String,
+    val projectId: String? = null,
+    val parentTaskId: String? = null,
     val title: String,
     val observableOutcome: String,
     val estimatedMinutes: Int,
+    val dueAt: String? = null,
+    val importance: String = "normal",
     val status: String,
     val updatedAt: String,
     val vicInitiativeStatus: String = "",
@@ -102,6 +106,13 @@ data class VoiceTask(
 
 data class VoiceTaskStep(val title: String, val owner: String, val status: String)
 data class VoiceTaskArtifact(val kind: String, val uri: String, val description: String)
+
+data class VoiceProject(
+    val id: String,
+    val title: String,
+    val status: String,
+    val updatedAt: String,
+)
 
 data class ClientEvent(val id: Long, val type: String, val payload: JSONObject)
 
@@ -138,6 +149,18 @@ class EventSubscription internal constructor(
 }
 
 object GatewayClient {
+    fun getLatestEventCursor(
+        baseUrl: String,
+        deviceToken: String?,
+        callback: (Result<Long>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection { getLatestEventCursorBlocking(baseUrl, deviceToken) }
+            })
+        }, "voiceos-event-cursor").start()
+    }
+
     fun changeConversationFloor(
         baseUrl: String,
         action: String,
@@ -248,11 +271,39 @@ object GatewayClient {
         }, "voiceos-task-list").start()
     }
 
+    fun getProjects(
+        baseUrl: String,
+        deviceToken: String?,
+        callback: (Result<List<VoiceProject>>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection { getProjectsBlocking(baseUrl, deviceToken) }
+            })
+        }, "voiceos-project-list").start()
+    }
+
+    fun createProject(
+        baseUrl: String,
+        title: String,
+        deviceToken: String?,
+        callback: (Result<VoiceProject>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection { createProjectBlocking(baseUrl, title, deviceToken) }
+            })
+        }, "voiceos-project-create").start()
+    }
+
     fun createTask(
         baseUrl: String,
         title: String,
         observableOutcome: String,
         estimatedMinutes: Int,
+        projectId: String?,
+        dueAt: String?,
+        importance: String,
         deviceToken: String?,
         callback: (Result<VoiceTask>) -> Unit,
     ) {
@@ -264,6 +315,9 @@ object GatewayClient {
                         title,
                         observableOutcome,
                         estimatedMinutes,
+                        projectId,
+                        dueAt,
+                        importance,
                         deviceToken,
                     )
                 }
@@ -283,6 +337,35 @@ object GatewayClient {
                 retryConnection { updateTaskStatusBlocking(baseUrl, taskId, status, deviceToken) }
             })
         }, "voiceos-task-status").start()
+    }
+
+    fun recordTaskProgress(
+        baseUrl: String,
+        taskId: String,
+        summary: String,
+        deviceToken: String?,
+        callback: (Result<Unit>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection { recordTaskProgressBlocking(baseUrl, taskId, summary, deviceToken) }
+            })
+        }, "voiceos-task-progress").start()
+    }
+
+    fun setTaskAttention(
+        baseUrl: String,
+        taskId: String,
+        importance: String,
+        dueAt: String?,
+        deviceToken: String?,
+        callback: (Result<VoiceTask>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection { setTaskAttentionBlocking(baseUrl, taskId, importance, dueAt, deviceToken) }
+            })
+        }, "voiceos-task-attention").start()
     }
 
     fun submitText(
@@ -474,13 +557,24 @@ object GatewayClient {
         }
     }
 
+    private fun getLatestEventCursorBlocking(baseUrl: String, deviceToken: String?): Long {
+        val connection = URL("$baseUrl/v1/events/recovery?after=0&tail=true")
+            .openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            return responseJson(connection).optLong("latest_event_id", 0L).coerceAtLeast(0L)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun getTasksBlocking(
         baseUrl: String,
         deviceToken: String?,
         limit: Int,
     ): List<VoiceTask> {
         val safeLimit = limit.coerceIn(1, 200)
-        val connection = URL("$baseUrl/v1/tasks?limit=$safeLimit").openConnection() as HttpURLConnection
+        val connection = URL("$baseUrl/v1/tasks?include_completed=true&limit=$safeLimit").openConnection() as HttpURLConnection
         try {
             configure(connection, deviceToken)
             val response = responseJson(connection)
@@ -504,17 +598,67 @@ object GatewayClient {
         }
     }
 
+    private fun getProjectsBlocking(
+        baseUrl: String,
+        deviceToken: String?,
+    ): List<VoiceProject> {
+        val connection = URL("$baseUrl/v1/projects?limit=100").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken)
+            val projects = responseJson(connection).getJSONArray("projects")
+            return buildList {
+                for (index in 0 until projects.length()) {
+                    val project = projects.getJSONObject(index)
+                    add(parseProject(project))
+                }
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun createProjectBlocking(
+        baseUrl: String,
+        title: String,
+        deviceToken: String?,
+    ): VoiceProject {
+        val request = JSONObject()
+            .put("title", title.trim())
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val connection = URL("$baseUrl/v1/projects").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, request)
+            return parseProject(responseJson(connection).getJSONObject("project"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun parseProject(payload: JSONObject) = VoiceProject(
+        id = payload.getString("id"),
+        title = payload.getString("title"),
+        status = payload.optString("status", "active"),
+        updatedAt = payload.optString("updated_at"),
+    )
+
     private fun createTaskBlocking(
         baseUrl: String,
         title: String,
         observableOutcome: String,
         estimatedMinutes: Int,
+        projectId: String?,
+        dueAt: String?,
+        importance: String,
         deviceToken: String?,
     ): VoiceTask {
         val request = JSONObject()
             .put("title", title.trim())
             .put("observable_outcome", observableOutcome.trim())
             .put("estimated_minutes", estimatedMinutes.coerceIn(1, 1440))
+            .put("project_id", projectId ?: JSONObject.NULL)
+            .put("due_at", dueAt ?: JSONObject.NULL)
+            .put("importance", importance.takeIf { it in setOf("low", "normal", "high", "critical") } ?: "normal")
             .toString()
             .toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/tasks").openConnection() as HttpURLConnection
@@ -551,6 +695,50 @@ object GatewayClient {
         }
     }
 
+    private fun recordTaskProgressBlocking(
+        baseUrl: String,
+        taskId: String,
+        summary: String,
+        deviceToken: String?,
+    ) {
+        val encodedId = URLEncoder.encode(taskId, Charsets.UTF_8.name())
+        val request = JSONObject()
+            .put("action", "progress.record")
+            .put("summary", summary.trim())
+            .put("evidence", JSONObject().put("source", "ov_brain_dump"))
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val connection = URL("$baseUrl/v1/tasks/$encodedId/actions").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, request)
+            responseJson(connection)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun setTaskAttentionBlocking(
+        baseUrl: String,
+        taskId: String,
+        importance: String,
+        dueAt: String?,
+        deviceToken: String?,
+    ): VoiceTask {
+        val encodedId = URLEncoder.encode(taskId, Charsets.UTF_8.name())
+        val request = JSONObject()
+            .put("importance", importance.takeIf { it in setOf("high", "normal", "low") } ?: "normal")
+            .put("due_at", dueAt ?: JSONObject.NULL)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+        val connection = URL("$baseUrl/v1/tasks/$encodedId/attention").openConnection() as HttpURLConnection
+        try {
+            configure(connection, deviceToken, request)
+            return parseTask(responseJson(connection).getJSONObject("task"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun parseTask(
         payload: JSONObject,
         initiative: JSONObject? = null,
@@ -562,9 +750,13 @@ object GatewayClient {
         val artifacts = detail?.optJSONArray("artifacts")
         return VoiceTask(
         id = payload.getString("id"),
+        projectId = payload.optString("project_id").takeIf { it.isNotBlank() && it != "null" },
+        parentTaskId = payload.optString("parent_task_id").takeIf { it.isNotBlank() && it != "null" },
         title = payload.getString("title"),
         observableOutcome = payload.optString("observable_outcome"),
         estimatedMinutes = payload.optInt("estimated_minutes", 20),
+        dueAt = payload.optString("due_at").takeIf { it.isNotBlank() && it != "null" },
+        importance = payload.optString("importance", "normal"),
         status = payload.optString("status", "ready"),
         updatedAt = payload.optString("updated_at"),
         vicInitiativeStatus = initiative?.optString("status")

@@ -99,6 +99,18 @@ Touch status instead of a repeated spoken holding message. Ordinary chat
 uses the low-latency Luna model, and VIC synthesizes Ava Neural speech
 one sentence ahead so long answers begin playing sooner.
 
+The same voice path recognizes `Capture this …`, `What should I do next?`,
+`Help me get unstuck`, and `I'm interrupted`. Touch's **Reset** workspace lists
+temporary captures, asks Hermes for bounded review suggestions, and requires a
+separate touch approval before a task or private review record is created.
+
+Optional Fieldy intake is disabled until `VOICEOS_FIELDY_WEBHOOK_SECRET` is set
+in `~/.config/voiceos/gateway.env`. Configure Fieldy to send transcript events
+to `/v1/integrations/fieldy/transcripts?token=<secret>`. The token is compared
+in constant time and redacted from gateway logs before the documented Fieldy
+payload is normalized and passed to the loopback-only Rust authority. Signed
+clients may instead use `X-Fieldy-Signature: sha256=<HMAC-SHA256 hex>`.
+
 Touch also renders Hermes activity as a safe live progress trace. It shows
 reasoning phases, animated tool execution, and delegated worker state without
 exposing private chain-of-thought or sensitive tool output.

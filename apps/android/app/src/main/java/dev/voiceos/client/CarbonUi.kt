@@ -91,15 +91,22 @@ class CarbonBackgroundDrawable(context: Context) : Drawable() {
 }
 
 class HexMarkView(context: Context) : View(context) {
+    private val density = resources.displayMetrics.density
     private val outer = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = CarbonPalette.teal
         style = Paint.Style.STROKE
-        strokeWidth = resources.displayMetrics.density * 2f
+        strokeWidth = density * 2f
     }
     private val inner = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(120, 53, 224, 193)
         style = Paint.Style.STROKE
-        strokeWidth = resources.displayMetrics.density
+        strokeWidth = density
+    }
+    private val letters = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = CarbonPalette.teal
+        textAlign = Paint.Align.CENTER
+        textSize = density * 9f
+        typeface = Typeface.DEFAULT_BOLD
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -107,6 +114,8 @@ class HexMarkView(context: Context) : View(context) {
         val radius = minOf(width, height) * 0.42f
         drawHex(canvas, width / 2f, height / 2f, radius, outer)
         drawHex(canvas, width / 2f, height / 2f, radius * 0.68f, inner)
+        val centerY = height / 2f - (letters.descent() + letters.ascent()) / 2f
+        canvas.drawText("OV", width / 2f, centerY, letters)
     }
 }
 
