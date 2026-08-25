@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly endpoint="${VOICEOS_SLEEP_CYCLE_URL:-http://127.0.0.1:8790/v1/memory/sleep-cycles}"
+readonly time_zone="${VOICEOS_TIME_ZONE:-America/New_York}"
+readonly state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/voiceos/sleep-cycles"
+cycle_date="$(TZ="$time_zone" date +%F)"
+idempotency_key="good-night-$cycle_date"
+
+install -d -m 0700 "$state_dir"
+response_file="$state_dir/$cycle_date.json"
+temporary_file="$state_dir/.$cycle_date.json.tmp"
+request_body="$(printf '{"idempotency_key":"%s"}' "$idempotency_key")"
+
+curl --fail --silent --show-error \
+  --connect-timeout 5 \
+  --max-time 60 \
+  --header 'content-type: application/json' \
+  --data "$request_body" \
+  "$endpoint" >"$temporary_file"
+mv "$temporary_file" "$response_file"
+chmod 0600 "$response_file"
+printf 'VIC sleep-cycle report saved to %s\n' "$response_file"

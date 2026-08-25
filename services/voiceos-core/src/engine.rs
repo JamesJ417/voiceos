@@ -212,6 +212,36 @@ impl ConversationEngine {
         Ok((conversation_id, completion))
     }
 
+    pub fn run_owner_turn_idempotent_with_attachments(
+        &self,
+        input: OwnerTurnInput<'_>,
+        provider: &dyn Provider,
+        attachment_ids: &[String],
+    ) -> Result<(String, ProviderCompletion), EngineError> {
+        let (conversation_id, context) = self.prepare_owner_turn_with_attachments(
+            input.owner_id,
+            input.device_id,
+            input.client_session_id,
+            input.user_text,
+            input.request_id,
+            attachment_ids,
+        )?;
+        let messages = self.provider_messages(context)?;
+        let completion = provider.complete(&ProviderRequest {
+            conversation_id: conversation_id.clone(),
+            messages,
+            tools: input.tools,
+        })?;
+        self.record_assistant_from(
+            &conversation_id,
+            &completion.text,
+            &completion.provider,
+            input.device_id,
+            input.request_id,
+        )?;
+        Ok((conversation_id, completion))
+    }
+
     pub fn prepare_turn(
         &self,
         device_id: &str,
@@ -276,6 +306,38 @@ impl ConversationEngine {
             attachment_ids,
         )?;
         self.roll_summary(owner_id, &conversation_id)?;
+        let context = self.store.context_for_owner(
+            owner_id,
+            &conversation_id,
+            user_text,
+            self.config.recent_message_limit,
+            self.config.memory_limit,
+        )?;
+        Ok((conversation_id, context))
+    }
+
+    pub fn prepare_owner_turn_with_attachments(
+        &self,
+        owner_id: &str,
+        device_id: &str,
+        client_session_id: Option<&str>,
+        user_text: &str,
+        request_id: Option<&str>,
+        attachment_ids: &[String],
+    ) -> Result<(String, crate::ConversationContext), StoreError> {
+        for memory in self.memory_extractor.extract(user_text) {
+            self.store
+                .remember_for_owner(owner_id, device_id, &memory, "explicit-user-request")?;
+        }
+        let conversation_id = self.store.append_owner_user_message_with_attachments(
+            owner_id,
+            device_id,
+            client_session_id,
+            user_text,
+            request_id,
+            attachment_ids,
+        )?;
+        self.roll_summary(&conversation_id)?;
         let context = self.store.context_for_owner(
             owner_id,
             &conversation_id,
