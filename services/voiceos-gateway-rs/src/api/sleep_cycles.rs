@@ -18,6 +18,12 @@ pub(crate) struct StartSleepCycleRequest {
     idempotency_key: String,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct CommitProposalsRequest {
+    idempotency_key: String,
+    change_ids: Vec<String>,
+}
+
 pub(crate) async fn list(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -63,6 +69,30 @@ pub(crate) async fn start(
     let store = state.store.clone();
     let cycle = tokio::task::spawn_blocking(move || {
         store.create_dry_run_sleep_cycle(&owner_id, &request.idempotency_key)
+    })
+    .await
+    .map_err(internal_join)?
+    .map_err(store_error)?;
+    Ok((StatusCode::CREATED, Json(json!({"sleep_cycle": cycle}))))
+}
+
+pub(crate) async fn commit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(sleep_cycle_id): Path<String>,
+    Json(request): Json<CommitProposalsRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let device_id = authenticate(&state, &headers)?;
+    let owner_id = state.primary_owner_id.clone();
+    let store = state.store.clone();
+    let cycle = tokio::task::spawn_blocking(move || {
+        store.commit_sleep_cycle_proposals(
+            &owner_id,
+            &sleep_cycle_id,
+            &request.idempotency_key,
+            &device_id,
+            &request.change_ids,
+        )
     })
     .await
     .map_err(internal_join)?

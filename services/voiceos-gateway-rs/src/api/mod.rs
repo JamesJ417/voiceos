@@ -55,6 +55,10 @@ pub(crate) fn router(state: AppState) -> Router {
             get(sleep_cycles::detail),
         )
         .route(
+            "/v1/memory/sleep-cycles/{sleep_cycle_id}/commit",
+            post(sleep_cycles::commit),
+        )
+        .route(
             "/v1/skills/usages/{usage_id}/feedback",
             post(skills::review_usage),
         )

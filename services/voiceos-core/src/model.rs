@@ -54,6 +54,29 @@ pub struct SleepCycleRecord {
     pub completed_at: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveMemoryChange {
+    pub content: String,
+    pub source: String,
+    pub evidence: serde_json::Value,
+}
+
+impl LiveMemoryChange {
+    pub fn add(content: impl Into<String>, source: impl Into<String>) -> Self {
+        let source = source.into();
+        Self {
+            content: content.into(),
+            evidence: serde_json::json!([{ "source": source.clone() }]),
+            source,
+        }
+    }
+
+    pub fn with_evidence(mut self, evidence: serde_json::Value) -> Self {
+        self.evidence = evidence;
+        self
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SleepCycleChange {
     pub id: String,

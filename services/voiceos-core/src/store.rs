@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -27,6 +27,44 @@ pub struct ConversationStore {
 }
 
 impl ConversationStore {
+    pub(crate) fn insert_structured_memory(
+        transaction: &Transaction<'_>,
+        owner_id: &str,
+        device_id: &str,
+        content: &str,
+        category: &str,
+        source: &str,
+        confidence: f64,
+        provenance: &str,
+    ) -> Result<String, StoreError> {
+        let content = content.trim();
+        if content.is_empty() || content.chars().count() > 500 {
+            return Err(StoreError::InvalidInput(
+                "memory content must contain 1 to 500 characters".to_owned(),
+            ));
+        }
+        if !matches!(
+            category,
+            "general" | "identity" | "preference" | "person" | "project" | "routine" | "sensitive"
+        ) {
+            return Err(StoreError::InvalidInput(
+                "invalid memory category".to_owned(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&confidence) || provenance.trim().is_empty() {
+            return Err(StoreError::InvalidInput(
+                "memory confidence or provenance is invalid".to_owned(),
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        transaction.execute(
+            "INSERT INTO memories(memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,category,status,confidence,provenance) VALUES(?1,?2,?3,?4,?5,?6,?6,?7,?8,'active',?9,?10)",
+            params![id, device_id, normalize(content), content, source.trim(), now, owner_id, category, confidence, provenance.trim()],
+        )?;
+        Ok(id)
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
@@ -510,17 +548,26 @@ impl ConversationStore {
             return Ok(());
         }
         let now = Utc::now().to_rfc3339();
-        self.connection()?.execute(
-            "INSERT INTO memories(memory_id, device_id, normalized_content, content, source, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?6) ON CONFLICT(device_id, normalized_content) DO UPDATE SET content=excluded.content, source=excluded.source, updated_at=excluded.updated_at",
-            params![Uuid::new_v4().to_string(), device_id, normalized, content.trim(), source, now],
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE memories SET content=?1,source=?2,updated_at=?3 WHERE device_id=?4 AND normalized_content=?5 AND status='active'",
+            params![content.trim(), source, now, device_id, normalized],
         )?;
+        if changed == 0 {
+            transaction.execute(
+                "INSERT INTO memories(memory_id,device_id,normalized_content,content,source,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?6)",
+                params![Uuid::new_v4().to_string(), device_id, normalized, content.trim(), source, now],
+            )?;
+        }
+        transaction.commit()?;
         Ok(())
     }
 
     pub fn memories(&self, device_id: &str, limit: usize) -> Result<Vec<Memory>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT memory_id, content, source, created_at FROM memories WHERE device_id=?1 ORDER BY updated_at DESC LIMIT ?2",
+            "SELECT memory_id, content, source, created_at FROM memories WHERE device_id=?1 AND status='active' ORDER BY updated_at DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![device_id, limit as i64], |row| {
             Ok(Memory {
@@ -555,7 +602,7 @@ impl ConversationStore {
     ) -> Result<Vec<Memory>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT memory_id, content, source, created_at FROM memories WHERE owner_id=?1 ORDER BY updated_at DESC LIMIT ?2",
+            "SELECT memory_id, content, source, created_at FROM memories WHERE owner_id=?1 AND status='active' ORDER BY updated_at DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![owner_id, limit as i64], |row| {
             Ok(Memory {

@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
@@ -54,7 +54,6 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             source TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            UNIQUE(device_id, normalized_content),
             FOREIGN KEY(device_id) REFERENCES devices(device_id)
         );
         CREATE TABLE IF NOT EXISTS legacy_imports (
@@ -383,7 +382,7 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             sleep_cycle_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,
             idempotency_key TEXT NOT NULL,
-            mode TEXT NOT NULL DEFAULT 'dry_run' CHECK(mode = 'dry_run'),
+            mode TEXT NOT NULL DEFAULT 'dry_run' CHECK(mode IN ('dry_run', 'commit')),
             status TEXT NOT NULL DEFAULT 'completed' CHECK(status IN ('running', 'completed', 'failed')),
             previous_cycle_id TEXT,
             event_watermark INTEGER NOT NULL DEFAULT 0,
@@ -424,6 +423,33 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     add_column(connection, "messages", "origin_device_id", "TEXT")?;
     add_column(connection, "messages", "request_id", "TEXT")?;
     add_column(connection, "memories", "owner_id", "TEXT")?;
+    add_column(connection, "memories", "conversation_id", "TEXT")?;
+    add_column(
+        connection,
+        "memories",
+        "category",
+        "TEXT NOT NULL DEFAULT 'general'",
+    )?;
+    add_column(
+        connection,
+        "memories",
+        "status",
+        "TEXT NOT NULL DEFAULT 'active'",
+    )?;
+    add_column(
+        connection,
+        "memories",
+        "confidence",
+        "REAL NOT NULL DEFAULT 1.0",
+    )?;
+    add_column(
+        connection,
+        "memories",
+        "provenance",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(connection, "memories", "supersedes_memory_id", "TEXT")?;
+    migrate_memory_lifecycle_constraint(connection)?;
     add_column(connection, "documents", "owner_id", "TEXT")?;
     add_column(
         connection,
@@ -505,6 +531,8 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS messages_conversation_request_idx
             ON messages(conversation_id, request_id) WHERE request_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS memories_owner_idx ON memories(owner_id, updated_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS active_memory_owner_content_idx ON memories(owner_id, normalized_content) WHERE owner_id IS NOT NULL AND status='active';
+        CREATE UNIQUE INDEX IF NOT EXISTS active_memory_device_content_idx ON memories(device_id, normalized_content) WHERE owner_id IS NULL AND status='active';
         CREATE INDEX IF NOT EXISTS documents_owner_idx ON documents(owner_id, created_at);
         "#,
     )?;
@@ -536,7 +564,99 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         ON CONFLICT(owner_id) DO NOTHING;
         "#,
     )?;
+    migrate_sleep_cycle_mode_constraint(connection)?;
+    add_column(
+        connection,
+        "sleep_cycles",
+        "input_digest",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     Ok(())
+}
+
+fn migrate_sleep_cycle_mode_constraint(connection: &Connection) -> rusqlite::Result<()> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='sleep_cycles'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !sql
+        .as_deref()
+        .is_some_and(|value| value.contains("mode = 'dry_run'"))
+    {
+        return Ok(());
+    }
+    rebuild_table_without_foreign_keys(
+        connection,
+        "BEGIN;
+         CREATE TABLE sleep_cycles_rebuilt (
+           sleep_cycle_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+           mode TEXT NOT NULL DEFAULT 'dry_run' CHECK(mode IN ('dry_run', 'commit')),
+           status TEXT NOT NULL DEFAULT 'completed' CHECK(status IN ('running', 'completed', 'failed')),
+           previous_cycle_id TEXT, event_watermark INTEGER NOT NULL DEFAULT 0,
+           message_watermark INTEGER NOT NULL DEFAULT 0, events_inspected INTEGER NOT NULL DEFAULT 0,
+           messages_inspected INTEGER NOT NULL DEFAULT 0, memories_before INTEGER NOT NULL DEFAULT 0,
+           memories_after INTEGER NOT NULL DEFAULT 0, proposed_changes INTEGER NOT NULL DEFAULT 0,
+           committed_changes INTEGER NOT NULL DEFAULT 0, summary TEXT NOT NULL DEFAULT '',
+           created_at TEXT NOT NULL, completed_at TEXT,
+           FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+           FOREIGN KEY(previous_cycle_id) REFERENCES sleep_cycles(sleep_cycle_id),
+           UNIQUE(owner_id, idempotency_key)
+         );
+         INSERT INTO sleep_cycles_rebuilt SELECT sleep_cycle_id, owner_id, idempotency_key, mode, status, previous_cycle_id, event_watermark, message_watermark, events_inspected, messages_inspected, memories_before, memories_after, proposed_changes, committed_changes, summary, created_at, completed_at FROM sleep_cycles;
+         DROP TABLE sleep_cycles;
+         ALTER TABLE sleep_cycles_rebuilt RENAME TO sleep_cycles;
+         CREATE INDEX IF NOT EXISTS sleep_cycles_owner_created_idx ON sleep_cycles(owner_id, created_at DESC);
+         COMMIT;",
+    )
+}
+
+fn migrate_memory_lifecycle_constraint(connection: &Connection) -> rusqlite::Result<()> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if !sql
+        .as_deref()
+        .is_some_and(|value| value.contains("UNIQUE(device_id, normalized_content)"))
+    {
+        return Ok(());
+    }
+    rebuild_table_without_foreign_keys(
+        connection,
+        "BEGIN;
+         CREATE TABLE memories_rebuilt (
+           memory_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, normalized_content TEXT NOT NULL,
+           content TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+           owner_id TEXT, conversation_id TEXT, category TEXT NOT NULL DEFAULT 'general',
+           status TEXT NOT NULL DEFAULT 'active', confidence REAL NOT NULL DEFAULT 1.0,
+           provenance TEXT NOT NULL DEFAULT '', supersedes_memory_id TEXT,
+           FOREIGN KEY(device_id) REFERENCES devices(device_id));
+         INSERT INTO memories_rebuilt(memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,conversation_id,category,status,confidence,provenance,supersedes_memory_id)
+           SELECT memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,conversation_id,category,status,confidence,provenance,supersedes_memory_id FROM memories;
+         DROP TABLE memories;
+         ALTER TABLE memories_rebuilt RENAME TO memories;
+         COMMIT;",
+    )
+}
+
+fn rebuild_table_without_foreign_keys(
+    connection: &Connection,
+    statements: &str,
+) -> rusqlite::Result<()> {
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    let rebuild = connection.execute_batch(statements);
+    if rebuild.is_err() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
+    let restore = connection.pragma_update(None, "foreign_keys", "ON");
+    rebuild?;
+    restore
 }
 
 fn add_column(

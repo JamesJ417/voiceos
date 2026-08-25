@@ -17,8 +17,8 @@ pub use engine::{
 };
 pub use model::{
     ArtifactRecord, AutomationProposal, ChatMessage, ConversationContext, ConversationFloor,
-    ConversationMessage, DocumentRecord, ExecutionEvent, GoalRecord, JobRecord, Memory,
-    OutreachPolicy, OutreachRecord, ProjectRecord, ProviderCompletion, ProviderRequest,
+    ConversationMessage, DocumentRecord, ExecutionEvent, GoalRecord, JobRecord, LiveMemoryChange,
+    Memory, OutreachPolicy, OutreachRecord, ProjectRecord, ProviderCompletion, ProviderRequest,
     ProviderRunMetric, Role, SkillProposal, SkillUsage, SleepCycleChange, SleepCycleRecord,
     SleepCycleReport, TaskArtifactRecord, TaskBlockerRecord, TaskDetail, TaskHandoffRecord,
     TaskInitiative, TaskProgress, TaskRecord, TaskStepRecord, ToolCall, ToolDefinition, Usage,
