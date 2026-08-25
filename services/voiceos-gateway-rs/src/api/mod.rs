@@ -106,18 +106,6 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/uploads/{upload_id}/finalize", post(uploads::finalize))
         .route(
-            "/v1/memory/sleep-cycles",
-            get(sleep_cycles::list).post(sleep_cycles::start),
-        )
-        .route(
-            "/v1/memory/sleep-cycles/{sleep_cycle_id}",
-            get(sleep_cycles::detail),
-        )
-        .route(
-            "/v1/memory/sleep-cycles/{sleep_cycle_id}/commit",
-            post(sleep_cycles::commit),
-        )
-        .route(
             "/v1/skills/usages/{usage_id}/feedback",
             post(skills::review_usage),
         )
