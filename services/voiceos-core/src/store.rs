@@ -93,7 +93,7 @@ impl ConversationStore {
         Ok(store)
     }
 
-    pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
+    pub fn connection(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
         self.connection.lock().map_err(|_| StoreError::LockPoisoned)
     }
 

@@ -316,38 +316,6 @@ impl ConversationEngine {
         Ok((conversation_id, context))
     }
 
-    pub fn prepare_owner_turn_with_attachments(
-        &self,
-        owner_id: &str,
-        device_id: &str,
-        client_session_id: Option<&str>,
-        user_text: &str,
-        request_id: Option<&str>,
-        attachment_ids: &[String],
-    ) -> Result<(String, crate::ConversationContext), StoreError> {
-        for memory in self.memory_extractor.extract(user_text) {
-            self.store
-                .remember_for_owner(owner_id, device_id, &memory, "explicit-user-request")?;
-        }
-        let conversation_id = self.store.append_owner_user_message_with_attachments(
-            owner_id,
-            device_id,
-            client_session_id,
-            user_text,
-            request_id,
-            attachment_ids,
-        )?;
-        self.roll_summary(&conversation_id)?;
-        let context = self.store.context_for_owner(
-            owner_id,
-            &conversation_id,
-            user_text,
-            self.config.recent_message_limit,
-            self.config.memory_limit,
-        )?;
-        Ok((conversation_id, context))
-    }
-
     pub fn record_assistant(
         &self,
         conversation_id: &str,
