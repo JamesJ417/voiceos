@@ -59,6 +59,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var providerStatusView: TextView
     private lateinit var systemStatusView: TextView
     private lateinit var systemDetailView: TextView
+    private lateinit var agentSummaryView: TextView
+    private lateinit var agentActivityContainer: LinearLayout
+    private lateinit var agentWorkerStatusView: TextView
+    private lateinit var agentWorkerContainer: LinearLayout
     private lateinit var skillProposalStatusView: TextView
     private lateinit var skillProposalContainer: LinearLayout
     private lateinit var skillCatalogStatusView: TextView
@@ -121,6 +125,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var aiUpdatesRefreshing = false
     private var latestProjects: List<VoiceProject> = emptyList()
     private val weeklyCreationInFlight = mutableSetOf<String>()
+    private val agentVisibility = AgentVisibilityModel()
+    private var agentRecoveryInFlight = false
 
     private val conversationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -873,6 +879,47 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 addView(secondaryButton("SEND TEST VIC CHECK-IN") { sendTestVicCheckIn() }, fullWidthWrap().apply { topMargin = dp(12) })
             }, fullWidthWrap().apply { topMargin = dp(14) })
             addView(panel(17).apply {
+                addView(kicker("Live execution"), fullWidthWrap())
+                addView(heading("VIC agent", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                agentSummaryView = TextView(this@MainActivity).apply {
+                    text = "WAITING FOR LIVE ACTIVITY"
+                    textSize = 12f
+                    typeface = Typeface.DEFAULT_BOLD
+                    letterSpacing = 0.08f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(12), 0, 0)
+                }
+                addView(agentSummaryView, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "Safe execution status only. Private reasoning is never displayed."
+                    textSize = 12f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(7), 0, 0)
+                }, fullWidthWrap())
+                agentActivityContainer = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+                addView(agentActivityContainer, fullWidthWrap().apply { topMargin = dp(10) })
+                addView(secondaryButton("REFRESH AGENT ACTIVITY") { refreshAgentVisibility() }, fullWidthWrap().apply { topMargin = dp(14) })
+            }, fullWidthWrap().apply { topMargin = dp(14) })
+            addView(panel(17).apply {
+                addView(kicker("Delegated work"), fullWidthWrap())
+                addView(heading("Hermes subagents", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+                agentWorkerStatusView = TextView(this@MainActivity).apply {
+                    text = "NO SUBAGENTS OBSERVED"
+                    textSize = 12f
+                    typeface = Typeface.DEFAULT_BOLD
+                    letterSpacing = 0.08f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(12), 0, 0)
+                }
+                addView(agentWorkerStatusView, fullWidthWrap())
+                agentWorkerContainer = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                }
+                addView(agentWorkerContainer, fullWidthWrap().apply { topMargin = dp(10) })
+            }, fullWidthWrap().apply { topMargin = dp(14) })
+            addView(panel(17).apply {
                 addView(kicker("Reviewed self-improvement"), fullWidthWrap())
                 addView(heading("Skill proposals", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
                 skillProposalStatusView = TextView(this@MainActivity).apply {
@@ -1303,6 +1350,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             }
                             renderState(VoiceState.READY, "Task work $status")
                         }
+                        "agent.activity.updated", "agent.worker.updated" -> consumeAgentEvent(event)
                         "approval.proposed" -> {
                             pendingApproval = ApprovalRequest(
                                 requestId = event.payload.optString("request_id"),
@@ -1396,6 +1444,154 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun refreshAgentVisibility() {
+        if (!::agentSummaryView.isInitialized || agentRecoveryInFlight) return
+        val token = DeviceCredentials.token(this)
+        if (token.isNullOrBlank()) {
+            agentSummaryView.text = "PAIR THIS DEVICE TO VIEW LIVE ACTIVITY"
+            agentSummaryView.setTextColor(CarbonPalette.amber)
+            return
+        }
+        agentRecoveryInFlight = true
+        agentSummaryView.text = "SYNCING RECENT AGENT ACTIVITY"
+        agentSummaryView.setTextColor(CarbonPalette.amber)
+        GatewayClient.getRecentEvents(GatewaySettings.baseUrl(this), token) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                agentRecoveryInFlight = false
+                result.fold(
+                    onSuccess = { recovery ->
+                        recovery.events.forEach(::consumeAgentEvent)
+                        renderAgentVisibility()
+                    },
+                    onFailure = {
+                        renderAgentVisibility()
+                        if (agentVisibility.activities.isEmpty()) {
+                            agentSummaryView.text = "ACTIVITY HISTORY UNAVAILABLE • LIVE STREAM RETRYING"
+                            agentSummaryView.setTextColor(CarbonPalette.amber)
+                        }
+                    },
+                )
+            }
+        }
+    }
+
+    private fun consumeAgentEvent(event: ClientEvent) {
+        when (event.type) {
+            "agent.activity.updated" -> {
+                val phase = event.payload.optString("phase", "activity")
+                agentVisibility.updateActivity(
+                    AgentActivityItem(
+                        eventId = event.id,
+                        id = "${event.id}-$phase",
+                        phase = phase,
+                        label = event.payload.optString("label", "VIC is working").ifBlank { "VIC is working" },
+                        detail = event.payload.optString("detail").takeIf { it.isNotBlank() }?.take(500),
+                        sessionId = event.payload.optString("session_id").takeIf { it.isNotBlank() },
+                    )
+                )
+            }
+            "agent.worker.updated" -> {
+                agentVisibility.updateWorker(
+                    AgentWorkerItem(
+                        eventId = event.id,
+                        id = event.payload.optString("worker_id", event.id.toString()).ifBlank { event.id.toString() },
+                        status = event.payload.optString("status", "running").ifBlank { "running" },
+                        label = event.payload.optString("label", "Hermes background worker").ifBlank { "Hermes background worker" },
+                        detail = event.payload.optString("detail").takeIf { it.isNotBlank() }?.take(500),
+                        sessionId = event.payload.optString("session_id").takeIf { it.isNotBlank() },
+                    )
+                )
+            }
+            else -> return
+        }
+        renderAgentVisibility()
+    }
+
+    private fun renderAgentVisibility() {
+        if (!::agentActivityContainer.isInitialized || !::agentWorkerContainer.isInitialized) return
+        val activities = agentVisibility.activities
+        val workers = agentVisibility.workers
+        val runningWorkers = agentVisibility.runningWorkerCount()
+        val latest = activities.firstOrNull()
+
+        agentSummaryView.text = when {
+            runningWorkers > 0 -> "VIC WORKING • $runningWorkers HERMES ${if (runningWorkers == 1) "SUBAGENT" else "SUBAGENTS"} ACTIVE"
+            latest != null -> "LIVE FEED • ${latest.label.uppercase(Locale.US)}"
+            else -> "READY • WAITING FOR WORK"
+        }
+        agentSummaryView.setTextColor(if (latest != null || runningWorkers > 0) CarbonPalette.teal else CarbonPalette.muted)
+        agentActivityContainer.removeAllViews()
+        if (activities.isEmpty()) {
+            agentActivityContainer.addView(agentEventCard("READY", "No recent agent execution", "New work will appear here automatically.", CarbonPalette.muted))
+        } else {
+            activities.forEachIndexed { index, activity ->
+                agentActivityContainer.addView(
+                    agentEventCard(
+                        activity.phase.replace('.', ' ').uppercase(Locale.US),
+                        activity.label,
+                        activity.detail,
+                        CarbonPalette.teal,
+                    ),
+                    fullWidthWrap().apply { if (index > 0) topMargin = dp(7) },
+                )
+            }
+        }
+
+        agentWorkerStatusView.text = when {
+            runningWorkers > 0 -> "$runningWorkers ${if (runningWorkers == 1) "SUBAGENT" else "SUBAGENTS"} RUNNING"
+            workers.isNotEmpty() -> "${workers.size} RECENT ${if (workers.size == 1) "SUBAGENT" else "SUBAGENTS"}"
+            else -> "NO SUBAGENTS OBSERVED"
+        }
+        agentWorkerStatusView.setTextColor(if (runningWorkers > 0) CarbonPalette.amber else CarbonPalette.muted)
+        agentWorkerContainer.removeAllViews()
+        if (workers.isEmpty()) {
+            agentWorkerContainer.addView(agentEventCard("IDLE", "No delegated work", "Hermes workers will appear when VIC delegates a task.", CarbonPalette.muted))
+        } else {
+            workers.forEachIndexed { index, worker ->
+                val accent = when (worker.status.lowercase(Locale.US)) {
+                    "running" -> CarbonPalette.amber
+                    "completed" -> CarbonPalette.teal
+                    "failed" -> CarbonPalette.red
+                    else -> CarbonPalette.muted
+                }
+                agentWorkerContainer.addView(
+                    agentEventCard(worker.status.uppercase(Locale.US), worker.label, worker.detail, accent),
+                    fullWidthWrap().apply { if (index > 0) topMargin = dp(7) },
+                )
+            }
+        }
+    }
+
+    private fun agentEventCard(overline: String, title: String, detail: String?, accent: Int) =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(13), dp(12), dp(13), dp(12))
+            background = carbonControl(this@MainActivity, accent)
+            addView(TextView(this@MainActivity).apply {
+                text = overline
+                textSize = 9f
+                typeface = Typeface.DEFAULT_BOLD
+                letterSpacing = 0.12f
+                setTextColor(accent)
+            }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = title
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(CarbonPalette.white)
+                setPadding(0, dp(5), 0, 0)
+            }, fullWidthWrap())
+            detail?.takeIf { it.isNotBlank() }?.let { visibleDetail ->
+                addView(TextView(this@MainActivity).apply {
+                    text = visibleDetail
+                    textSize = 12f
+                    setTextColor(CarbonPalette.muted)
+                    setPadding(0, dp(5), 0, 0)
+                }, fullWidthWrap())
+            }
+        }
+
     private fun checkGatewayHealth(justEnrolled: Boolean) {
         val baseUrl = GatewaySettings.baseUrl(this)
         gatewayView.text = if (justEnrolled) "● ENROLLED" else "● CHECKING"
@@ -1457,6 +1653,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             credential.deviceToken,
                         )
                         startSharedEventStream()
+                        refreshAgentVisibility()
                         startVicOutreachConnection()
                         checkGatewayHealth(justEnrolled = true)
                     },
@@ -1823,6 +2020,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (page == AppPage.HISTORY) loadHistory()
         if (page == AppPage.SYSTEM) {
             checkGatewayHealth(justEnrolled = false)
+            refreshAgentVisibility()
             loadSkillProposals()
         }
     }

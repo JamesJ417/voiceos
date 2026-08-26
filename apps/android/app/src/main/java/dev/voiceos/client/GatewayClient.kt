@@ -117,6 +117,11 @@ data class VoiceProject(
 
 data class ClientEvent(val id: Long, val type: String, val payload: JSONObject)
 
+data class EventRecovery(
+    val latestEventId: Long,
+    val events: List<ClientEvent>,
+)
+
 data class ConversationFloor(
     val conversationId: String,
     val leaseId: String?,
@@ -161,6 +166,18 @@ class EventSubscription internal constructor(
 }
 
 object GatewayClient {
+    fun getRecentEvents(
+        baseUrl: String,
+        deviceToken: String?,
+        callback: (Result<EventRecovery>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection { getRecentEventsBlocking(baseUrl, deviceToken) }
+            })
+        }, "voiceos-event-recovery").start()
+    }
+
     fun getLatestEventCursor(
         baseUrl: String,
         deviceToken: String?,
@@ -568,6 +585,34 @@ object GatewayClient {
         try {
             GatewayHttp.configure(connection, deviceToken)
             return GatewayHttp.responseJson(connection).optLong("latest_event_id", 0L).coerceAtLeast(0L)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun getRecentEventsBlocking(baseUrl: String, deviceToken: String?): EventRecovery {
+        val connection = URL("$baseUrl/v1/events/recovery?after=0&tail=true")
+            .openConnection() as HttpURLConnection
+        try {
+            GatewayHttp.configure(connection, deviceToken)
+            val response = GatewayHttp.responseJson(connection)
+            val values = response.optJSONArray("events")
+            val events = buildList {
+                if (values != null) for (index in 0 until values.length()) {
+                    val event = values.optJSONObject(index) ?: continue
+                    add(
+                        ClientEvent(
+                            id = event.optLong("id", 0L),
+                            type = event.optString("type"),
+                            payload = event.optJSONObject("payload") ?: JSONObject(),
+                        )
+                    )
+                }
+            }
+            return EventRecovery(
+                latestEventId = response.optLong("latest_event_id", 0L).coerceAtLeast(0L),
+                events = events,
+            )
         } finally {
             connection.disconnect()
         }
