@@ -17,12 +17,9 @@ object ConversationCommands {
         .trim()
 
     private val STOP_COMMANDS = setOf(
-        "stop listening",
         "vic stop listening",
-        "end conversation",
-        "end the conversation",
+        "vic end conversation",
         "vic end the conversation",
-        "that s all",
         "goodbye vic",
     )
     private val PAUSE_COMMANDS = setOf(

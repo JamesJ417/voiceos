@@ -192,6 +192,16 @@ pub struct ProviderRequest {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub tools: Vec<ToolDefinition>,
+    #[serde(default)]
+    pub image_attachments: Vec<ProviderImageAttachment>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProviderImageAttachment {
+    pub attachment_id: String,
+    pub filename: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -730,6 +740,7 @@ pub struct CaptureProposal {
     pub id: String,
     pub owner_id: String,
     pub capture_id: String,
+    pub project_id: Option<String>,
     pub title: String,
     pub category: String,
     pub confidence: f64,
@@ -737,6 +748,9 @@ pub struct CaptureProposal {
     pub suggested_next_action: String,
     pub rationale: String,
     pub evidence_capture_ids: Vec<String>,
+    pub dedupe_key: String,
+    pub occurrence_count: u32,
+    pub last_seen_at: String,
     pub status: String,
     pub created_at: String,
     pub expires_at: String,
@@ -762,6 +776,7 @@ pub struct PersonalReviewRecord {
     pub owner_id: String,
     pub proposal_id: String,
     pub capture_id: String,
+    pub project_id: Option<String>,
     pub category: String,
     pub title: String,
     pub details: Option<String>,

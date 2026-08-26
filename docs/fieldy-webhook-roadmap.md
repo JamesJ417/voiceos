@@ -1,6 +1,19 @@
 # Fieldy → VIC Webhook Backend Roadmap
 
-Status: design/scaffold only. No live webhook is enabled and no gateway configuration is changed by this document.
+Status: live foundation and intelligence upgrade implemented. The remaining
+items in this document are follow-on privacy, retention, and operator-surface
+work rather than prerequisites for the active webhook.
+
+## Implemented intelligence path
+
+- Signed/query-token ingress normalizes Fieldy payload variants and deduplicates event retries.
+- Rust assembles nearby chunks by session/recording and activity window, retaining speaker segments and chunk provenance.
+- Analysis begins only after the conversation has been quiet for 330 seconds.
+- The classifier receives bounded active-project, open-task, relevant-memory, and pending-proposal context.
+- Project IDs are owner-scoped and active-state validated by Rust before persistence.
+- Exact normalized proposal repeats are durably merged across conversations; semantic repeats are filtered against bounded task/proposal context before insertion.
+- Approval closes every supporting capture and carries the project link into the resulting task or review record.
+- All extracted items remain review-only until explicit approval.
 
 ## Goal
 

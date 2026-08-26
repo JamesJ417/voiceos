@@ -194,27 +194,41 @@ class FakeHermesAsyncHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == f"/v1/runs/{self.run_id}/events":
-            events = [
-                {
-                    "type": "tool.started",
-                    "tool": "terminal",
-                    "preview": "systemctl restart voiceos",
-                },
-                {
-                    "type": "approval.request",
-                    "command": "systemctl restart voiceos",
-                    "description": "Restart VoiceOS",
-                    "pattern_key": "systemctl",
-                    "allow_permanent": True,
-                    "allow_session": True,
-                }
-            ]
+            if "Build the large project" in str(type(self).request_payload.get("input", "")):
+                events = [{
+                    "type": "subagent.start",
+                    "subagent_id": "worker-1",
+                    "summary": "build the large project",
+                }]
+            else:
+                events = [
+                    {
+                        "type": "tool.started",
+                        "tool": "terminal",
+                        "preview": "systemctl restart voiceos",
+                    },
+                    {
+                        "type": "approval.request",
+                        "command": "systemctl restart voiceos",
+                        "description": "Restart VoiceOS",
+                        "pattern_key": "systemctl",
+                        "allow_permanent": True,
+                        "allow_session": True,
+                    }
+                ]
             body = "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+        if self.path.startswith(f"/api/sessions/{self.run_id}/messages?"):
+            self._json(200, {"data": [{
+                "id": 1,
+                "role": "user",
+                "content": "[ASYNC DELEGATION BATCH COMPLETE — test]\n\nProject report",
+            }]})
             return
         if self.path == f"/v1/runs/{self.run_id}":
             self._json(
@@ -287,6 +301,25 @@ class HermesAsyncProviderTest(unittest.TestCase):
             FakeHermesAsyncHandler.request_payload["model_options"],  # type: ignore[index]
         )
         self.assertEqual("gpt-5.6-luna", FakeHermesAsyncHandler.request_payload["model"])
+
+    def test_background_delegation_returns_an_immediate_concrete_acknowledgement(self) -> None:
+        provider = HermesProvider(
+            f"http://127.0.0.1:{self.server.server_port}", api_key="test-secret"
+        )
+        completed = threading.Event()
+        reports: list[str] = []
+        provider.set_completion_sink(
+            lambda _session, _message_id, report: (reports.append(report), completed.set())
+        )
+
+        response = provider.respond(
+            "Build the large project", conversation_id="owner-large-project"
+        )
+
+        self.assertIn("I started a background worker for: build the large project", response.text)
+        self.assertIn("keep talking", response.text)
+        self.assertTrue(completed.wait(2))
+        self.assertEqual(["[ASYNC DELEGATION BATCH COMPLETE — test]\n\nProject report"], reports)
 
 class CodexBridgeProviderTest(unittest.TestCase):
     @patch("services.gateway.providers.AF_UNIX", 1)

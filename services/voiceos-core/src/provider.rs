@@ -14,6 +14,8 @@ use crate::{ChatMessage, ProviderCompletion, ProviderRequest, Role, ToolCall, Us
 pub enum ProviderError {
     #[error("provider is unavailable: {0}")]
     Unavailable(String),
+    #[error("provider does not support image attachments")]
+    VisionNotSupported,
     #[error("provider returned an invalid response: {0}")]
     InvalidResponse(String),
 }
@@ -88,13 +90,65 @@ impl OllamaProvider {
 #[derive(Serialize)]
 struct OllamaRequest<'a> {
     model: &'a str,
-    messages: &'a [ChatMessage],
+    messages: Vec<OllamaMessageRequest>,
     stream: bool,
     think: bool,
     keep_alive: &'a serde_json::Value,
     options: serde_json::Value,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+struct OllamaMessageRequest {
+    role: Role,
+    content: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    images: Vec<String>,
+}
+
+impl OllamaRequest<'_> {
+    fn from_provider_request<'a>(
+        model: &'a str,
+        request: &ProviderRequest,
+        think: bool,
+        keep_alive: &'a serde_json::Value,
+        tools: Vec<serde_json::Value>,
+    ) -> OllamaRequest<'a> {
+        use base64::Engine;
+        let image_values = request
+            .image_attachments
+            .iter()
+            .map(|attachment| base64::engine::general_purpose::STANDARD.encode(&attachment.bytes))
+            .collect::<Vec<_>>();
+        let last_user = request
+            .messages
+            .iter()
+            .rposition(|message| message.role == Role::User);
+        let messages = request
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(index, message)| OllamaMessageRequest {
+                role: message.role.clone(),
+                content: message.content.clone(),
+                images: if Some(index) == last_user {
+                    image_values.clone()
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect();
+        OllamaRequest {
+            model,
+            messages,
+            stream: false,
+            think,
+            keep_alive,
+            options: serde_json::json!({"temperature": if think { 0.2 } else { 0.0 }}),
+            tools,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -128,6 +182,11 @@ impl Provider for OllamaProvider {
     fn name(&self) -> &str {
         &self.name
     }
+
+    fn supports_vision(&self) -> bool {
+        true
+    }
+
     fn complete(&self, request: &ProviderRequest) -> Result<ProviderCompletion, ProviderError> {
         if self.model.trim().is_empty() {
             return Err(ProviderError::Unavailable(format!(
@@ -139,15 +198,13 @@ impl Provider for OllamaProvider {
         let response = self
             .client
             .post(format!("{}/api/chat", self.base_url))
-            .json(&OllamaRequest {
-                model: &self.model,
-                messages: &request.messages,
-                stream: false,
-                think: self.think,
-                keep_alive: &self.keep_alive,
-                options: serde_json::json!({"temperature": if self.think { 0.2 } else { 0.0 }}),
+            .json(&OllamaRequest::from_provider_request(
+                &self.model,
+                request,
+                self.think,
+                &self.keep_alive,
                 tools,
-            })
+            ))
             .send()
             .map_err(|error| ProviderError::Unavailable(error.to_string()))?;
         if !response.status().is_success() {
@@ -351,4 +408,33 @@ fn render_message(message: &ChatMessage) -> String {
         Role::Tool => "TOOL",
     };
     format!("{role}: {}", message.content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ProviderImageAttachment;
+
+    #[test]
+    fn ollama_request_carries_image_bytes_as_images() {
+        let request = ProviderRequest {
+            conversation_id: "conversation".to_owned(),
+            messages: vec![ChatMessage::new(Role::User, "look")],
+            tools: vec![],
+            image_attachments: vec![ProviderImageAttachment {
+                attachment_id: "attachment".to_owned(),
+                filename: "photo.png".to_owned(),
+                media_type: "image/png".to_owned(),
+                bytes: vec![1, 2, 3],
+            }],
+        };
+        let payload = OllamaRequest::from_provider_request(
+            "model",
+            &request,
+            false,
+            &serde_json::Value::Null,
+            vec![],
+        );
+        assert_eq!(payload.messages[0].images, vec!["AQID"]);
+    }
 }

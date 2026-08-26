@@ -13,11 +13,13 @@ use gtk::glib;
 use gtk::prelude::*;
 use gtk::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Entry, Expander,
-    FileChooserAction, FileChooserNative, Label, Orientation, Picture, ResponseType,
-    ScrolledWindow, Spinner,
+    FileDialog, Label, Orientation, Picture, ScrolledWindow, Spinner,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+mod attachment_client;
+use attachment_client::Attachment;
 
 const APP_ID: &str = "org.omarchy.VicPanel";
 const DEFAULT_GATEWAY: &str = "http://127.0.0.1:8787";
@@ -31,18 +33,6 @@ struct Message {
     provider: Option<String>,
     #[serde(default)]
     attachments: Vec<Attachment>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct Attachment {
-    id: String,
-    filename: String,
-    media_type: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AttachmentResponse {
-    attachment: Attachment,
 }
 
 #[derive(Debug, Deserialize)]
@@ -271,31 +261,28 @@ fn build_ui(app: &Application) {
         let state = state.clone();
         let sender = sender.clone();
         attach.connect_clicked(move |_| {
-            let chooser = FileChooserNative::new(
-                Some("Choose an image"),
-                Some(&window),
-                FileChooserAction::Open,
-                Some("Attach"),
-                Some("Cancel"),
-            );
+            let chooser = FileDialog::builder()
+                .title("Choose an image")
+                .modal(true)
+                .build();
             let state = state.clone();
             let sender = sender.clone();
-            chooser.connect_response(move |chooser, response| {
-                if response != ResponseType::Accept {
-                    return;
-                }
-                let Some(path) = chooser.file().and_then(|file| file.path()) else {
-                    return;
-                };
-                let gateway = state.borrow().gateway.clone();
-                let sender = sender.clone();
-                thread::spawn(move || {
-                    let _ = sender.send(UiEvent::AttachmentUploaded(upload_attachment(
-                        &gateway, &path,
-                    )));
-                });
-            });
-            chooser.show();
+            chooser.open(
+                Some(&window),
+                None::<&gtk::gio::Cancellable>,
+                move |result| {
+                    let Some(path) = result.ok().and_then(|file| file.path()) else {
+                        return;
+                    };
+                    let gateway = state.borrow().gateway.clone();
+                    let sender = sender.clone();
+                    thread::spawn(move || {
+                        let _ = sender.send(UiEvent::AttachmentUploaded(
+                            attachment_client::upload(&gateway, &path),
+                        ));
+                    });
+                },
+            );
         });
     }
 
@@ -858,37 +845,6 @@ fn send_turn(
         .map_err(|error| error.to_string())
 }
 
-fn upload_attachment(gateway: &str, path: &PathBuf) -> Result<Attachment, String> {
-    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or("Invalid filename")?;
-    let media_type = match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "webp" => "image/webp",
-        _ => return Err("Choose a JPEG, PNG, or WebP image".into()),
-    };
-    let mut response = ureq::post(format!("{gateway}/v1/attachments"))
-        .header("X-VoiceOS-Device-ID", DEVICE_ID)
-        .header("X-VoiceOS-File-Name", filename)
-        .content_type(media_type)
-        .send(&bytes)
-        .map_err(|error| error.to_string())?;
-    let payload: AttachmentResponse = response
-        .body_mut()
-        .read_json()
-        .map_err(|error| error.to_string())?;
-    Ok(payload.attachment)
-}
-
 fn cache_attachment(gateway: &str, attachment: &Attachment) -> Result<PathBuf, String> {
     let extension = match attachment.media_type.as_str() {
         "image/jpeg" => "jpg",
@@ -928,6 +884,67 @@ fn transcribe_recording(gateway: &str, path: &PathBuf) -> Result<String, String>
         return Err("No speech was detected".into());
     }
     Ok(transcription.transcript.trim().to_owned())
+}
+
+fn format_task_card(detail: &Value) -> Option<String> {
+    let task = detail.get("task")?;
+    let title = task.get("title")?.as_str()?;
+    let status = task
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("active");
+    let progress = detail.get("progress");
+    let completed = progress
+        .and_then(|value| value.get("completed_steps"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total = progress
+        .and_then(|value| value.get("total_steps"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let blockers = progress
+        .and_then(|value| value.get("open_blockers"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let lane = progress
+        .and_then(|value| value.get("lane"))
+        .and_then(Value::as_str)
+        .unwrap_or("triage");
+    let next = progress
+        .and_then(|value| value.get("next_vic_action"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            progress
+                .and_then(|value| value.get("next_user_action"))
+                .and_then(Value::as_str)
+        });
+    let next = next
+        .map(|value| format!(" · next: {}", compact(value, 72)))
+        .unwrap_or_default();
+    let blocker_note = if blockers > 0 {
+        format!(" · blockers: {blockers}")
+    } else {
+        String::new()
+    };
+    let stage = if completed == 0 {
+        "scope"
+    } else if total > 0 && completed < total {
+        "work"
+    } else {
+        "verify"
+    };
+    Some(format!(
+        "{status} · {completed}/{total} · {lane} · stage: {stage}{blocker_note} · {title}{next}"
+    ))
+}
+
+fn compact(value: &str, max: usize) -> String {
+    let value = value.trim();
+    if value.chars().count() <= max {
+        return value.to_owned();
+    }
+    let shortened: String = value.chars().take(max.saturating_sub(1)).collect();
+    format!("{shortened}…")
 }
 
 fn load_dashboard(gateway: &str, cursor: i64) -> Result<DashboardUpdate, String> {
@@ -985,15 +1002,7 @@ fn load_dashboard(gateway: &str, cursor: i64) -> Result<DashboardUpdate, String>
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|detail| {
-            let task = detail.get("task")?;
-            let title = task.get("title")?.as_str()?;
-            let status = task
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("active");
-            Some(format!("{status} · {title}"))
-        })
+        .filter_map(format_task_card)
         .take(5)
         .collect();
     Ok(DashboardUpdate {

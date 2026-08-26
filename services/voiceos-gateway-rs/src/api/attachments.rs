@@ -9,6 +9,7 @@ use crate::state::AppState;
 
 use super::auth::{authenticate, header_text};
 use super::error::{ApiResult, api_error};
+use super::image_contract::detected_image_type;
 
 const MAX_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
 
@@ -103,38 +104,4 @@ fn supported_image_name(filename: &str, media_type: &str) -> bool {
         (extension.as_str(), media_type),
         ("jpg" | "jpeg", "image/jpeg") | ("png", "image/png") | ("webp", "image/webp")
     )
-}
-
-fn detected_image_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else {
-        None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::detected_image_type;
-
-    #[test]
-    fn recognizes_only_allowed_image_signatures() {
-        assert_eq!(
-            detected_image_type(&[0xff, 0xd8, 0xff, 0xe0]),
-            Some("image/jpeg")
-        );
-        assert_eq!(
-            detected_image_type(b"\x89PNG\r\n\x1a\nrest"),
-            Some("image/png")
-        );
-        assert_eq!(
-            detected_image_type(b"RIFF\x10\0\0\0WEBPVP8 rest"),
-            Some("image/webp")
-        );
-        assert_eq!(detected_image_type(b"not an image"), None);
-    }
 }

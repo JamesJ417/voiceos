@@ -773,12 +773,12 @@ fn require_owned_optional(
     owner: &str,
     label: &str,
 ) -> Result<(), StoreError> {
-    if let Some(id) = id {
-        if !owned(c, table, id_column, owner, id)? {
-            return Err(StoreError::InvalidInput(format!(
-                "{label} is not owner-scoped"
-            )));
-        }
+    if let Some(id) = id
+        && !owned(c, table, id_column, owner, id)?
+    {
+        return Err(StoreError::InvalidInput(format!(
+            "{label} is not owner-scoped"
+        )));
     }
     Ok(())
 }

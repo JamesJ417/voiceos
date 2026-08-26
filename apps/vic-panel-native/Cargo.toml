@@ -8,4 +8,5 @@ license.workspace = true
 gtk = { package = "gtk4", version = "0.11.4", features = ["v4_18"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
 ureq = { version = "3.4.0", features = ["json"] }

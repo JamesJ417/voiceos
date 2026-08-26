@@ -51,6 +51,7 @@ Ontology: {ontology}"#
                     ChatMessage::new(Role::User, phrase),
                 ],
                 tools: vec![],
+                image_attachments: vec![],
             })
             .map_err(|error| error.to_string())?;
         let content = completion.text.trim();

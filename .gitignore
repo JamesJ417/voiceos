@@ -2,6 +2,8 @@
 .gradle/
 .idea/
 .vscode/
+/.hermes/
+/.pytest_cache/
 *.iml
 local.properties
 

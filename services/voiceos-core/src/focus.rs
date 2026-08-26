@@ -66,17 +66,16 @@ impl ConversationStore {
                 priorities.swap(0, position);
                 priorities[0].next_action = session.next_action.clone();
             }
-        } else if let Some(session) = &last_interrupted_session {
-            if let Some(position) = priorities
+        } else if let Some(session) = &last_interrupted_session
+            && let Some(position) = priorities
                 .iter()
                 .position(|priority| priority.task_id == session.task_id)
-            {
-                priorities.swap(0, position);
-                priorities[0].next_action = session
-                    .restart_action
-                    .clone()
-                    .unwrap_or_else(|| session.next_action.clone());
-            }
+        {
+            priorities.swap(0, position);
+            priorities[0].next_action = session
+                .restart_action
+                .clone()
+                .unwrap_or_else(|| session.next_action.clone());
         }
         priorities.truncate(3);
         let recommendation = priorities.first().cloned();
@@ -96,17 +95,15 @@ impl ConversationStore {
         mode: &str,
     ) -> Result<PersonalFocusReset, StoreError> {
         let mut snapshot = self.focus_snapshot(owner_id, mode)?;
-        if snapshot.active_session.is_none() {
-            if let Some(interrupted) = &snapshot.last_interrupted_session {
-                if let Some(position) = snapshot
-                    .priorities
-                    .iter()
-                    .position(|priority| priority.task_id == interrupted.task_id)
-                {
-                    snapshot.priorities.swap(0, position);
-                    snapshot.recommendation = snapshot.priorities.first().cloned();
-                }
-            }
+        if snapshot.active_session.is_none()
+            && let Some(interrupted) = &snapshot.last_interrupted_session
+            && let Some(position) = snapshot
+                .priorities
+                .iter()
+                .position(|priority| priority.task_id == interrupted.task_id)
+        {
+            snapshot.priorities.swap(0, position);
+            snapshot.recommendation = snapshot.priorities.first().cloned();
         }
 
         let restart_action = snapshot
@@ -364,7 +361,7 @@ impl ConversationStore {
     fn focus_project_context(
         &self,
         owner_id: &str,
-    ) -> Result<HashMap<String, (Option<String>, Option<String>)>, StoreError> {
+    ) -> Result<HashMap<String, FocusProjectContext>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
             "SELECT p.project_id, p.title, g.title FROM projects p LEFT JOIN goals g ON g.goal_id=p.goal_id AND g.owner_id=p.owner_id WHERE p.owner_id=?1",
@@ -381,6 +378,8 @@ impl ConversationStore {
         Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
     }
 }
+
+type FocusProjectContext = (Option<String>, Option<String>);
 
 fn focus_order(left: &FocusPriority, right: &FocusPriority, mode: &str) -> std::cmp::Ordering {
     let deadline =

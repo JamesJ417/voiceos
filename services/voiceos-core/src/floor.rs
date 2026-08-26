@@ -43,6 +43,36 @@ impl ConversationStore {
         response_text: Option<&str>,
         ttl_seconds: i64,
     ) -> Result<ConversationFloor, StoreError> {
+        self.change_conversation_floor_fenced(
+            owner_id,
+            conversation_id,
+            device_id,
+            display_name,
+            action,
+            phase,
+            partial_transcript,
+            response_text,
+            ttl_seconds,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn change_conversation_floor_fenced(
+        &self,
+        owner_id: &str,
+        conversation_id: &str,
+        device_id: &str,
+        display_name: Option<&str>,
+        action: &str,
+        phase: Option<&str>,
+        partial_transcript: Option<&str>,
+        response_text: Option<&str>,
+        ttl_seconds: i64,
+        expected_lease_id: Option<&str>,
+        expected_revision: Option<i64>,
+    ) -> Result<ConversationFloor, StoreError> {
         if owner_id.trim().is_empty()
             || conversation_id.trim().is_empty()
             || device_id.trim().is_empty()
@@ -70,18 +100,37 @@ impl ConversationStore {
         let expires_at = now_unix + ttl_seconds.clamp(MIN_TTL_SECONDS, MAX_TTL_SECONDS);
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
-        let existing: Option<(Option<String>, i64)> = transaction
+        let existing: Option<(Option<String>, i64, Option<String>, i64)> = transaction
             .query_row(
-                "SELECT holder_device_id, expires_at_unix FROM conversation_floors WHERE owner_id=?1",
+                "SELECT holder_device_id, expires_at_unix, lease_id, revision FROM conversation_floors WHERE owner_id=?1",
                 [owner_id.trim()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let currently_owned = existing.as_ref().is_some_and(|(holder, expiry)| {
+        let currently_owned = existing.as_ref().is_some_and(|(holder, expiry, _, _)| {
             holder.as_deref() == Some(device_id.trim()) && *expiry > now_unix
         });
+        if action != "claim" {
+            if expected_lease_id.is_some_and(|expected| {
+                existing
+                    .as_ref()
+                    .and_then(|(_, _, lease, _)| lease.as_deref())
+                    != Some(expected)
+            }) {
+                return Err(StoreError::InvalidInput(
+                    "conversation_floor_lease_mismatch".to_owned(),
+                ));
+            }
+            if expected_revision.is_some_and(|expected| {
+                existing.as_ref().map(|(_, _, _, revision)| *revision) != Some(expected)
+            }) {
+                return Err(StoreError::InvalidInput(
+                    "conversation_floor_revision_mismatch".to_owned(),
+                ));
+            }
+        }
         if action != "claim"
-            && existing.as_ref().is_some_and(|(holder, expiry)| {
+            && existing.as_ref().is_some_and(|(holder, expiry, _, _)| {
                 holder.is_some() && (!currently_owned && *expiry > now_unix)
             })
         {

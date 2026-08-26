@@ -36,11 +36,11 @@ pub use model::{
     NewProactiveSubscription, OutreachDelivery, OutreachPolicy, OutreachProposal, OutreachRecord,
     PersonalCapture, PersonalExtractionContract, PersonalExtractionInput, PersonalFocusReset,
     PersonalReviewRecord, ProactiveCandidate, ProactiveDraftingContract, ProactiveDraftingInput,
-    ProactiveFeedback, ProactiveSubscription, ProjectRecord, ProviderCompletion, ProviderRequest,
-    ProviderRunMetric, QuarantineRecord, ReviewDecision, Role, SkillProposal, SkillUsage,
-    SleepCycleChange, SleepCycleRecord, SleepCycleReport, TaskApprovalStatus, TaskArtifactRecord,
-    TaskBlockerRecord, TaskDetail, TaskHandoffRecord, TaskInitiative, TaskProgress, TaskRecord,
-    TaskStepRecord, ToolCall, ToolDefinition, Usage,
+    ProactiveFeedback, ProactiveSubscription, ProjectRecord, ProviderCompletion,
+    ProviderImageAttachment, ProviderRequest, ProviderRunMetric, QuarantineRecord, ReviewDecision,
+    Role, SkillProposal, SkillUsage, SleepCycleChange, SleepCycleRecord, SleepCycleReport,
+    TaskApprovalStatus, TaskArtifactRecord, TaskBlockerRecord, TaskDetail, TaskHandoffRecord,
+    TaskInitiative, TaskProgress, TaskRecord, TaskStepRecord, ToolCall, ToolDefinition, Usage,
 };
 pub use provider::{
     CodexBridgeProvider, MockProvider, OllamaProvider, Provider, ProviderError, ProviderRouter,

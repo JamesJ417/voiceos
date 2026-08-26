@@ -581,6 +581,11 @@ paths:
     post:
       operationId: extractPersonalCapture
       summary: Ask the configured VIC provider for bounded review suggestions
+      parameters:
+        - in: path
+          name: capture_id
+          required: true
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -678,7 +683,7 @@ paths:
           name: limit
           schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
       responses:
-        "200": { description: Approved local notes, ideas, worries, and appointments }
+        "200": { description: "Approved local notes, ideas, worries, and appointments" }
         "401": { description: Device authentication required }
   /v1/personal/focus-reset:
     get:
@@ -1409,6 +1414,70 @@ paths:
             image/webp: { schema: { type: string, format: binary } }
         "401": { description: Device authentication required }
         "404": { description: Attachment does not exist for the current owner }
+  /v1/uploads:
+    post:
+      operationId: createResumableUpload
+      summary: Create an authenticated resumable image upload session
+      parameters:
+        - in: header
+          name: X-VoiceOS-File-Name
+          required: true
+          schema: { type: string }
+        - in: header
+          name: X-VoiceOS-Upload-Length
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 26214400 }
+        - in: header
+          name: X-VoiceOS-Upload-SHA256
+          required: true
+          schema: { type: string, pattern: "^[0-9a-f]{64}$" }
+      responses:
+        "201": { description: Resumable upload session created }
+        "400": { description: Missing or invalid upload metadata }
+        "401": { description: Device authentication required }
+        "413": { description: Upload exceeds 25 MB }
+        "415": { description: Unsupported image media type }
+  /v1/uploads/{upload_id}/chunks/{offset}:
+    put:
+      operationId: uploadResumableChunk
+      summary: Append an idempotent chunk to an authenticated image upload
+      parameters:
+        - in: path
+          name: upload_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: path
+          name: offset
+          required: true
+          schema: { type: integer, minimum: 0 }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary, maxLength: 1048576 }
+      responses:
+        "200": { description: Chunk accepted or identical retry acknowledged }
+        "400": { description: Empty or oversized chunk }
+        "401": { description: Device authentication required }
+        "404": { description: Upload session does not exist for the current owner and device }
+        "409": { description: Offset conflicts with the current upload state }
+  /v1/uploads/{upload_id}/finalize:
+    post:
+      operationId: finalizeResumableUpload
+      summary: Verify and finalize an authenticated image upload
+      parameters:
+        - in: path
+          name: upload_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Previously finalized upload returned idempotently }
+        "201": { description: Upload verified and attachment created }
+        "401": { description: Device authentication required }
+        "404": { description: Upload session does not exist for the current owner }
+        "409": { description: Upload is incomplete }
+        "415": { description: Uploaded bytes do not match the declared image type }
+        "422": { description: Uploaded bytes do not match the declared SHA-256 }
   /v1/memories:
     get:
       operationId: listMemories
@@ -1524,7 +1593,7 @@ paths:
                   items: { type: string, format: uuid }
       responses:
         "201": { description: Selected proposals committed idempotently }
-        "400": { description: Invalid, unavailable, oversized, or mismatched proposal set }
+        "400": { description: "Invalid, unavailable, oversized, or mismatched proposal set" }
         "404": { description: Source sleep cycle not found }
   /v1/turns/text:
     post:
@@ -1812,6 +1881,14 @@ components:
         response_text: { type: [string, "null"], maxLength: 16000 }
         display_name: { type: [string, "null"], maxLength: 120 }
         ttl_seconds: { type: integer, minimum: 10, maximum: 120, default: 45 }
+        expected_lease_id:
+          type: [string, "null"]
+          format: uuid
+          description: Fencing token returned by the latest successful claim; stale holders receive HTTP 409.
+        expected_revision:
+          type: [integer, "null"]
+          minimum: 0
+          description: Optional optimistic concurrency fence for serialized clients.
     ConversationFloor:
       type: object
       required: [owner_id, conversation_id, phase, revision, updated_at, expires_at_unix, active]

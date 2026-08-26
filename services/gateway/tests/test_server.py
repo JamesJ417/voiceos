@@ -16,8 +16,10 @@ from services.gateway.enrollment_qr import build_enrollment_uri
 from services.gateway.providers import ProviderResponse
 from services.gateway.tools import ToolBroker
 from services.gateway.server import (
+    _bounded_fieldy_context,
     _clean_hermes_completion_report,
     _normalize_fieldy_webhook,
+    _personal_extraction_prompt,
     _render_conversation_context,
     _single_json_object,
     create_server,
@@ -561,6 +563,105 @@ Second result.
         self.assertEqual("Hello gateway", payload["transcript"])
         self.assertEqual("mock", payload["provider"])
 
+    def test_text_turn_request_id_replays_completed_result_without_duplicate_work(self) -> None:
+        class CountingRouter:
+            default_name = "counting"
+            calls = 0
+
+            def respond(self, text: str, **_kwargs: object) -> ProviderResponse:
+                self.calls += 1
+                return ProviderResponse(text=f"Completed once: {text}", provider="counting")
+
+        original_router = self.server.coordinator.router
+        router = CountingRouter()
+        self.server.coordinator.router = router  # type: ignore[assignment]
+        body = json.dumps(
+            {
+                "session_id": "idempotent-mobile-session",
+                "request_id": "mobile-long-turn-1",
+                "text": "Plan the large project",
+            }
+        ).encode()
+        try:
+            first_status, first = self.request(
+                "POST", "/v1/turns/text", body, content_type="application/json"
+            )
+            second_status, second = self.request(
+                "POST", "/v1/turns/text", body, content_type="application/json"
+            )
+            conflict_status, conflict = self.request(
+                "POST",
+                "/v1/turns/text",
+                json.dumps(
+                    {
+                        "session_id": "idempotent-mobile-session",
+                        "request_id": "mobile-long-turn-1",
+                        "text": "A different request must not reuse the result",
+                    }
+                ).encode(),
+                content_type="application/json",
+            )
+        finally:
+            self.server.coordinator.router = original_router
+
+        self.assertEqual(200, first_status)
+        self.assertEqual(200, second_status)
+        self.assertEqual(1, router.calls)
+        self.assertEqual(first["response_text"], second["response_text"])
+        self.assertTrue(second["replayed"])
+        self.assertEqual(409, conflict_status)
+        self.assertEqual("request_id_conflict", conflict["error"])
+
+    def test_concurrent_retry_waits_for_inflight_turn_instead_of_starting_again(self) -> None:
+        class SlowRouter:
+            default_name = "slow"
+            calls = 0
+            started = threading.Event()
+            release = threading.Event()
+
+            def respond(self, text: str, **_kwargs: object) -> ProviderResponse:
+                self.calls += 1
+                self.started.set()
+                if not self.release.wait(2):
+                    raise RuntimeError("test turn was not released")
+                return ProviderResponse(text=f"Finished: {text}", provider="slow")
+
+        original_router = self.server.coordinator.router
+        router = SlowRouter()
+        self.server.coordinator.router = router  # type: ignore[assignment]
+        body = json.dumps(
+            {
+                "session_id": "inflight-mobile-session",
+                "request_id": "mobile-inflight-turn-1",
+                "text": "Build the large project",
+            }
+        ).encode()
+        responses: list[tuple[int, dict[str, object]]] = []
+
+        def submit() -> None:
+            responses.append(
+                self.request("POST", "/v1/turns/text", body, content_type="application/json")
+            )
+
+        first = threading.Thread(target=submit)
+        second = threading.Thread(target=submit)
+        try:
+            first.start()
+            self.assertTrue(router.started.wait(1))
+            second.start()
+            router.release.set()
+            first.join(timeout=2)
+            second.join(timeout=2)
+        finally:
+            router.release.set()
+            self.server.coordinator.router = original_router
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(1, router.calls)
+        self.assertEqual([200, 200], sorted(status for status, _payload in responses))
+        self.assertEqual(1, sum(bool(payload.get("replayed")) for _status, payload in responses))
+
     def test_text_turn_replays_local_session_history_without_memory_service(self) -> None:
         class ContinuityRouter:
             default_name = "hermes"
@@ -748,6 +849,71 @@ Second result.
             self.assertEqual("image/png", response.getheader("Content-Type"))
             self.assertEqual(image, body)
             connection.close()
+        finally:
+            self.server.memory_url = original_memory_url
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_resumable_upload_routes_through_memory_gateway(self) -> None:
+        class UploadStub(BaseHTTPRequestHandler):
+            requests: list[tuple[str, str, bytes, str | None]] = []
+
+            def _record(self) -> bytes:
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                self.__class__.requests.append(
+                    (self.command, self.path, body, self.headers.get("X-VoiceOS-Device-ID"))
+                )
+                return body
+
+            def do_POST(self) -> None:  # noqa: N802
+                self._record()
+                self.send_response(201 if self.path == "/v1/uploads" else 200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"upload_id": "upload-1", "status": "finalized"}).encode())
+
+            def do_PUT(self) -> None:  # noqa: N802
+                self._record()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "uploading"}).encode())
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), UploadStub)
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        try:
+            upload_headers = {
+                "X-VoiceOS-File-Name": "photo.png",
+                "X-VoiceOS-Upload-Length": "8",
+                "X-VoiceOS-Upload-SHA256": "a" * 64,
+                "Content-Type": "image/png",
+            }
+            status, payload = self.request("POST", "/v1/uploads", headers=upload_headers)
+            self.assertEqual(201, status)
+            self.assertEqual("upload-1", payload["upload_id"])
+
+            status, payload = self.request("PUT", "/v1/uploads/upload-1/chunks/0", b"raw-bytes")
+            self.assertEqual(200, status)
+            self.assertEqual("uploading", payload["status"])
+
+            status, payload = self.request("POST", "/v1/uploads/upload-1/finalize")
+            self.assertEqual(200, status)
+            self.assertEqual("finalized", payload["status"])
+            self.assertEqual(
+                [
+                    ("POST", "/v1/uploads", b"", "development-device"),
+                    ("PUT", "/v1/uploads/upload-1/chunks/0", b"raw-bytes", "development-device"),
+                    ("POST", "/v1/uploads/upload-1/finalize", b"", "development-device"),
+                ],
+                UploadStub.requests,
+            )
         finally:
             self.server.memory_url = original_memory_url
             core.shutdown()
@@ -1144,6 +1310,137 @@ Second result.
         self.assertEqual(first["event_id"], second["event_id"])
         with self.assertRaises(ValueError):
             _normalize_fieldy_webhook(b'{"transcription":"missing date"}')
+
+    def test_fieldy_auto_extraction_submits_review_proposals_in_background(self) -> None:
+        expiry = "2026-08-26T20:00:00Z"
+
+        class FieldyExtractionCoreStub(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                encoded = json.dumps(
+                    {
+                        "capture_id": "fieldy-capture-1",
+                        "projects": [],
+                        "tasks": [],
+                        "memories": [],
+                        "reviewing_proposals": [],
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0"))
+                self.server.seen = json.loads(self.rfile.read(length))  # type: ignore[attr-defined]
+                encoded = json.dumps(
+                    {"proposals": self.server.seen["output"]["candidates"]}  # type: ignore[attr-defined]
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+                self.server.completed.set()  # type: ignore[attr-defined]
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        class FieldyExtractionCoordinator:
+            allowed_tools: set[str] | None = None
+
+            def respond(self, _prompt: str, **kwargs: object) -> CoordinatedResponse:
+                self.allowed_tools = kwargs.get("allowed_tools")  # type: ignore[assignment]
+                return CoordinatedResponse(
+                    provider="hermes",
+                    text=json.dumps(
+                        {
+                            "owner_id": "owner-a",
+                            "capture_id": "fieldy-capture-1",
+                            "candidates": [
+                                {
+                                    "project_id": None,
+                                    "category": "note",
+                                    "confidence": 0.91,
+                                    "title": "Display mount measurements",
+                                    "details": "Measurements were discussed in the conversation.",
+                                    "suggested_next_action": "Review the measurements.",
+                                    "rationale": "This is useful project information.",
+                                    "evidence_capture_ids": ["fieldy-capture-1"],
+                                    "expires_at": expiry,
+                                }
+                            ],
+                        }
+                    ),
+                )
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), FieldyExtractionCoreStub)
+        core.seen = None  # type: ignore[attr-defined]
+        core.completed = threading.Event()  # type: ignore[attr-defined]
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        original_coordinator = self.server.coordinator
+        original_auto_extract = self.server.fieldy_auto_extract
+        coordinator = FieldyExtractionCoordinator()
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        self.server.coordinator = coordinator  # type: ignore[assignment]
+        self.server.fieldy_auto_extract = True
+        capture = {
+            "id": "fieldy-capture-1",
+            "owner_id": "owner-a",
+            "source": "fieldy",
+            "status": "received",
+            "raw_content": "Review the display mount measurements",
+            "display_text": "Review the display mount measurements",
+            "expires_at": expiry,
+        }
+        try:
+            self.server.start_fieldy_extraction(capture)
+            self.assertTrue(core.completed.wait(2))  # type: ignore[attr-defined]
+            self.assertEqual("owner-a", core.seen["output"]["owner_id"])  # type: ignore[index,attr-defined]
+            self.assertEqual(set(), coordinator.allowed_tools)
+        finally:
+            self.server.fieldy_auto_extract = original_auto_extract
+            self.server.memory_url = original_memory_url
+            self.server.coordinator = original_coordinator
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_fieldy_prompt_preserves_speakers_and_bounds_relevant_context(self) -> None:
+        capture = {
+            "id": "capture-1",
+            "owner_id": "owner-a",
+            "display_text": "Vic discussed the portrait display mount cable",
+            "raw_content": "Vic: Measure the mount. Alex: I will check the cable.",
+            "expires_at": "2026-08-27T20:00:00Z",
+            "structured_content": {
+                "chunk_count": 2,
+                "chunks": [
+                    {"speakers": [{"speakerName": "Vic", "text": "Measure the mount"}]},
+                    {"speakers": [{"speakerName": "Alex", "text": "I will check the cable"}]},
+                ],
+            },
+        }
+        context = {
+            "projects": [{"id": "project-display", "title": "Portrait display", "status": "active"}],
+            "tasks": [{"id": "task-1", "project_id": "project-display", "title": "Measure mount", "status": "ready"}],
+            "reviewing_proposals": [{"id": "proposal-1", "title": "Check cable", "category": "task"}],
+            "memories": [
+                {"id": "memory-relevant", "content": "Portrait display mount uses a special cable"},
+                {"id": "memory-unrelated", "content": "The garden needs water"},
+            ],
+        }
+
+        bounded = _bounded_fieldy_context(capture, context)
+        self.assertEqual(["memory-relevant"], [item["id"] for item in bounded["relevant_memories"]])
+        prompt = _personal_extraction_prompt(capture, context)
+        self.assertIn('"speakerName":"Vic"', prompt)
+        self.assertIn('"speakerName":"Alex"', prompt)
+        self.assertIn('"id":"project-display"', prompt)
+        self.assertNotIn("memory-unrelated", prompt)
 
     def test_spoken_console_command_is_dispatched_to_rust_before_the_model(self) -> None:
         class ConsoleCoreStub(BaseHTTPRequestHandler):

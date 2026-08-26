@@ -29,6 +29,7 @@ pub struct ConversationStore {
 }
 
 impl ConversationStore {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn insert_structured_memory(
         transaction: &Transaction<'_>,
         owner_id: &str,
@@ -218,6 +219,31 @@ impl ConversationStore {
         transaction.execute("UPDATE documents SET owner_id=?1", [owner_id.trim()])?;
         transaction.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS one_active_conversation_per_owner ON conversations(owner_id) WHERE status='active' AND owner_id IS NOT NULL;",
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn ensure_owner_device(&self, owner_id: &str, device_id: &str) -> Result<(), StoreError> {
+        if owner_id.trim().is_empty() || device_id.trim().is_empty() {
+            return Err(StoreError::InvalidInput(
+                "owner_id and device_id are required".to_owned(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO owners(owner_id, created_at, updated_at) VALUES(?1, ?2, ?2) ON CONFLICT(owner_id) DO UPDATE SET updated_at=excluded.updated_at",
+            params![owner_id.trim(), now],
+        )?;
+        transaction.execute(
+            "INSERT INTO devices(device_id, created_at, last_seen_at) VALUES(?1, ?2, ?2) ON CONFLICT(device_id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
+            params![device_id.trim(), now],
+        )?;
+        transaction.execute(
+            "INSERT INTO owner_devices(owner_id, device_id, enrolled_at) VALUES(?1, ?2, ?3) ON CONFLICT(device_id) DO UPDATE SET owner_id=excluded.owner_id, revoked_at=NULL",
+            params![owner_id.trim(), device_id.trim(), now],
         )?;
         transaction.commit()?;
         Ok(())
@@ -656,6 +682,7 @@ impl ConversationStore {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_structured_memory(
         &self,
         owner_id: &str,

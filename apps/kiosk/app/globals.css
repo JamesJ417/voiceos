@@ -641,6 +641,12 @@ button:disabled { opacity: 0.38; cursor: not-allowed; }
 .task-card-head span { color: var(--teal); }
 .task-card h3 { margin: 12px 0 7px; font-size: 21px; }
 .task-card > p { margin: 0; color: var(--muted); line-height: 1.5; }
+.task-workflow-strip { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 13px; }
+.task-ownership { margin: 0.7rem 0 0; color: var(--muted); font-size: 0.82rem; }
+.task-ownership strong { color: var(--text); letter-spacing: 0.04em; }
+.task-workflow-strip span small { display: block; margin-top: 0.15rem; opacity: 0.7; font-size: 0.62rem; }
+.task-workflow-strip span { padding: 4px 7px; border: 1px solid var(--line-soft); border-radius: 999px; color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
+.task-workflow-strip span.active { border-color: rgba(53,224,193,.45); color: var(--teal); background: rgba(53,224,193,.08); }
 .task-updates { display: grid; gap: 8px; margin: 14px 0; padding: 12px; border: 1px solid rgba(28,224,190,.16); border-radius: 12px; background: rgba(28,224,190,.025); }
 .task-updates > small { color: var(--teal); font-size: 9px; letter-spacing: .1em; }
 .task-update { display: flex; align-items: flex-start; gap: 9px; color: var(--muted); font-size: 12px; }

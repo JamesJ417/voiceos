@@ -113,6 +113,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var pendingApproval: ApprovalRequest? = null
     private var eventSubscription: EventSubscription? = null
     private var conversationActive = false
+    private var conversationPaused = false
     private var conversationReceiverRegistered = false
     private var currentTaskFilter = TaskFilter.TODAY
     private var latestTasks: List<VoiceTask> = emptyList()
@@ -125,6 +126,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != VICConversationService.ACTION_STATE) return
             conversationActive = intent.getBooleanExtra(VICConversationService.EXTRA_ACTIVE, false)
+            val conversationState = intent.getStringExtra(VICConversationService.EXTRA_STATE)
+            conversationPaused = conversationState == VICConversationService.STATE_PAUSED
             val transcript = intent.getStringExtra(VICConversationService.EXTRA_TRANSCRIPT)
             val response = intent.getStringExtra(VICConversationService.EXTRA_RESPONSE)
             val provider = intent.getStringExtra(VICConversationService.EXTRA_PROVIDER)
@@ -163,10 +166,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     arguments,
                 )
             }
-            when (intent.getStringExtra(VICConversationService.EXTRA_STATE)) {
+            when (conversationState) {
                 VICConversationService.STATE_STARTING -> renderState(VoiceState.STARTING, detail.ifBlank { "Starting conversation" })
                 VICConversationService.STATE_LISTENING -> renderState(VoiceState.LISTENING, detail.ifBlank { "Listening" })
                 VICConversationService.STATE_PROCESSING -> renderState(VoiceState.PROCESSING, detail.ifBlank { "VIC is thinking" })
+                VICConversationService.STATE_RECONNECTING -> renderState(
+                    VoiceState.STARTING,
+                    detail.ifBlank { "Reconnecting automatically" },
+                )
                 VICConversationService.STATE_SPEAKING -> renderState(
                     VoiceState.SPEAKING,
                     if (processingMs > 0) "Speaking â€¢ ${processingMs} ms" else detail.ifBlank { "VIC is speaking" },
@@ -177,7 +184,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     statusView.text = "VOICE CHANNEL PAUSED"
                 }
                 VICConversationService.STATE_ERROR -> renderState(VoiceState.ERROR, detail.ifBlank { "Conversation error" })
-                VICConversationService.STATE_STOPPED -> renderState(VoiceState.READY, "Conversation ended")
+                VICConversationService.STATE_STOPPED -> {
+                    conversationPaused = false
+                    renderState(VoiceState.READY, "Conversation ended")
+                }
             }
             if (!response.isNullOrBlank()) {
                 VoiceWidgetProvider.refreshTasks(this@MainActivity)
@@ -970,7 +980,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun handlePrimaryAction() {
         if (conversationActive) {
-            stopConversationMode()
+            if (conversationPaused) resumeConversationMode() else pauseConversationMode()
             return
         }
         when (voiceState) {
@@ -988,6 +998,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun startFromWidgetIfRequested(intent: Intent?) {
+        if (intent?.action == ACTION_CONFIRM_END_CONVERSATION) {
+            intent.action = null
+            showPage(AppPage.COMMAND)
+            if (!conversationActive) restoreConversationSnapshot()
+            if (conversationActive) showEndConversationConfirmation()
+            return
+        }
         if (intent?.action == ACTION_SOCIAL_SHIELD) {
             val openedPackage = intent.getStringExtra(EXTRA_BLOCKED_PACKAGE)
             intent.action = null
@@ -1147,7 +1164,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun cancelCurrentAction() {
         if (conversationActive) {
-            stopConversationMode()
+            showEndConversationConfirmation()
             return
         }
         requestGeneration += 1
@@ -1329,10 +1346,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     ) {
         GatewayClient.changeConversationFloor(
             baseUrl = GatewaySettings.baseUrl(this),
-            action = action,
-            phase = phase,
-            partialTranscript = transcript,
-            responseText = response,
+            request = ConversationFloorRequest(
+                action = action,
+                phase = phase,
+                partialTranscript = transcript,
+                responseText = response,
+            ),
             deviceToken = DeviceCredentials.token(this),
         )
     }
@@ -1645,6 +1664,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun startConversationMode() {
         conversationActive = true
+        conversationPaused = false
         renderState(VoiceState.STARTING, "Starting Conversation Mode")
         try {
             startForegroundService(
@@ -1664,15 +1684,52 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         startService(
             Intent(this, VICConversationService::class.java)
                 .setAction(VICConversationService.ACTION_STOP)
+                .putExtra(
+                    VICConversationService.EXTRA_STOP_REASON,
+                    ConversationStopReason.USER_UI.wireValue,
+                )
         )
         conversationActive = false
+        conversationPaused = false
         renderState(VoiceState.READY, "Conversation ended")
+    }
+
+    private fun pauseConversationMode() {
+        startService(
+            Intent(this, VICConversationService::class.java)
+                .setAction(VICConversationService.ACTION_PAUSE)
+        )
+        conversationPaused = true
+        renderState(VoiceState.READY, "Conversation paused")
+    }
+
+    private fun resumeConversationMode() {
+        startService(
+            Intent(this, VICConversationService::class.java)
+                .setAction(VICConversationService.ACTION_RESUME)
+        )
+        conversationPaused = false
+        renderState(VoiceState.STARTING, "Resuming conversation")
+    }
+
+    private fun showEndConversationConfirmation() {
+        AlertDialog.Builder(this)
+            .setTitle("End this conversation?")
+            .setMessage("Pause keeps the current session ready to resume. End closes it and clears any queued turn.")
+            .setPositiveButton("End conversation") { _, _ -> stopConversationMode() }
+            .setNeutralButton(if (conversationPaused) "Keep paused" else "Pause") { _, _ ->
+                if (!conversationPaused) pauseConversationMode()
+            }
+            .setNegativeButton("Keep talking", null)
+            .show()
     }
 
     private fun restoreConversationSnapshot() {
         val preferences = getSharedPreferences(VICConversationService.PREFERENCES, MODE_PRIVATE)
         conversationActive = preferences.getBoolean(VICConversationService.SNAPSHOT_ACTIVE, false)
         if (!conversationActive) return
+        conversationPaused = preferences.getString(VICConversationService.SNAPSHOT_STATE, null) ==
+            VICConversationService.STATE_PAUSED
         val transcript = preferences.getString(VICConversationService.SNAPSHOT_TRANSCRIPT, null)
         val response = preferences.getString(VICConversationService.SNAPSHOT_RESPONSE, null)
         val provider = preferences.getString(VICConversationService.SNAPSHOT_PROVIDER, null)
@@ -1690,6 +1747,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         when (preferences.getString(VICConversationService.SNAPSHOT_STATE, null)) {
             VICConversationService.STATE_LISTENING -> renderState(VoiceState.LISTENING, "Conversation listening")
             VICConversationService.STATE_PROCESSING -> renderState(VoiceState.PROCESSING, "VIC is thinking")
+            VICConversationService.STATE_RECONNECTING -> renderState(VoiceState.STARTING, "Reconnecting automatically")
             VICConversationService.STATE_SPEAKING -> renderState(VoiceState.SPEAKING, "VIC is speaking")
             VICConversationService.STATE_PAUSED -> renderState(VoiceState.READY, "Conversation paused")
             else -> renderState(VoiceState.STARTING, "Conversation active")
@@ -3013,7 +3071,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             VoiceState.SPEAKING -> "Speaking"
             VoiceState.ERROR -> "Error"
         })
-        val talkLabel = if (conversationActive) "END" else when (state) {
+        val talkLabel = if (conversationActive) {
+            if (conversationPaused) "RESUME" else "PAUSE"
+        } else when (state) {
             VoiceState.LISTENING, VoiceState.STARTING -> "DONE"
             VoiceState.PROCESSING -> "STOP"
             VoiceState.SPEAKING -> "INTERRUPT"
@@ -3039,6 +3099,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             VoiceState.SPEAKING,
         )
         cancelButton.isEnabled = canCancel
+        cancelButton.text = if (conversationActive) "END SESSION" else "CANCEL"
         cancelButton.visibility = if (canCancel) View.VISIBLE else View.GONE
         repeatButton.isEnabled = !conversationActive && lastResponse != null && state !in setOf(VoiceState.STARTING, VoiceState.LISTENING)
         copyButton.isEnabled = lastResponse != null
@@ -3111,6 +3172,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         const val ACTION_VIC_TALK = "dev.voiceos.client.action.VIC_TALK"
         const val ACTION_VIC_SHOW_PROGRESS = "dev.voiceos.client.action.VIC_SHOW_PROGRESS"
         const val ACTION_VIC_TEST_CHECKIN = "dev.voiceos.client.action.VIC_TEST_CHECKIN"
+        const val ACTION_CONFIRM_END_CONVERSATION =
+            "dev.voiceos.client.action.CONFIRM_END_CONVERSATION"
         const val EXTRA_AUTO_LISTEN = "dev.voiceos.client.extra.AUTO_LISTEN"
         const val EXTRA_TASK_ID = "dev.voiceos.client.extra.TASK_ID"
         const val EXTRA_BLOCKED_PACKAGE = "dev.voiceos.client.extra.BLOCKED_PACKAGE"

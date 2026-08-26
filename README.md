@@ -155,7 +155,31 @@ events to `POST /v1/integrations/fieldy/transcripts`. VoiceOS accepts either an
 `X-Fieldy-Signature: sha256=<hex>` HMAC header or, for Fieldy's public webhook
 service, the same secret as a `?token=` query parameter. Query tokens are
 redacted from gateway logs. Fieldy's documented payload is normalized into the
-private intake contract, and retries map to the same personal capture.
+private intake contract, and retries map to the same conversation chunk. VIC
+assembles chunks into a durable conversation while events remain within the
+same Fieldy session/recording and five-minute activity window. It preserves
+speaker segments and waits 330 seconds of quiet before analysis so partial
+transcripts do not become premature tasks. Analysis receives bounded active
+project, open-task, relevant-memory, and pending-review context. Repeated
+suggestions across conversations collapse into one project-aware review item
+with an occurrence count and all supporting capture IDs. By default, completed
+Fieldy conversations are analyzed in a retrying background worker and surfaced
+as review-only task, appointment, worry, idea, or note proposals; nothing is
+committed without approval.
+Set `VOICEOS_FIELDY_AUTO_EXTRACT=0` to park transcripts without analysis.
+
+For a local Tailscale deployment, keep the normal VIC gateway tailnet-only on
+port 443 and expose only Fieldy's signed route on a dedicated Funnel port:
+
+```bash
+tailscale serve --bg --yes http://127.0.0.1:8787
+tailscale funnel --https=8443 --bg --yes \
+  --set-path=/v1/integrations/fieldy/transcripts \
+  http://127.0.0.1:8787/v1/integrations/fieldy/transcripts
+```
+
+Enter `https://<tailscale-dns-name>:8443/v1/integrations/fieldy/transcripts?token=<secret>`
+in Fieldy Developer Settings. Do not expose the root gateway through Funnel.
 
 ## Provider routing
 

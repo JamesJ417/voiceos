@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::state::AppState;
+use voiceos_core::{EngineError, ProviderError};
 
 use super::auth::authenticate;
 use super::error::{ApiResult, api_error};
@@ -102,7 +103,12 @@ pub(crate) async fn turn(
     })
     .await
     .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
-    .map_err(|error| api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    .map_err(|error| match error {
+        EngineError::Provider(ProviderError::VisionNotSupported) => {
+            api_error(StatusCode::NOT_IMPLEMENTED, "vision_not_supported")
+        }
+        error => api_error(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+    })?;
 
     let tool_calls = completion
         .tool_calls

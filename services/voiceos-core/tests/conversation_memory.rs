@@ -28,6 +28,31 @@ impl Provider for RecordingProvider {
     }
 }
 
+#[derive(Default)]
+struct VisionRecordingProvider {
+    requests: Mutex<Vec<ProviderRequest>>,
+}
+
+impl Provider for VisionRecordingProvider {
+    fn name(&self) -> &str {
+        "vision-recording"
+    }
+
+    fn supports_vision(&self) -> bool {
+        true
+    }
+
+    fn complete(&self, request: &ProviderRequest) -> Result<ProviderCompletion, ProviderError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(ProviderCompletion {
+            text: "Recorded vision response".to_owned(),
+            provider: self.name().to_owned(),
+            tool_calls: vec![],
+            usage: Usage::default(),
+        })
+    }
+}
+
 #[test]
 fn device_owns_one_conversation_across_client_sessions() {
     let store = ConversationStore::in_memory().unwrap();
@@ -476,7 +501,7 @@ fn image_attachment_is_owner_scoped_and_claimed_once_with_an_idempotent_turn() {
             &conversation_id,
             "What is in this photo?",
             Some("image-turn-1"),
-            &[attachment.id.clone()],
+            std::slice::from_ref(&attachment.id),
         )
         .unwrap();
     store
@@ -486,7 +511,7 @@ fn image_attachment_is_owner_scoped_and_claimed_once_with_an_idempotent_turn() {
             &conversation_id,
             "What is in this photo?",
             Some("image-turn-1"),
-            &[attachment.id.clone()],
+            std::slice::from_ref(&attachment.id),
         )
         .unwrap();
 
@@ -519,8 +544,209 @@ fn image_attachment_is_owner_scoped_and_claimed_once_with_an_idempotent_turn() {
                 &conversation_id,
                 "should fail",
                 Some("cross-owner-request"),
-                &[attachment.id.clone()],
+                std::slice::from_ref(&attachment.id),
             )
             .is_err()
     );
+}
+
+#[test]
+fn attachment_claim_rejects_missing_or_wrong_owner_and_preserves_multiple_attachment_order() {
+    let store = Arc::new(ConversationStore::in_memory().unwrap());
+    store.ensure_owner_device("owner-1", "device-1").unwrap();
+    store.ensure_owner_device("owner-2", "device-2").unwrap();
+    let conversation_id = store
+        .resolve_owner_conversation("owner-1", "device-1", Some("phone-session"))
+        .unwrap();
+    let first = store
+        .ingest_attachment_for_owner(
+            "owner-1",
+            "device-1",
+            "kitchen.jpg",
+            "image/jpeg",
+            b"\xff\xd8\xfffirst-image",
+        )
+        .unwrap();
+    let second = store
+        .ingest_attachment_for_owner(
+            "owner-1",
+            "device-1",
+            "garden.png",
+            "image/png",
+            b"\x89PNG\r\n\x1a\nsecond-image",
+        )
+        .unwrap();
+    let other_owner_attachment = store
+        .ingest_attachment_for_owner(
+            "owner-2",
+            "device-2",
+            "private.jpg",
+            "image/jpeg",
+            b"\xff\xd8\xffprivate-image",
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .claim_attachments_for_owner_turn(
+                "owner-1",
+                "device-1",
+                &conversation_id,
+                "missing attachment",
+                Some("missing-request"),
+                &["missing-attachment".to_owned()],
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .claim_attachments_for_owner_turn(
+                "owner-1",
+                "device-1",
+                &conversation_id,
+                "other owner's attachment",
+                Some("wrong-owner-request"),
+                &[other_owner_attachment.id],
+            )
+            .is_err()
+    );
+    assert_eq!(store.message_count(&conversation_id).unwrap(), 0);
+
+    let attachment_ids = vec![first.id.clone(), second.id.clone()];
+    let message_id = store
+        .claim_attachments_for_owner_turn(
+            "owner-1",
+            "device-1",
+            &conversation_id,
+            "compare these photos",
+            Some("multiple-request"),
+            &attachment_ids,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_attachments_for_owner_turn(
+                "owner-1",
+                "device-1",
+                &conversation_id,
+                "compare these photos",
+                Some("multiple-request"),
+                &attachment_ids,
+            )
+            .unwrap(),
+        message_id
+    );
+    assert_eq!(store.message_count(&conversation_id).unwrap(), 1);
+    assert_eq!(
+        store
+            .attachments_for_message(message_id)
+            .unwrap()
+            .into_iter()
+            .map(|attachment| attachment.id)
+            .collect::<Vec<_>>(),
+        attachment_ids
+    );
+}
+
+#[test]
+fn vision_provider_receives_typed_image_attachment_bytes() {
+    let store = Arc::new(ConversationStore::in_memory().unwrap());
+    let engine = ConversationEngine::new(store.clone());
+    let provider = VisionRecordingProvider::default();
+    let attachment = store
+        .ingest_attachment_for_owner(
+            "owner-1",
+            "device-1",
+            "kitchen.jpg",
+            "image/jpeg",
+            b"\xff\xd8\xfftest-image",
+        )
+        .unwrap();
+
+    engine
+        .run_owner_turn_idempotent(
+            voiceos_core::OwnerTurnInput {
+                owner_id: "owner-1",
+                device_id: "device-1",
+                client_session_id: None,
+                user_text: "What is in this image?",
+                tools: vec![],
+                request_id: Some("image-request-1"),
+                attachment_ids: vec![attachment.id.clone()],
+            },
+            &provider,
+        )
+        .unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].image_attachments,
+        vec![voiceos_core::ProviderImageAttachment {
+            attachment_id: attachment.id,
+            filename: "kitchen.jpg".to_owned(),
+            media_type: "image/jpeg".to_owned(),
+            bytes: b"\xff\xd8\xfftest-image".to_vec(),
+        }]
+    );
+}
+
+#[test]
+fn attachment_argument_overload_uses_turn_input_attachments_when_argument_is_empty() {
+    let store = Arc::new(ConversationStore::in_memory().unwrap());
+    let engine = ConversationEngine::new(store.clone());
+    let provider = VisionRecordingProvider::default();
+    let attachment = store
+        .ingest_attachment_for_owner(
+            "owner-1",
+            "device-1",
+            "kitchen.jpg",
+            "image/jpeg",
+            b"\xff\xd8\xfftest-image",
+        )
+        .unwrap();
+    let input = voiceos_core::OwnerTurnInput {
+        owner_id: "owner-1",
+        device_id: "device-1",
+        client_session_id: None,
+        user_text: "What is in this image?",
+        tools: vec![],
+        request_id: Some("image-request-2"),
+        attachment_ids: vec![attachment.id.clone()],
+    };
+
+    engine
+        .run_owner_turn_idempotent_with_attachments(input, &provider, &[])
+        .unwrap();
+
+    assert_eq!(
+        provider.requests.lock().unwrap()[0].image_attachments[0].attachment_id,
+        attachment.id
+    );
+}
+
+#[test]
+fn attachment_turn_fails_closed_before_text_only_provider_is_called() {
+    let store = Arc::new(ConversationStore::in_memory().unwrap());
+    let engine = ConversationEngine::new(store);
+    let provider = RecordingProvider::default();
+    let error = engine
+        .run_owner_turn_idempotent(
+            voiceos_core::OwnerTurnInput {
+                owner_id: "owner-1",
+                device_id: "device-1",
+                client_session_id: None,
+                user_text: "What is in this image?",
+                tools: vec![],
+                request_id: Some("image-request-1"),
+                attachment_ids: vec!["attachment-1".to_owned()],
+            },
+            &provider,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        voiceos_core::EngineError::Provider(ProviderError::VisionNotSupported)
+    ));
+    assert!(provider.requests.lock().unwrap().is_empty());
 }

@@ -9,6 +9,8 @@ use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use uuid::Uuid;
 
+const CAPTURE_PROPOSAL_COLUMNS: &str = "proposal_id,owner_id,capture_id,project_id,title,category,confidence,details,suggested_next_action,rationale,evidence_capture_ids_json,dedupe_key,occurrence_count,last_seen_at,status,created_at,expires_at,audit_id";
+
 fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, StoreError> {
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&Utc))
@@ -105,6 +107,18 @@ fn close_capture_after_review(
     Ok(())
 }
 
+fn close_evidence_captures_after_review(
+    connection: &rusqlite::Connection,
+    owner_id: &str,
+    evidence_capture_ids: &[String],
+    now: &str,
+) -> Result<(), StoreError> {
+    for capture_id in evidence_capture_ids {
+        close_capture_after_review(connection, owner_id, capture_id, now)?;
+    }
+    Ok(())
+}
+
 fn normalize_display_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -120,6 +134,8 @@ struct ExtractionOutput {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExtractionCandidate {
+    #[serde(default)]
+    project_id: Option<String>,
     category: String,
     confidence: f64,
     title: String,
@@ -128,6 +144,31 @@ struct ExtractionCandidate {
     rationale: String,
     evidence_capture_ids: Vec<String>,
     expires_at: String,
+}
+
+fn proposal_dedupe_key(category: &str, title: &str, project_id: Option<&str>) -> String {
+    let normalized_title = title
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "{}:{}:{}",
+        category.trim().to_ascii_lowercase(),
+        project_id
+            .unwrap_or("unassigned")
+            .trim()
+            .to_ascii_lowercase(),
+        normalized_title
+    )
 }
 
 fn contains_forbidden_instruction(value: &str) -> bool {
@@ -240,9 +281,9 @@ fn personal_capture_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Person
 
 fn capture_proposal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CaptureProposal> {
     let evidence_capture_ids =
-        serde_json::from_str(&row.get::<_, String>(9)?).map_err(|error| {
+        serde_json::from_str(&row.get::<_, String>(10)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                9,
+                10,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
@@ -251,17 +292,21 @@ fn capture_proposal_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Captur
         id: row.get(0)?,
         owner_id: row.get(1)?,
         capture_id: row.get(2)?,
-        title: row.get(3)?,
-        category: row.get(4)?,
-        confidence: row.get(5)?,
-        details: row.get(6)?,
-        suggested_next_action: row.get(7)?,
-        rationale: row.get(8)?,
+        project_id: row.get(3)?,
+        title: row.get(4)?,
+        category: row.get(5)?,
+        confidence: row.get(6)?,
+        details: row.get(7)?,
+        suggested_next_action: row.get(8)?,
+        rationale: row.get(9)?,
         evidence_capture_ids,
-        status: row.get(10)?,
-        created_at: row.get(11)?,
-        expires_at: row.get(12)?,
-        audit_id: row.get(13)?,
+        dedupe_key: row.get(11)?,
+        occurrence_count: row.get(12)?,
+        last_seen_at: row.get(13)?,
+        status: row.get(14)?,
+        created_at: row.get(15)?,
+        expires_at: row.get(16)?,
+        audit_id: row.get(17)?,
     })
 }
 
@@ -357,6 +402,38 @@ impl ConversationStore {
         statement
             .query_map(
                 params![owner_id, Utc::now().to_rfc3339()],
+                personal_capture_from_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn pending_fieldy_captures(
+        &self,
+        owner_id: &str,
+        limit: usize,
+        quiet_before: DateTime<Utc>,
+    ) -> Result<Vec<PersonalCapture>, StoreError> {
+        if owner_id.trim().is_empty() {
+            return Err(StoreError::InvalidInput("owner is required".into()));
+        }
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT capture_id,owner_id,source,source_id,raw_content,display_text,structured_content_json,status,created_at,expires_at,audit_id \
+             FROM personal_captures WHERE owner_id=?1 AND source='fieldy' AND status='received' \
+             AND expires_at>?2 AND capture_id IN (\
+                 SELECT capture_id FROM fieldy_conversation_assemblies \
+                 WHERE owner_id=?1 AND status='assembling' AND last_received_at<=?3\
+             ) ORDER BY created_at ASC, capture_id ASC LIMIT ?4",
+        )?;
+        statement
+            .query_map(
+                params![
+                    owner_id,
+                    Utc::now().to_rfc3339(),
+                    quiet_before.to_rfc3339(),
+                    limit.clamp(1, 200)
+                ],
                 personal_capture_from_row,
             )?
             .collect::<Result<Vec<_>, _>>()
@@ -563,17 +640,86 @@ impl ConversationStore {
         let transaction = connection.unchecked_transaction()?;
         let mut proposals = Vec::with_capacity(output.candidates.len());
         for candidate in output.candidates {
+            let project_id = candidate
+                .project_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            if let Some(project_id) = project_id.as_deref() {
+                let owns_active_project: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE project_id=?1 AND owner_id=?2 AND status='active')",
+                    params![project_id, capture.owner_id],
+                    |row| row.get(0),
+                )?;
+                if !owns_active_project {
+                    return Err(StoreError::InvalidInput(
+                        "extraction project is missing, inactive, or cross-owner".into(),
+                    ));
+                }
+            }
+            let dedupe_key =
+                proposal_dedupe_key(&candidate.category, &candidate.title, project_id.as_deref());
+            let existing = transaction
+                .query_row(
+                    &format!(
+                        "SELECT {CAPTURE_PROPOSAL_COLUMNS} FROM capture_proposals \
+                         WHERE owner_id=?1 AND dedupe_key=?2 AND status='reviewing' AND expires_at>?3 \
+                         ORDER BY last_seen_at DESC LIMIT 1"
+                    ),
+                    params![capture.owner_id, dedupe_key, created_at],
+                    capture_proposal_from_row,
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                let mut evidence_capture_ids = existing.evidence_capture_ids.clone();
+                if !evidence_capture_ids.contains(&capture.id) {
+                    evidence_capture_ids.push(capture.id.clone());
+                }
+                transaction.execute(
+                    "UPDATE capture_proposals SET evidence_capture_ids_json=?1, \
+                     confidence=MAX(confidence,?2), occurrence_count=occurrence_count+1, \
+                     last_seen_at=?3, expires_at=MAX(expires_at,?4) \
+                     WHERE proposal_id=?5 AND owner_id=?6 AND status='reviewing'",
+                    params![
+                        serde_json::to_string(&evidence_capture_ids)?,
+                        candidate.confidence,
+                        created_at,
+                        candidate.expires_at,
+                        existing.id,
+                        capture.owner_id,
+                    ],
+                )?;
+                let dedupe_audit_id = format!("personal-dedup:{}", Uuid::new_v4());
+                audit(
+                    &transaction,
+                    &capture.owner_id,
+                    &dedupe_audit_id,
+                    "personal.extraction_deduplicated",
+                    &existing.id,
+                    &created_at,
+                )?;
+                proposals.push(transaction.query_row(
+                    &format!(
+                        "SELECT {CAPTURE_PROPOSAL_COLUMNS} FROM capture_proposals WHERE proposal_id=?1"
+                    ),
+                    params![existing.id],
+                    capture_proposal_from_row,
+                )?);
+                continue;
+            }
             let id = Uuid::new_v4().to_string();
             let audit_id = format!("personal-extraction:{id}");
             transaction.execute(
                 "INSERT INTO capture_proposals(\
-                    proposal_id,owner_id,capture_id,title,category,confidence,details,suggested_next_action,\
-                    rationale,evidence_capture_ids_json,status,created_at,expires_at,audit_id\
-                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'reviewing',?11,?12,?13)",
+                    proposal_id,owner_id,capture_id,project_id,title,category,confidence,details,suggested_next_action,\
+                    rationale,evidence_capture_ids_json,dedupe_key,occurrence_count,last_seen_at,status,created_at,expires_at,audit_id\
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,1,?13,'reviewing',?13,?14,?15)",
                 params![
                     id,
                     capture.owner_id,
                     capture.id,
+                    project_id,
                     candidate.title,
                     candidate.category,
                     candidate.confidence,
@@ -581,6 +727,7 @@ impl ConversationStore {
                     candidate.suggested_next_action,
                     candidate.rationale,
                     serde_json::to_string(&candidate.evidence_capture_ids)?,
+                    dedupe_key,
                     created_at,
                     candidate.expires_at,
                     audit_id,
@@ -598,6 +745,7 @@ impl ConversationStore {
                 id,
                 owner_id: capture.owner_id.clone(),
                 capture_id: capture.id.clone(),
+                project_id,
                 title: candidate.title,
                 category: candidate.category,
                 confidence: candidate.confidence,
@@ -605,6 +753,9 @@ impl ConversationStore {
                 suggested_next_action: candidate.suggested_next_action,
                 rationale: candidate.rationale,
                 evidence_capture_ids: candidate.evidence_capture_ids,
+                dedupe_key,
+                occurrence_count: 1,
+                last_seen_at: created_at.clone(),
                 status: "reviewing".into(),
                 created_at: created_at.clone(),
                 expires_at: candidate.expires_at,
@@ -615,6 +766,11 @@ impl ConversationStore {
             "UPDATE personal_captures SET status='reviewing' \
              WHERE capture_id=?1 AND owner_id=?2 AND status IN ('received','reviewing')",
             params![capture.id, capture.owner_id],
+        )?;
+        transaction.execute(
+            "UPDATE fieldy_conversation_assemblies SET status='analyzed',updated_at=?1 \
+             WHERE capture_id=?2 AND owner_id=?3 AND status='assembling'",
+            params![created_at, capture.id, capture.owner_id],
         )?;
         transaction.commit()?;
         Ok(proposals)
@@ -641,11 +797,12 @@ impl ConversationStore {
 
         let id = Uuid::new_v4().to_string();
         let created_at = Utc::now().to_rfc3339();
+        let dedupe_key = proposal_dedupe_key(&proposal.category, &proposal.title, None);
         connection.execute(
             "INSERT INTO capture_proposals(\
-                proposal_id,owner_id,capture_id,title,category,confidence,details,suggested_next_action,\
-                rationale,evidence_capture_ids_json,status,created_at,expires_at,audit_id\
-             ) VALUES(?1,?2,?3,?4,?5,0.0,NULL,'',?6,?7,'reviewing',?8,?9,?10)",
+                proposal_id,owner_id,capture_id,project_id,title,category,confidence,details,suggested_next_action,\
+                rationale,evidence_capture_ids_json,dedupe_key,occurrence_count,last_seen_at,status,created_at,expires_at,audit_id\
+             ) VALUES(?1,?2,?3,NULL,?4,?5,0.0,NULL,'',?6,?7,?8,1,?9,'reviewing',?9,?10,?11)",
             params![
                 id,
                 proposal.owner_id,
@@ -654,6 +811,7 @@ impl ConversationStore {
                 proposal.category,
                 proposal.rationale,
                 serde_json::to_string(&vec![proposal.capture_id.clone()])?,
+                dedupe_key,
                 created_at,
                 proposal.expires_at,
                 proposal.audit_id,
@@ -672,6 +830,7 @@ impl ConversationStore {
             id,
             owner_id: proposal.owner_id,
             capture_id: proposal.capture_id.clone(),
+            project_id: None,
             title: proposal.title,
             category: proposal.category,
             confidence: 0.0,
@@ -679,6 +838,9 @@ impl ConversationStore {
             suggested_next_action: String::new(),
             rationale: proposal.rationale,
             evidence_capture_ids: vec![proposal.capture_id.clone()],
+            dedupe_key,
+            occurrence_count: 1,
+            last_seen_at: created_at.clone(),
             status: "reviewing".into(),
             created_at,
             expires_at: proposal.expires_at,
@@ -695,12 +857,11 @@ impl ConversationStore {
             return Err(StoreError::InvalidInput("owner is required".into()));
         }
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT proposal_id,owner_id,capture_id,title,category,confidence,details,suggested_next_action,\
-             rationale,evidence_capture_ids_json,status,created_at,expires_at,audit_id \
+        let mut statement = connection.prepare(&format!(
+            "SELECT {CAPTURE_PROPOSAL_COLUMNS} \
              FROM capture_proposals WHERE owner_id=?1 AND status='reviewing' AND expires_at>?2 \
-             ORDER BY created_at DESC, proposal_id DESC LIMIT ?3",
-        )?;
+             ORDER BY last_seen_at DESC, proposal_id DESC LIMIT ?3"
+        ))?;
         statement
             .query_map(
                 params![owner_id, Utc::now().to_rfc3339(), limit.clamp(1, 200)],
@@ -734,15 +895,20 @@ impl ConversationStore {
         let transaction = connection.unchecked_transaction()?;
         let proposal = transaction
             .query_row(
-                "SELECT proposal_id,owner_id,capture_id,title,category,confidence,details,suggested_next_action,\
-                 rationale,evidence_capture_ids_json,status,created_at,expires_at,audit_id \
+                &format!(
+                    "SELECT {CAPTURE_PROPOSAL_COLUMNS} \
                  FROM capture_proposals WHERE proposal_id=?1 AND owner_id=?2 AND category='task' \
-                 AND status='reviewing' AND expires_at>?3",
+                 AND status='reviewing' AND expires_at>?3"
+                ),
                 params![proposal_id, owner_id, now],
                 capture_proposal_from_row,
             )
             .optional()?
-            .ok_or_else(|| StoreError::InvalidInput("task proposal missing, cross-owner, expired, or already decided".into()))?;
+            .ok_or_else(|| {
+                StoreError::InvalidInput(
+                    "task proposal missing, cross-owner, expired, or already decided".into(),
+                )
+            })?;
         let task_id = Uuid::new_v4().to_string();
         let observable_outcome = proposal
             .details
@@ -751,8 +917,8 @@ impl ConversationStore {
             .unwrap_or(&proposal.suggested_next_action);
         transaction.execute(
             "INSERT INTO tasks(task_id,owner_id,project_id,parent_task_id,title,observable_outcome,estimated_minutes,due_at,importance,status,created_at,updated_at) \
-             VALUES(?1,?2,NULL,NULL,?3,?4,?5,NULL,'normal',?6,?7,?7)",
-            params![task_id, owner_id, proposal.title, observable_outcome, estimated_minutes, task_status, now],
+             VALUES(?1,?2,?3,NULL,?4,?5,?6,NULL,'normal',?7,?8,?8)",
+            params![task_id, owner_id, proposal.project_id, proposal.title, observable_outcome, estimated_minutes, task_status, now],
         )?;
         if transaction.execute(
             "UPDATE capture_proposals SET status='approved' WHERE proposal_id=?1 AND owner_id=?2 AND status='reviewing' AND expires_at>?3",
@@ -760,7 +926,12 @@ impl ConversationStore {
         )? != 1 {
             return Err(StoreError::InvalidInput("task proposal is no longer reviewable".into()));
         }
-        close_capture_after_review(&transaction, owner_id, &proposal.capture_id, &now)?;
+        close_evidence_captures_after_review(
+            &transaction,
+            owner_id,
+            &proposal.evidence_capture_ids,
+            &now,
+        )?;
         transaction.execute(
             "INSERT INTO execution_events(owner_id,stream_id,event_type,actor,payload_json,occurred_at) VALUES(?1,?2,'personal.proposal_task_approved','voiceos-core',?3,?4)",
             params![owner_id, audit_id, serde_json::json!({"proposal_id": proposal_id, "capture_id": proposal.capture_id, "task_id": task_id}).to_string(), now],
@@ -769,7 +940,7 @@ impl ConversationStore {
         Ok(TaskRecord {
             id: task_id,
             owner_id: owner_id.into(),
-            project_id: None,
+            project_id: proposal.project_id,
             parent_task_id: None,
             title: proposal.title,
             observable_outcome: observable_outcome.into(),
@@ -797,10 +968,9 @@ impl ConversationStore {
         let transaction = connection.unchecked_transaction()?;
         let proposal = transaction
             .query_row(
-                "SELECT proposal_id,owner_id,capture_id,title,category,confidence,details,suggested_next_action,\
-                 rationale,evidence_capture_ids_json,status,created_at,expires_at,audit_id \
+                &format!("SELECT {CAPTURE_PROPOSAL_COLUMNS} \
                  FROM capture_proposals WHERE proposal_id=?1 AND owner_id=?2 \
-                 AND category IN ('appointment','worry','idea','note') AND status='reviewing' AND expires_at>?3",
+                 AND category IN ('appointment','worry','idea','note') AND status='reviewing' AND expires_at>?3"),
                 params![proposal_id, owner_id, now],
                 capture_proposal_from_row,
             )
@@ -808,9 +978,9 @@ impl ConversationStore {
             .ok_or_else(|| StoreError::InvalidInput("non-task proposal missing, cross-owner, expired, or already decided".into()))?;
         let record_id = Uuid::new_v4().to_string();
         transaction.execute(
-            "INSERT INTO personal_review_records(record_id,owner_id,proposal_id,capture_id,category,title,details,suggested_next_action,status,created_at,audit_id) \
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'reviewable',?9,?10)",
-            params![record_id, owner_id, proposal_id, proposal.capture_id, proposal.category, proposal.title, proposal.details, proposal.suggested_next_action, now, audit_id],
+            "INSERT INTO personal_review_records(record_id,owner_id,proposal_id,capture_id,project_id,category,title,details,suggested_next_action,status,created_at,audit_id) \
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'reviewable',?10,?11)",
+            params![record_id, owner_id, proposal_id, proposal.capture_id, proposal.project_id, proposal.category, proposal.title, proposal.details, proposal.suggested_next_action, now, audit_id],
         )?;
         if transaction.execute(
             "UPDATE capture_proposals SET status='approved' WHERE proposal_id=?1 AND owner_id=?2 AND status='reviewing' AND expires_at>?3",
@@ -818,7 +988,12 @@ impl ConversationStore {
         )? != 1 {
             return Err(StoreError::InvalidInput("non-task proposal is no longer reviewable".into()));
         }
-        close_capture_after_review(&transaction, owner_id, &proposal.capture_id, &now)?;
+        close_evidence_captures_after_review(
+            &transaction,
+            owner_id,
+            &proposal.evidence_capture_ids,
+            &now,
+        )?;
         transaction.execute(
             "INSERT INTO execution_events(owner_id,stream_id,event_type,actor,payload_json,occurred_at) VALUES(?1,?2,'personal.proposal_review_record_approved','voiceos-core',?3,?4)",
             params![owner_id, audit_id, serde_json::json!({"proposal_id": proposal_id, "capture_id": proposal.capture_id, "record_id": record_id, "category": proposal.category}).to_string(), now],
@@ -829,6 +1004,7 @@ impl ConversationStore {
             owner_id: owner_id.into(),
             proposal_id: proposal_id.into(),
             capture_id: proposal.capture_id,
+            project_id: proposal.project_id,
             category: proposal.category,
             title: proposal.title,
             details: proposal.details,
@@ -849,7 +1025,7 @@ impl ConversationStore {
         }
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT record_id,owner_id,proposal_id,capture_id,category,title,details,suggested_next_action,status,created_at,audit_id \
+            "SELECT record_id,owner_id,proposal_id,capture_id,project_id,category,title,details,suggested_next_action,status,created_at,audit_id \
              FROM personal_review_records WHERE owner_id=?1 ORDER BY created_at DESC, record_id DESC LIMIT ?2",
         )?;
         statement
@@ -859,13 +1035,14 @@ impl ConversationStore {
                     owner_id: row.get(1)?,
                     proposal_id: row.get(2)?,
                     capture_id: row.get(3)?,
-                    category: row.get(4)?,
-                    title: row.get(5)?,
-                    details: row.get(6)?,
-                    suggested_next_action: row.get(7)?,
-                    status: row.get(8)?,
-                    created_at: row.get(9)?,
-                    audit_id: row.get(10)?,
+                    project_id: row.get(4)?,
+                    category: row.get(5)?,
+                    title: row.get(6)?,
+                    details: row.get(7)?,
+                    suggested_next_action: row.get(8)?,
+                    status: row.get(9)?,
+                    created_at: row.get(10)?,
+                    audit_id: row.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()
@@ -888,12 +1065,12 @@ impl ConversationStore {
         }
         let connection = self.connection()?;
         let now = Utc::now().to_rfc3339();
-        let capture_id: String = connection
+        let (capture_id, evidence_capture_ids_json): (String, String) = connection
             .query_row(
-                "SELECT capture_id FROM capture_proposals WHERE proposal_id=?1 AND owner_id=?2 \
+                "SELECT capture_id,evidence_capture_ids_json FROM capture_proposals WHERE proposal_id=?1 AND owner_id=?2 \
                  AND status='reviewing' AND expires_at>?3",
                 params![proposal_id, owner_id, now],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or_else(|| {
@@ -911,7 +1088,12 @@ impl ConversationStore {
                 "proposal missing, cross-owner, expired, or already decided".into(),
             ));
         }
-        close_capture_after_review(&connection, owner_id, &capture_id, &now)?;
+        let mut evidence_capture_ids: Vec<String> =
+            serde_json::from_str(&evidence_capture_ids_json)?;
+        if !evidence_capture_ids.contains(&capture_id) {
+            evidence_capture_ids.push(capture_id);
+        }
+        close_evidence_captures_after_review(&connection, owner_id, &evidence_capture_ids, &now)?;
         audit(
             &connection,
             owner_id,

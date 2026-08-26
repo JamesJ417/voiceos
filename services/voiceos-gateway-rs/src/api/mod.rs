@@ -9,6 +9,7 @@ mod events;
 mod floor;
 mod focus;
 mod health;
+mod image_contract;
 mod memories;
 mod ontology;
 mod outreach;
@@ -175,6 +176,18 @@ pub(crate) fn router(state: AppState) -> Router {
             post(personal_support::fieldy_intake),
         )
         .route(
+            "/internal/v1/personal/fieldy/pending",
+            get(personal_support::pending_fieldy),
+        )
+        .route(
+            "/internal/v1/personal/fieldy/context/{capture_id}",
+            get(personal_support::fieldy_context),
+        )
+        .route(
+            "/internal/v1/personal/captures/{capture_id}/extract",
+            post(personal_support::internal_extract),
+        )
+        .route(
             "/internal/v1/console/commands",
             post(console::internal_execute),
         )
@@ -198,7 +211,7 @@ pub(crate) fn router(state: AppState) -> Router {
 
 #[cfg(test)]
 mod integration_tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use axum::{
         Router,
@@ -210,7 +223,10 @@ mod integration_tests {
     use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
     use tower::ServiceExt;
-    use voiceos_core::{ConversationEngine, ConversationStore, ProviderRouter, RoutingPolicy};
+    use voiceos_core::{
+        ConversationEngine, ConversationStore, MockProvider, Provider, ProviderCompletion,
+        ProviderRequest, ProviderRouter, RoutingPolicy, Usage,
+    };
     use voiceos_ontology::{Interpreter, OntologyStore};
 
     use super::router;
@@ -219,9 +235,42 @@ mod integration_tests {
     const OWNER: &str = "owner-a";
     const TOKEN: &str = "test-device-token";
 
+    struct VisionRecordingProvider {
+        requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    }
+
+    impl Provider for VisionRecordingProvider {
+        fn name(&self) -> &str {
+            "vision-recording"
+        }
+
+        fn supports_vision(&self) -> bool {
+            true
+        }
+
+        fn complete(
+            &self,
+            request: &ProviderRequest,
+        ) -> Result<ProviderCompletion, voiceos_core::ProviderError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(ProviderCompletion {
+                text: "image received".to_owned(),
+                provider: self.name().to_owned(),
+                tool_calls: vec![],
+                usage: Usage::default(),
+            })
+        }
+    }
+
     fn authenticated_router() -> (Router, Arc<ConversationStore>, std::path::PathBuf) {
+        authenticated_router_with_provider(Arc::new(MockProvider))
+    }
+
+    fn authenticated_router_with_provider(
+        provider: Arc<dyn Provider>,
+    ) -> (Router, Arc<ConversationStore>, std::path::PathBuf) {
         let store = Arc::new(ConversationStore::in_memory().unwrap());
-        store.migrate_devices_to_owner(OWNER).unwrap();
+        store.ensure_owner_device(OWNER, "device-a").unwrap();
         let legacy_audit_path = std::env::temp_dir().join(format!(
             "voiceos-gateway-test-{}.sqlite",
             uuid::Uuid::new_v4()
@@ -245,9 +294,11 @@ mod integration_tests {
         let ontology = Arc::new(Interpreter::new(Arc::new(
             OntologyStore::in_memory().unwrap(),
         )));
+        let mut provider_router = ProviderRouter::new(RoutingPolicy::default());
+        provider_router.register(provider);
         let state = AppState {
             engine: Arc::new(ConversationEngine::new(store.clone())),
-            router: Arc::new(ProviderRouter::new(RoutingPolicy::default())),
+            router: Arc::new(provider_router),
             ontology,
             store: store.clone(),
             legacy_audit_path: legacy_audit_path.clone(),
@@ -266,6 +317,334 @@ mod integration_tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    #[tokio::test]
+    async fn image_turn_returns_typed_error_without_claiming_the_attachment() {
+        let (app, store, path) = authenticated_router();
+        let attachment = store
+            .ingest_attachment_for_owner(
+                OWNER,
+                "device-a",
+                "kitchen.jpg",
+                "image/jpeg",
+                b"\xff\xd8\xfftest-image",
+            )
+            .unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/turns/text")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "text": "What is in this photo?",
+                    "provider": "mock",
+                    "request_id": "image-turn-1",
+                    "attachment_ids": [attachment.id],
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let (status, body) = response(app, request).await;
+
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"], "vision_not_supported");
+        assert!(
+            store
+                .recent_conversation_messages(OWNER, 10)
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_http_contract_rejects_malformed_metadata_without_creating_a_session() {
+        let (app, store, path) = authenticated_router();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/uploads")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("x-voiceos-file-name", "photo.png")
+            .header("content-type", "image/png")
+            .header("x-voiceos-upload-length", "not-a-number")
+            .header("x-voiceos-upload-sha256", "invalid")
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, body) = response(app, request).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_upload_length");
+        let session_count: i64 = store
+            .connection()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM upload_sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(session_count, 0);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_http_contract_rejects_malformed_sha256_metadata() {
+        let (app, store, path) = authenticated_router();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/uploads")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("x-voiceos-file-name", "photo.png")
+            .header("content-type", "image/png")
+            .header("x-voiceos-upload-length", "8")
+            .header("x-voiceos-upload-sha256", "ABC")
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, body) = response(app, request).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_upload_sha256");
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_http_contract_rejects_unsupported_media_and_oversized_metadata_without_sessions()
+     {
+        let (app, store, path) = authenticated_router();
+        let valid_sha256 = "a".repeat(64);
+        let unsupported_media = Request::builder()
+            .method("POST")
+            .uri("/v1/uploads")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("x-voiceos-file-name", "photo.gif")
+            .header("content-type", "image/gif")
+            .header("x-voiceos-upload-length", "8")
+            .header("x-voiceos-upload-sha256", &valid_sha256)
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = response(app.clone(), unsupported_media).await;
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(body["error"], "unsupported_media_type");
+
+        let oversized = Request::builder()
+            .method("POST")
+            .uri("/v1/uploads")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("x-voiceos-file-name", "photo.png")
+            .header("content-type", "image/png")
+            .header("x-voiceos-upload-length", "26214401")
+            .header("x-voiceos-upload-sha256", &valid_sha256)
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = response(app, oversized).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body["error"], "upload_too_large");
+        let session_count: i64 = store
+            .connection()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM upload_sessions", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(session_count, 0);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_http_contract_retries_an_identical_chunk_and_finalizes_once() {
+        let (app, store, path) = authenticated_router();
+        let bytes = b"\x89PNG\r\n\x1a\n";
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let create = Request::builder()
+            .method("POST")
+            .uri("/v1/uploads")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("x-voiceos-file-name", "photo.png")
+            .header("content-type", "image/png")
+            .header("x-voiceos-upload-length", bytes.len())
+            .header("x-voiceos-upload-sha256", &sha256)
+            .body(Body::empty())
+            .unwrap();
+        let (status, created) = response(app.clone(), create).await;
+        assert_eq!(status, StatusCode::CREATED, "create response: {created}");
+        let upload_id = created["upload"]["upload_id"].as_str().unwrap();
+
+        let chunk = || {
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/v1/uploads/{upload_id}/chunks/0"))
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(bytes.as_slice()))
+                .unwrap()
+        };
+        let (status, first_chunk) = response(app.clone(), chunk()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first_chunk["next_offset"], json!(bytes.len()));
+        let (status, retried_chunk) = response(app.clone(), chunk()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retried_chunk["next_offset"], json!(bytes.len()));
+
+        let finalize = || {
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/uploads/{upload_id}/finalize"))
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let (status, finalized) = response(app.clone(), finalize()).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(finalized["attachment"]["sha256"], sha256);
+        let (status, repeated_finalization) = response(app, finalize()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            repeated_finalization["attachment"]["attachment_id"],
+            finalized["attachment"]["attachment_id"]
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn uploaded_image_turn_forwards_typed_bytes_to_a_vision_provider() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(VisionRecordingProvider {
+            requests: requests.clone(),
+        });
+        let (app, store, path) = authenticated_router_with_provider(provider);
+        let bytes = b"\x89PNG\r\n\x1a\nvoiceos-image";
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+
+        let create = Request::builder()
+            .method("POST")
+            .uri("/v1/uploads")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("x-voiceos-file-name", "kitchen.png")
+            .header("content-type", "image/png")
+            .header("x-voiceos-upload-length", bytes.len())
+            .header("x-voiceos-upload-sha256", &sha256)
+            .body(Body::empty())
+            .unwrap();
+        let (status, created) = response(app.clone(), create).await;
+        assert_eq!(status, StatusCode::CREATED, "create response: {created}");
+        let upload_id = created["upload"]["upload_id"].as_str().unwrap().to_owned();
+
+        let chunk = Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/uploads/{upload_id}/chunks/0"))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::from(bytes.as_slice()))
+            .unwrap();
+        let (status, chunked) = response(app.clone(), chunk).await;
+        assert_eq!(status, StatusCode::OK, "chunk response: {chunked}");
+
+        let finalize = Request::builder()
+            .method("POST")
+            .uri(format!("/v1/uploads/{upload_id}/finalize"))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        let (status, finalized) = response(app.clone(), finalize).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "finalize response: {finalized}"
+        );
+        let attachment_id = finalized["attachment"]["attachment_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let turn = Request::builder()
+            .method("POST")
+            .uri("/v1/turns/text")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "text": "What is in this image?",
+                    "provider": "vision-recording",
+                    "request_id": "vision-upload-turn-1",
+                    "attachment_ids": [attachment_id],
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let (status, turn) = response(app, turn).await;
+        assert_eq!(status, StatusCode::OK, "turn response: {turn}");
+        assert_eq!(turn["response_text"], "image received");
+
+        let provider_requests = requests.lock().unwrap();
+        assert_eq!(provider_requests.len(), 1);
+        assert_eq!(
+            provider_requests[0].image_attachments,
+            vec![voiceos_core::ProviderImageAttachment {
+                attachment_id,
+                filename: "kitchen.png".to_owned(),
+                media_type: "image/png".to_owned(),
+                bytes: bytes.to_vec(),
+            }]
+        );
+        drop(provider_requests);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn upload_http_contract_rejects_conflicting_retry_without_advancing_offset() {
+        let (app, store, path) = authenticated_router();
+        let bytes = b"\\x89PNG\\r\\n\\x1a\\n";
+        let conflicting = b"\\x89PNG\\r\\n\\x1aX";
+        let sha256 = format!("{:x}", Sha256::digest(bytes));
+        let create = Request::builder()
+            .method("POST")
+            .uri("/v1/uploads")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .header("x-voiceos-file-name", "photo.png")
+            .header("content-type", "image/png")
+            .header("x-voiceos-upload-length", bytes.len())
+            .header("x-voiceos-upload-sha256", &sha256)
+            .body(Body::empty())
+            .unwrap();
+        let (status, created) = response(app.clone(), create).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let upload_id = created["upload"]["upload_id"].as_str().unwrap();
+
+        let first = Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/uploads/{upload_id}/chunks/0"))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::from(bytes.as_slice()))
+            .unwrap();
+        let (status, body) = response(app.clone(), first).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["received_bytes"], json!(bytes.len()));
+
+        let retry = Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/uploads/{upload_id}/chunks/0"))
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::from(conflicting.as_slice()))
+            .unwrap();
+        let (status, body) = response(app.clone(), retry).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "offset_conflict");
+
+        let received: i64 = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT received_bytes FROM upload_sessions WHERE upload_id=?",
+                [upload_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(received, bytes.len() as i64);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -311,13 +690,74 @@ mod integration_tests {
         };
 
         let (first_status, first) = response(app.clone(), request()).await;
-        let (second_status, second) = response(app, request()).await;
+        let (second_status, second) = response(app.clone(), request()).await;
 
         assert_eq!(first_status, StatusCode::CREATED);
         assert_eq!(second_status, StatusCode::CREATED);
         assert_eq!(first["capture"]["id"], second["capture"]["id"]);
         assert_eq!(first["capture"]["source"], "fieldy");
         assert_eq!(store.personal_inbox(OWNER).unwrap().len(), 1);
+
+        let pending_request = || {
+            Request::builder()
+                .method("GET")
+                .uri("/internal/v1/personal/fieldy/pending?quiet_seconds=0")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let (pending_status, pending) = response(app.clone(), pending_request()).await;
+        assert_eq!(pending_status, StatusCode::OK);
+        assert_eq!(pending["captures"].as_array().unwrap().len(), 1);
+
+        let capture = &first["capture"];
+        let context_request = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/internal/v1/personal/fieldy/context/{}",
+                capture["id"].as_str().unwrap()
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let (context_status, context) = response(app.clone(), context_request).await;
+        assert_eq!(context_status, StatusCode::OK);
+        assert_eq!(context["capture_id"], capture["id"]);
+        assert!(context["projects"].is_array());
+        assert!(context["tasks"].is_array());
+        assert!(context["memories"].is_array());
+        assert!(context["reviewing_proposals"].is_array());
+
+        let extract_request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/internal/v1/personal/captures/{}/extract",
+                capture["id"].as_str().unwrap()
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"output": {
+                    "owner_id": OWNER,
+                    "capture_id": capture["id"],
+                    "candidates": [{
+                        "project_id": null,
+                        "category": "note",
+                        "confidence": 0.88,
+                        "title": "Portrait display mount",
+                        "details": "The mount measurements need confirmation.",
+                        "suggested_next_action": "Review the mount measurements.",
+                        "rationale": "The conversation explicitly mentions the display mount.",
+                        "evidence_capture_ids": [capture["id"]],
+                        "expires_at": capture["expires_at"]
+                    }]
+                }})
+                .to_string(),
+            ))
+            .unwrap();
+        let (extract_status, extracted) = response(app.clone(), extract_request).await;
+        assert_eq!(extract_status, StatusCode::OK);
+        assert_eq!(extracted["proposals"].as_array().unwrap().len(), 1);
+
+        let (_, pending_after) = response(app, pending_request()).await;
+        assert!(pending_after["captures"].as_array().unwrap().is_empty());
         std::fs::remove_file(path).unwrap();
     }
 

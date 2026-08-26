@@ -5,6 +5,7 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.net.URL
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class TurnResult(
@@ -118,13 +119,24 @@ data class ClientEvent(val id: Long, val type: String, val payload: JSONObject)
 
 data class ConversationFloor(
     val conversationId: String,
+    val leaseId: String?,
     val holderDeviceId: String?,
     val holderDisplayName: String?,
     val phase: String,
     val partialTranscript: String?,
     val responseText: String?,
     val revision: Long,
+    val expiresAtUnix: Long,
     val active: Boolean,
+)
+
+data class ConversationFloorRequest(
+    val action: String,
+    val phase: String,
+    val partialTranscript: String? = null,
+    val responseText: String? = null,
+    val expectedLeaseId: String? = null,
+    val expectedRevision: Long? = null,
 )
 
 data class VicOutreach(
@@ -163,20 +175,13 @@ object GatewayClient {
 
     fun changeConversationFloor(
         baseUrl: String,
-        action: String,
-        phase: String,
-        partialTranscript: String? = null,
-        responseText: String? = null,
+        request: ConversationFloorRequest,
         deviceToken: String?,
         callback: (Result<ConversationFloor>) -> Unit = {},
     ) {
         Thread({
             callback(runCatching {
-                retryConnection {
-                    changeConversationFloorBlocking(
-                        baseUrl, action, phase, partialTranscript, responseText, deviceToken,
-                    )
-                }
+                retryConnection { changeConversationFloorBlocking(baseUrl, request, deviceToken) }
             })
         }, "voiceos-conversation-floor").start()
     }
@@ -374,10 +379,10 @@ object GatewayClient {
         text: String,
         deviceToken: String?,
         attachmentIds: List<String> = emptyList(),
+        requestId: String = java.util.UUID.randomUUID().toString(),
         callback: (Result<TurnResult>) -> Unit,
     ) {
         Thread({
-            val requestId = java.util.UUID.randomUUID().toString()
             callback(runCatching {
                 retryConnection { submitTextBlocking(baseUrl, sessionId, text, deviceToken, requestId, attachmentIds) }
             })
@@ -545,8 +550,8 @@ object GatewayClient {
     private fun getHealthBlocking(baseUrl: String, deviceToken: String?): GatewayHealth {
         val connection = URL("$baseUrl/v1/health").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken)
-            val payload = responseJson(connection)
+            GatewayHttp.configure(connection, deviceToken)
+            val payload = GatewayHttp.responseJson(connection)
             return GatewayHealth(
                 status = payload.getString("status"),
                 gateway = payload.getString("gateway"),
@@ -561,8 +566,8 @@ object GatewayClient {
         val connection = URL("$baseUrl/v1/events/recovery?after=0&tail=true")
             .openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken)
-            return responseJson(connection).optLong("latest_event_id", 0L).coerceAtLeast(0L)
+            GatewayHttp.configure(connection, deviceToken)
+            return GatewayHttp.responseJson(connection).optLong("latest_event_id", 0L).coerceAtLeast(0L)
         } finally {
             connection.disconnect()
         }
@@ -576,8 +581,8 @@ object GatewayClient {
         val safeLimit = limit.coerceIn(1, 200)
         val connection = URL("$baseUrl/v1/tasks?include_completed=true&limit=$safeLimit").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken)
-            val response = responseJson(connection)
+            GatewayHttp.configure(connection, deviceToken)
+            val response = GatewayHttp.responseJson(connection)
             val tasks = response.getJSONArray("tasks")
             val details = response.optJSONArray("details")
             val detailByTask = buildMap {
@@ -604,8 +609,8 @@ object GatewayClient {
     ): List<VoiceProject> {
         val connection = URL("$baseUrl/v1/projects?limit=100").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken)
-            val projects = responseJson(connection).getJSONArray("projects")
+            GatewayHttp.configure(connection, deviceToken)
+            val projects = GatewayHttp.responseJson(connection).getJSONArray("projects")
             return buildList {
                 for (index in 0 until projects.length()) {
                     val project = projects.getJSONObject(index)
@@ -628,8 +633,8 @@ object GatewayClient {
             .toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/projects").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            return parseProject(responseJson(connection).getJSONObject("project"))
+            GatewayHttp.configure(connection, deviceToken, request)
+            return parseProject(GatewayHttp.responseJson(connection).getJSONObject("project"))
         } finally {
             connection.disconnect()
         }
@@ -663,8 +668,8 @@ object GatewayClient {
             .toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/tasks").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            val response = responseJson(connection)
+            GatewayHttp.configure(connection, deviceToken, request)
+            val response = GatewayHttp.responseJson(connection)
             return parseTask(
                 response.getJSONObject("task"),
                 response.optJSONObject("initiative"),
@@ -688,8 +693,8 @@ object GatewayClient {
         val connection = URL("$baseUrl/v1/tasks/$encodedId/status")
             .openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            return parseTask(responseJson(connection).getJSONObject("task"))
+            GatewayHttp.configure(connection, deviceToken, request)
+            return parseTask(GatewayHttp.responseJson(connection).getJSONObject("task"))
         } finally {
             connection.disconnect()
         }
@@ -710,8 +715,8 @@ object GatewayClient {
             .toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/tasks/$encodedId/actions").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            responseJson(connection)
+            GatewayHttp.configure(connection, deviceToken, request)
+            GatewayHttp.responseJson(connection)
         } finally {
             connection.disconnect()
         }
@@ -732,8 +737,8 @@ object GatewayClient {
             .toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/tasks/$encodedId/attention").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            return parseTask(responseJson(connection).getJSONObject("task"))
+            GatewayHttp.configure(connection, deviceToken, request)
+            return parseTask(GatewayHttp.responseJson(connection).getJSONObject("task"))
         } finally {
             connection.disconnect()
         }
@@ -796,8 +801,8 @@ object GatewayClient {
         val safeLimit = limit.coerceIn(1, 100)
         val connection = URL("$baseUrl/v1/audit/turns?limit=$safeLimit").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken)
-            val turns = responseJson(connection).getJSONArray("turns")
+            GatewayHttp.configure(connection, deviceToken)
+            val turns = GatewayHttp.responseJson(connection).getJSONArray("turns")
             return buildList {
                 for (index in 0 until turns.length()) {
                     val turn = turns.getJSONObject(index)
@@ -825,17 +830,30 @@ object GatewayClient {
         requestId: String,
         attachmentIds: List<String>,
     ): TurnResult {
+        val attachments = org.json.JSONArray().apply {
+            attachmentIds.forEach { attachmentId ->
+                put(JSONObject().put("attachment_id", attachmentId).put("purpose", "input_image"))
+            }
+        }
         val request = JSONObject()
             .put("session_id", sessionId)
             .put("text", text)
             .put("request_id", requestId)
+            // Keep the legacy field while gateways roll out the attachment objects.
             .put("attachment_ids", org.json.JSONArray(attachmentIds))
+            .put("attachments", attachments)
             .toString()
             .toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/turns/text").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            val payload = responseJson(connection)
+            GatewayHttp.configure(
+                connection,
+                deviceToken,
+                request,
+                readTimeoutMillis = GatewayTimeoutPolicy.LONG_TURN_READ_MILLIS,
+                requestProperties = mapOf("Idempotency-Key" to requestId),
+            )
+            val payload = GatewayHttp.responseJson(connection)
             val approvals = payload.optJSONArray("approvals")
             val approval = approvals?.optJSONObject(0)?.let {
                 ApprovalRequest(
@@ -860,26 +878,25 @@ object GatewayClient {
 
     private fun changeConversationFloorBlocking(
         baseUrl: String,
-        action: String,
-        phase: String,
-        partialTranscript: String?,
-        responseText: String?,
+        floorRequest: ConversationFloorRequest,
         deviceToken: String?,
     ): ConversationFloor {
         val request = JSONObject()
-            .put("action", action)
-            .put("phase", phase)
-            .put("partial_transcript", partialTranscript)
-            .put("response_text", responseText)
+            .put("action", floorRequest.action)
+            .put("phase", floorRequest.phase)
+            .put("partial_transcript", floorRequest.partialTranscript)
+            .put("response_text", floorRequest.responseText)
             .put("display_name", "Pixel")
             .put("ttl_seconds", 45)
+            .put("expected_lease_id", floorRequest.expectedLeaseId)
+            .put("expected_revision", floorRequest.expectedRevision)
             .toString()
             .toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/conversations/active/floor")
             .openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            return parseConversationFloor(responseJson(connection).getJSONObject("floor"))
+            GatewayHttp.configure(connection, deviceToken, request)
+            return parseConversationFloor(GatewayHttp.responseJson(connection).getJSONObject("floor"))
         } finally {
             connection.disconnect()
         }
@@ -887,12 +904,14 @@ object GatewayClient {
 
     fun parseConversationFloor(value: JSONObject): ConversationFloor = ConversationFloor(
         conversationId = value.optString("conversation_id"),
+        leaseId = value.optString("lease_id").takeIf(String::isNotBlank),
         holderDeviceId = value.optString("holder_device_id").takeIf(String::isNotBlank),
         holderDisplayName = value.optString("holder_display_name").takeIf(String::isNotBlank),
         phase = value.optString("phase", "idle"),
         partialTranscript = value.optString("partial_transcript").takeIf(String::isNotBlank),
         responseText = value.optString("response_text").takeIf(String::isNotBlank),
         revision = value.optLong("revision", 0),
+        expiresAtUnix = value.optLong("expires_at_unix", 0),
         active = value.optBoolean("active", false),
     )
 
@@ -910,8 +929,8 @@ object GatewayClient {
         val connection = URL("$baseUrl/v1/approvals/decide")
             .openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            val payload = responseJson(connection)
+            GatewayHttp.configure(connection, deviceToken, request)
+            val payload = GatewayHttp.responseJson(connection)
             return ApprovalDecisionResult(
                 requestId = payload.getString("request_id"),
                 status = payload.getString("status"),
@@ -931,8 +950,8 @@ object GatewayClient {
         val connection = URL("$baseUrl/v1/enrollment/exchange")
             .openConnection() as HttpURLConnection
         try {
-            configure(connection, null, request)
-            val payload = responseJson(connection)
+            GatewayHttp.configure(connection, null, request)
+            val payload = GatewayHttp.responseJson(connection)
             return EnrollmentResult(
                 deviceId = payload.getString("device_id"),
                 deviceToken = payload.getString("device_token"),
@@ -956,8 +975,8 @@ object GatewayClient {
         try {
             connection.setRequestProperty("X-VoiceOS-File-Name", encodedFilename)
             connection.setRequestProperty("X-VoiceOS-Document-Mode", mode)
-            configure(connection, deviceToken, bytes, mediaType)
-            val document = responseJson(connection).getJSONObject("document")
+            GatewayHttp.configure(connection, deviceToken, bytes, mediaType)
+            val document = GatewayHttp.responseJson(connection).getJSONObject("document")
             return DocumentUploadResult(
                 documentId = document.getString("id"),
                 filename = document.getString("filename"),
@@ -978,18 +997,57 @@ object GatewayClient {
     ): AttachmentUploadResult {
         AttachmentInput.requireUploadSize(bytes.size)
         val encodedFilename = URLEncoder.encode(filename, Charsets.UTF_8.name()).replace("+", "%20")
-        val connection = URL("$baseUrl/v1/attachments").openConnection() as HttpURLConnection
+        val sha256 = MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+
+        val create = URL("$baseUrl/v1/uploads").openConnection() as HttpURLConnection
+        val upload = try {
+            create.setRequestProperty("X-VoiceOS-File-Name", encodedFilename)
+            create.setRequestProperty("X-VoiceOS-Upload-Length", bytes.size.toString())
+            create.setRequestProperty("X-VoiceOS-Upload-SHA256", sha256)
+            GatewayHttp.configure(create, deviceToken, null, mediaType)
+            create.requestMethod = "POST"
+            GatewayHttp.responseJson(create).getJSONObject("upload")
+        } finally {
+            create.disconnect()
+        }
+
+        val uploadId = upload.getString("upload_id")
+        val chunkSize = upload.getInt("chunk_size")
+        var offset = 0
+        while (offset < bytes.size) {
+            val end = minOf(offset + chunkSize, bytes.size)
+            val chunk = bytes.copyOfRange(offset, end)
+            val chunkConnection = URL("$baseUrl/v1/uploads/${URLEncoder.encode(uploadId, Charsets.UTF_8.name())}/chunks/$offset")
+                .openConnection() as HttpURLConnection
+            try {
+                chunkConnection.requestMethod = "PUT"
+                chunkConnection.doOutput = true
+                chunkConnection.setRequestProperty("Authorization", "Bearer $deviceToken")
+                chunkConnection.setRequestProperty("Accept", "application/json")
+                chunkConnection.setRequestProperty("Content-Type", "application/octet-stream")
+                chunkConnection.setFixedLengthStreamingMode(chunk.size)
+                chunkConnection.outputStream.use { it.write(chunk) }
+                GatewayHttp.responseJson(chunkConnection)
+            } finally {
+                chunkConnection.disconnect()
+            }
+            offset = end
+        }
+
+        val finalize = URL("$baseUrl/v1/uploads/${URLEncoder.encode(uploadId, Charsets.UTF_8.name())}/finalize")
+            .openConnection() as HttpURLConnection
         try {
-            connection.setRequestProperty("X-VoiceOS-File-Name", encodedFilename)
-            configure(connection, deviceToken, bytes, mediaType)
-            val attachment = responseJson(connection).getJSONObject("attachment")
+            GatewayHttp.configure(finalize, deviceToken)
+            finalize.requestMethod = "POST"
+            val attachment = GatewayHttp.responseJson(finalize).getJSONObject("attachment")
             return AttachmentUploadResult(
-                id = attachment.getString("id"),
+                id = attachment.getString("attachment_id"),
                 filename = attachment.getString("filename"),
                 mediaType = attachment.getString("media_type"),
             )
         } finally {
-            connection.disconnect()
+            finalize.disconnect()
         }
     }
 
@@ -1000,8 +1058,8 @@ object GatewayClient {
         val connection = URL("$baseUrl/v1/skills/proposals?status=proposed&limit=20")
             .openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken)
-            val proposals = responseJson(connection).getJSONArray("proposals")
+            GatewayHttp.configure(connection, deviceToken)
+            val proposals = GatewayHttp.responseJson(connection).getJSONArray("proposals")
             return buildList {
                 for (index in 0 until proposals.length()) {
                     add(parseSkillProposal(proposals.getJSONObject(index)))
@@ -1015,8 +1073,8 @@ object GatewayClient {
     private fun getSkillsBlocking(baseUrl: String, deviceToken: String?): List<SkillProposal> {
         val connection = URL("$baseUrl/v1/skills?status=approved&limit=200").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken)
-            val skills = responseJson(connection).getJSONArray("skills")
+            GatewayHttp.configure(connection, deviceToken)
+            val skills = GatewayHttp.responseJson(connection).getJSONArray("skills")
             return buildList { for (index in 0 until skills.length()) add(parseSkillProposal(skills.getJSONObject(index))) }
         } finally {
             connection.disconnect()
@@ -1026,8 +1084,8 @@ object GatewayClient {
     private fun getSkillUsagesBlocking(baseUrl: String, deviceToken: String?): List<SkillUsage> {
         val connection = URL("$baseUrl/v1/skills/usages?limit=30").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken)
-            val usages = responseJson(connection).getJSONArray("usages")
+            GatewayHttp.configure(connection, deviceToken)
+            val usages = GatewayHttp.responseJson(connection).getJSONArray("usages")
             return buildList {
                 for (index in 0 until usages.length()) {
                     val usage = usages.getJSONObject(index)
@@ -1052,8 +1110,8 @@ object GatewayClient {
         val request = JSONObject().put("status", if (enabled) "approved" else "disabled").toString().toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/skills/$encodedId/status").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            return parseSkillProposal(responseJson(connection).getJSONObject("skill"))
+            GatewayHttp.configure(connection, deviceToken, request)
+            return parseSkillProposal(GatewayHttp.responseJson(connection).getJSONObject("skill"))
         } finally {
             connection.disconnect()
         }
@@ -1064,8 +1122,8 @@ object GatewayClient {
         val request = JSONObject().put("feedback", if (correct) "correct" else "incorrect").toString().toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/skills/usages/$encodedId/feedback").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            val usage = responseJson(connection).getJSONObject("usage")
+            GatewayHttp.configure(connection, deviceToken, request)
+            val usage = GatewayHttp.responseJson(connection).getJSONObject("usage")
             return SkillUsage(
                 id = usage.getString("id"),
                 skillId = usage.getString("skill_id"),
@@ -1094,8 +1152,8 @@ object GatewayClient {
         val connection = URL("$baseUrl/v1/skills/proposals/$encodedId/decision")
             .openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            return parseSkillProposal(responseJson(connection).getJSONObject("proposal"))
+            GatewayHttp.configure(connection, deviceToken, request)
+            return parseSkillProposal(GatewayHttp.responseJson(connection).getJSONObject("proposal"))
         } finally {
             connection.disconnect()
         }
@@ -1134,8 +1192,8 @@ object GatewayClient {
             .toString().toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/outreach").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, request)
-            return parseOutreach(responseJson(connection).getJSONObject("outreach"))
+            GatewayHttp.configure(connection, deviceToken, request)
+            return parseOutreach(GatewayHttp.responseJson(connection).getJSONObject("outreach"))
         } finally {
             connection.disconnect()
         }
@@ -1144,8 +1202,8 @@ object GatewayClient {
     private fun getPendingOutreachBlocking(baseUrl: String, deviceToken: String?): List<VicOutreach> {
         val connection = URL("$baseUrl/v1/outreach?limit=50").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken)
-            val records = responseJson(connection).getJSONArray("outreach")
+            GatewayHttp.configure(connection, deviceToken)
+            val records = GatewayHttp.responseJson(connection).getJSONArray("outreach")
             return buildList {
                 for (index in 0 until records.length()) {
                     val outreach = parseOutreach(records.getJSONObject(index))
@@ -1170,8 +1228,8 @@ object GatewayClient {
         }.toString().toByteArray(Charsets.UTF_8)
         val connection = URL("$baseUrl/v1/outreach/$encodedId/actions").openConnection() as HttpURLConnection
         try {
-            configure(connection, deviceToken, payload)
-            return parseOutreach(responseJson(connection).getJSONObject("outreach"))
+            GatewayHttp.configure(connection, deviceToken, payload)
+            return parseOutreach(GatewayHttp.responseJson(connection).getJSONObject("outreach"))
         } finally {
             connection.disconnect()
         }
@@ -1187,37 +1245,6 @@ object GatewayClient {
         status = payload.optString("status", "queued"),
         taskId = payload.optString("task_id").takeIf { it.isNotBlank() },
     )
-
-    private fun configure(
-        connection: HttpURLConnection,
-        deviceToken: String?,
-        request: ByteArray? = null,
-        contentType: String = "application/json; charset=utf-8",
-    ) {
-        connection.connectTimeout = 7_000
-        connection.readTimeout = 90_000
-        connection.setRequestProperty("Accept", "application/json")
-        if (!deviceToken.isNullOrBlank()) {
-            connection.setRequestProperty("Authorization", "Bearer $deviceToken")
-        }
-        if (request != null) {
-            connection.requestMethod = "POST"
-            connection.doOutput = true
-            connection.setFixedLengthStreamingMode(request.size)
-            connection.setRequestProperty("Content-Type", contentType)
-            connection.outputStream.use { it.write(request) }
-        }
-    }
-
-    private fun responseJson(connection: HttpURLConnection): JSONObject {
-        val status = connection.responseCode
-        val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        if (status !in 200..299) {
-            throw IllegalStateException("Gateway returned HTTP $status: $body")
-        }
-        return JSONObject(body)
-    }
 
     private fun <T> retryConnection(action: () -> T): T {
         var lastError: IOException? = null

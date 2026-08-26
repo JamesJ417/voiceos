@@ -17,6 +17,8 @@ pub(crate) struct FloorRequest {
     response_text: Option<String>,
     display_name: Option<String>,
     ttl_seconds: Option<i64>,
+    expected_lease_id: Option<String>,
+    expected_revision: Option<i64>,
 }
 
 pub(crate) async fn get_floor(
@@ -43,7 +45,7 @@ pub(crate) async fn change_floor(
     let store = state.store.clone();
     let result = tokio::task::spawn_blocking(move || {
         let conversation_id = store.resolve_owner_conversation(&owner_id, &device_id, None)?;
-        store.change_conversation_floor(
+        store.change_conversation_floor_fenced(
             &owner_id,
             &conversation_id,
             &device_id,
@@ -53,6 +55,8 @@ pub(crate) async fn change_floor(
             request.partial_transcript.as_deref(),
             request.response_text.as_deref(),
             request.ttl_seconds.unwrap_or(45),
+            request.expected_lease_id.as_deref(),
+            request.expected_revision,
         )
     })
     .await
@@ -60,7 +64,12 @@ pub(crate) async fn change_floor(
     match result {
         Ok(floor) => Ok(Json(json!({"floor": floor}))),
         Err(voiceos_core::StoreError::InvalidInput(message))
-            if message == "conversation_floor_not_owned" =>
+            if matches!(
+                message.as_str(),
+                "conversation_floor_not_owned"
+                    | "conversation_floor_lease_mismatch"
+                    | "conversation_floor_revision_mismatch"
+            ) =>
         {
             Err(api_error(StatusCode::CONFLICT, message))
         }

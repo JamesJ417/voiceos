@@ -496,6 +496,24 @@ class HermesProvider:
                         self._start_completion_watcher(
                             run_id, conversation_id, api_key, 0
                         )
+                        delegated_goal = next(
+                            (
+                                str(safe_event[key]).strip()
+                                for key in ("summary", "preview", "output", "tool")
+                                if isinstance(safe_event.get(key), str)
+                                and str(safe_event[key]).strip()
+                            ),
+                            " ".join(text.split())[:300],
+                        )
+                        return ProviderResponse(
+                            text=(
+                                f"I started a background worker for: {delegated_goal}. "
+                                "You can keep talking with me while it works; I’ll bring the "
+                                "completed report back into this conversation."
+                            ),
+                            provider=self.name,
+                            events=events[-50:],
+                        )
                     if event_name == "approval.request":
                         self._notify_skill_scan(run_id)
                         command = str(safe_event.get("command", "")).strip()

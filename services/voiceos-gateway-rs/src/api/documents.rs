@@ -9,6 +9,8 @@ use crate::state::AppState;
 
 use super::auth::{authenticate, header_text};
 use super::error::{ApiResult, api_error};
+#[cfg(test)]
+use super::image_contract::is_supported_image_media_type;
 
 const MAX_FILE_BYTES: usize = 5 * 1024 * 1024;
 
@@ -120,10 +122,11 @@ fn supported_text_file(filename: &str, media_type: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn supported_image_file(filename: &str, media_type: &str) -> bool {
     let extension = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     matches!(extension.as_str(), "jpg" | "jpeg" | "png" | "webp")
-        && matches!(media_type, "image/jpeg" | "image/png" | "image/webp")
+        && is_supported_image_media_type(media_type)
 }
 
 #[cfg(test)]

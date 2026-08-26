@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use crate::{
     ChatMessage, ContextClaim, ContextSource, ConversationStore, Provider, ProviderCompletion,
-    ProviderError, ProviderRequest, Role, StoreError, ToolDefinition, validate_context,
+    ProviderError, ProviderImageAttachment, ProviderRequest, Role, StoreError, ToolDefinition,
+    validate_context,
 };
 
 #[derive(Clone, Debug)]
@@ -188,6 +189,9 @@ impl ConversationEngine {
         input: OwnerTurnInput<'_>,
         provider: &dyn Provider,
     ) -> Result<(String, ProviderCompletion), EngineError> {
+        if !input.attachment_ids.is_empty() && !provider.supports_vision() {
+            return Err(ProviderError::VisionNotSupported.into());
+        }
         let (conversation_id, context) = self.prepare_owner_turn_with_attachments(
             input.owner_id,
             input.device_id,
@@ -196,11 +200,14 @@ impl ConversationEngine {
             input.request_id,
             &input.attachment_ids,
         )?;
+        let image_attachments =
+            self.provider_image_attachments(input.owner_id, &input.attachment_ids)?;
         let messages = self.provider_messages(context)?;
         let completion = provider.complete(&ProviderRequest {
             conversation_id: conversation_id.clone(),
             messages,
             tools: input.tools,
+            image_attachments,
         })?;
         self.record_assistant_from(
             &conversation_id,
@@ -218,19 +225,40 @@ impl ConversationEngine {
         provider: &dyn Provider,
         attachment_ids: &[String],
     ) -> Result<(String, ProviderCompletion), EngineError> {
+        let input_attachment_ids = &input.attachment_ids;
+        if !input_attachment_ids.is_empty()
+            && !attachment_ids.is_empty()
+            && input_attachment_ids != attachment_ids
+        {
+            return Err(StoreError::InvalidInput(
+                "attachment IDs conflict between turn input and attachment argument".to_owned(),
+            )
+            .into());
+        }
+        let effective_attachment_ids = if attachment_ids.is_empty() {
+            input_attachment_ids
+        } else {
+            attachment_ids
+        };
+        if !effective_attachment_ids.is_empty() && !provider.supports_vision() {
+            return Err(ProviderError::VisionNotSupported.into());
+        }
         let (conversation_id, context) = self.prepare_owner_turn_with_attachments(
             input.owner_id,
             input.device_id,
             input.client_session_id,
             input.user_text,
             input.request_id,
-            attachment_ids,
+            effective_attachment_ids,
         )?;
+        let image_attachments =
+            self.provider_image_attachments(input.owner_id, effective_attachment_ids)?;
         let messages = self.provider_messages(context)?;
         let completion = provider.complete(&ProviderRequest {
             conversation_id: conversation_id.clone(),
             messages,
             tools: input.tools,
+            image_attachments,
         })?;
         self.record_assistant_from(
             &conversation_id,
@@ -467,6 +495,31 @@ impl ConversationEngine {
             .summarize(existing.as_ref().map(|value| value.0.as_str()), &messages);
         self.store
             .save_summary_for_owner(owner_id, conversation_id, &summary, through_id)
+    }
+    fn provider_image_attachments(
+        &self,
+        owner_id: &str,
+        attachment_ids: &[String],
+    ) -> Result<Vec<ProviderImageAttachment>, StoreError> {
+        attachment_ids
+            .iter()
+            .map(|attachment_id| {
+                let (attachment, bytes) = self
+                    .store
+                    .attachment_content_for_owner(owner_id, attachment_id)?
+                    .ok_or_else(|| {
+                        StoreError::InvalidInput(
+                            "attachment missing or not owned by owner".to_owned(),
+                        )
+                    })?;
+                Ok(ProviderImageAttachment {
+                    attachment_id: attachment.id,
+                    filename: attachment.filename,
+                    media_type: attachment.media_type,
+                    bytes,
+                })
+            })
+            .collect()
     }
 }
 

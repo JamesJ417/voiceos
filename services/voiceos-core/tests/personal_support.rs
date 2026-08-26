@@ -207,6 +207,100 @@ fn capture_deduplicates_voice_capture_ids_and_fieldy_event_ids() {
 }
 
 #[test]
+fn fieldy_chunks_assemble_until_quiet_and_preserve_speakers() {
+    let store = ConversationStore::in_memory().unwrap();
+    let occurred_at = Utc::now() - Duration::minutes(1);
+    let first = voiceos_core::FieldyTranscriptEvent {
+        event_id: "fieldy-chunk-1".into(),
+        occurred_at: occurred_at.to_rfc3339(),
+        transcript: "We should finish the display mount".into(),
+        recording_id: Some("recording-1".into()),
+        session_id: Some("session-1".into()),
+        speakers: vec![serde_json::json!({
+            "speakerName": "Vic",
+            "text": "We should finish the display mount"
+        })],
+        metadata: serde_json::json!({"source": "fieldy"}),
+    };
+    let second = voiceos_core::FieldyTranscriptEvent {
+        event_id: "fieldy-chunk-2".into(),
+        occurred_at: (occurred_at + Duration::seconds(30)).to_rfc3339(),
+        transcript: "We should finish the display mount and Alex will check the cable".into(),
+        recording_id: Some("recording-1".into()),
+        session_id: Some("session-1".into()),
+        speakers: vec![serde_json::json!({
+            "speakerName": "Alex",
+            "text": "I will check the cable"
+        })],
+        metadata: serde_json::json!({"source": "fieldy"}),
+    };
+
+    let assembled = store
+        .capture_fieldy_event("owner-a", &first, Duration::days(1))
+        .unwrap();
+    let updated = store
+        .capture_fieldy_event("owner-a", &second, Duration::days(1))
+        .unwrap();
+
+    assert_eq!(assembled.id, updated.id);
+    assert_eq!(
+        updated.raw_content,
+        "We should finish the display mount and Alex will check the cable"
+    );
+    let structured = updated.structured_content.unwrap();
+    assert_eq!(structured["kind"], "fieldy_conversation");
+    assert_eq!(structured["chunk_count"], 2);
+    assert_eq!(structured["chunks"][0]["speakers"][0]["speakerName"], "Vic");
+    assert_eq!(
+        structured["chunks"][1]["speakers"][0]["speakerName"],
+        "Alex"
+    );
+    assert_eq!(structured["chunks"][0]["recording_id"], "recording-1");
+    assert_eq!(structured["chunks"][1]["session_id"], "session-1");
+    assert!(
+        store
+            .pending_fieldy_captures("owner-a", 10, Utc::now() - Duration::seconds(1))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .pending_fieldy_captures("owner-a", 10, Utc::now() + Duration::seconds(1))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn fieldy_event_after_five_minute_gap_starts_a_new_conversation() {
+    let store = ConversationStore::in_memory().unwrap();
+    let occurred_at = Utc::now() - Duration::minutes(10);
+    let event =
+        |event_id: &str, occurred_at: chrono::DateTime<Utc>| voiceos_core::FieldyTranscriptEvent {
+            event_id: event_id.into(),
+            occurred_at: occurred_at.to_rfc3339(),
+            transcript: format!("Transcript {event_id}"),
+            recording_id: None,
+            session_id: None,
+            speakers: vec![],
+            metadata: serde_json::json!({}),
+        };
+    let first = store
+        .capture_fieldy_event("owner-a", &event("one", occurred_at), Duration::days(1))
+        .unwrap();
+    let second = store
+        .capture_fieldy_event(
+            "owner-a",
+            &event("two", occurred_at + Duration::minutes(6)),
+            Duration::days(1),
+        )
+        .unwrap();
+
+    assert_ne!(first.id, second.id);
+}
+
+#[test]
 fn capture_personal_input_preserves_raw_text_normalizes_display_and_has_no_downstream_effects() {
     let store = ConversationStore::in_memory().unwrap();
     let raw = "  Buy   milk\nwhen I leave work.  ";
@@ -366,6 +460,101 @@ fn extraction_of_a_messy_brain_dump_persists_only_reviewable_proposals() {
     assert_eq!(
         store.downstream_record_counts("owner-a").unwrap(),
         (0, 0, 0, 0, 0)
+    );
+}
+
+#[test]
+fn extraction_links_projects_and_deduplicates_across_conversations() {
+    let store = ConversationStore::in_memory().unwrap();
+    let project = store
+        .create_project("owner-a", None, "Portrait display")
+        .unwrap();
+    let first = store
+        .capture_personal_input(
+            "owner-a",
+            CaptureSource::voice("conversation-1"),
+            "We need to confirm the display mount measurements.",
+            Utc::now(),
+            Duration::days(1),
+        )
+        .unwrap();
+    let second = store
+        .capture_personal_input(
+            "owner-a",
+            CaptureSource::voice("conversation-2"),
+            "The display mount measurements still need confirmation.",
+            Utc::now(),
+            Duration::days(1),
+        )
+        .unwrap();
+    let output = |capture: &PersonalCapture, title: &str| {
+        serde_json::json!({
+            "owner_id": "owner-a",
+            "capture_id": capture.id,
+            "candidates": [{
+                "project_id": project.id,
+                "category": "task",
+                "confidence": 0.9,
+                "title": title,
+                "details": "Confirm the display mount measurements.",
+                "suggested_next_action": "Review the measurement details.",
+                "rationale": "This was discussed in the conversation.",
+                "evidence_capture_ids": [capture.id],
+                "expires_at": capture.expires_at
+            }]
+        })
+        .to_string()
+    };
+
+    store
+        .extract_personal_capture(
+            "owner-a",
+            &first.id,
+            &StaticExtractor(output(&first, "Confirm display-mount measurements")),
+        )
+        .unwrap();
+    let repeated = store
+        .extract_personal_capture(
+            "owner-a",
+            &second.id,
+            &StaticExtractor(output(&second, "Confirm display mount measurements")),
+        )
+        .unwrap();
+
+    assert_eq!(repeated.len(), 1);
+    assert_eq!(repeated[0].project_id.as_deref(), Some(project.id.as_str()));
+    assert_eq!(repeated[0].occurrence_count, 2);
+    assert_eq!(
+        repeated[0].evidence_capture_ids,
+        vec![first.id.clone(), second.id.clone()]
+    );
+    assert_eq!(store.capture_proposals("owner-a", 10).unwrap().len(), 1);
+
+    let task = store
+        .approve_task_proposal(
+            "owner-a",
+            &repeated[0].id,
+            TaskApprovalStatus::Ready,
+            15,
+            "approve-deduplicated-task",
+        )
+        .unwrap();
+    assert_eq!(task.project_id.as_deref(), Some(project.id.as_str()));
+    assert_eq!(
+        store
+            .personal_capture("owner-a", &first.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "approved"
+    );
+    assert_eq!(
+        store
+            .personal_capture("owner-a", &second.id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "approved"
     );
 }
 

@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64 = "0.22"
 chrono.workspace = true
 hmac = "0.12"
 hex = "0.4"

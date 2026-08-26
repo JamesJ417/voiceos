@@ -1,6 +1,6 @@
 # Image attachment upload contract
 
-Status: upload and owner-scoped turn association implemented; model vision delivery awaits a provider adapter that explicitly forwards image bytes.
+Status: upload, owner-scoped turn association, and Ollama image-byte delivery implemented. Text-only providers fail closed with `vision_not_supported`.
 
 ## Design
 
@@ -15,7 +15,7 @@ All endpoints require the existing device authentication headers.
 Headers:
 
 - `X-VoiceOS-File-Name`: URL-encoded filename, required
-- `Content-Type`: image media type, required (`image/jpeg`, `image/png`, `image/webp`, or `image/gif`)
+- `Content-Type`: image media type, required (`image/jpeg`, `image/png`, or `image/webp`)
 - `X-VoiceOS-Upload-Length`: decimal byte length, required
 - `X-VoiceOS-Upload-SHA256`: lowercase hexadecimal SHA-256 of the complete file, required
 
@@ -85,20 +85,18 @@ Hash mismatch returns `422`; an incomplete upload returns `409`.
 
 ### 4. Attach to a text turn
 
-`POST /v1/turns/text` accepts an optional `attachments` array:
+`POST /v1/turns/text` accepts an optional `attachment_ids` array:
 
 ```json
 {
   "session_id": "uuid",
   "text": "What is in this image?",
-  "attachments": [
-    { "attachment_id": "uuid", "purpose": "input_image" }
-  ],
+  "attachment_ids": ["uuid"],
   "request_id": "uuid"
 }
 ```
 
-`attachments` must contain finalized, owner-scoped attachments only. The server preserves attachment IDs in the idempotent user-turn record. Providers must explicitly implement image-byte forwarding before advertising vision support; every currently configured provider returns the typed `vision_not_supported` error rather than silently dropping an image.
+`attachment_ids` must contain finalized, owner-scoped attachments only. The server preserves attachment IDs in the idempotent user-turn record. Ollama receives the owned image bytes as base64 image payloads on the final user message; text-only providers return the typed `vision_not_supported` error before an attachment is claimed.
 
 ## Invariants
 
@@ -106,4 +104,4 @@ Hash mismatch returns `422`; an incomplete upload returns `409`.
 - Raw chunks are never exposed through the conversation context endpoint.
 - Finalization verifies both declared length and SHA-256.
 - Repeated create/finalize/chunk requests are safe to retry.
-- The existing text-only turn behavior remains unchanged when `attachments` is absent.
+- The existing text-only turn behavior remains unchanged when `attachment_ids` is absent.

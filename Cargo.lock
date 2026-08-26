@@ -4638,6 +4638,7 @@ dependencies = [
  "gtk4",
  "serde",
  "serde_json",
+ "sha2",
  "ureq",
 ]
 
@@ -4645,6 +4646,7 @@ dependencies = [
 name = "voiceos-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "hex",
  "hmac",

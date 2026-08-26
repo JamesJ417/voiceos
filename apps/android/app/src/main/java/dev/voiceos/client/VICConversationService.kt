@@ -11,17 +11,21 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioManager
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
+import android.os.SystemClock
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
+import android.util.Log
 import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
@@ -32,22 +36,39 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     private var recognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    private var active = false
-    private var paused = false
-    private var speaking = false
-    private var requestInFlight = false
-    private var stopAfterSpeech = false
-    private var pauseAfterSpeech = false
+    private val controller = ConversationController()
+    private val active: Boolean get() = controller.active
+    private val paused: Boolean get() = controller.paused
+    private val speaking: Boolean get() = controller.speaking
+    private val requestInFlight: Boolean get() = controller.requestInFlight
+    private var stopAfterSpeechReason: ConversationStopReason? = null
+    private var pauseAfterSpeechDetail: String? = null
+    private val ttsTerminalCompletionGate = TtsTerminalCompletionGate()
     private var ttsReady = false
     private var pendingSpeech: String? = null
     private var currentSpeech: String? = null
-    private var interruptedSpeech: String? = null
+    private val resumableResponse = ResumableResponse()
     private var latestPartial: String? = null
-    private var silentAttempts = 0
+    private val silencePolicy = ConversationSilencePolicy(
+        inactivityTimeoutMillis = CONVERSATION_IDLE_TIMEOUT_MILLIS,
+        clock = SystemClock::elapsedRealtime,
+    )
     private var generation = 0
+    private var pendingTurn: PendingConversationTurn? = null
+    private var recognizerRecoveryAttempt = 0
+    private var resettingRecognizer = false
+    private var recognitionInProgress = false
+    private var recognitionFinalizationRequested = false
+    private var recognitionFinalizationReason: String? = null
+    private var recognitionResultAccepted = false
+    private var recognitionSpeechDetected = false
+    private var recognitionBackend = RecognitionBackend.ON_DEVICE
     private var pendingApproval: ApprovalRequest? = null
     private var floorEvents: EventSubscription? = null
     private var floorCursor = 0L
+    private var floorReconnectAttempt = 0
+    @Volatile private var floorLeaseId: String? = null
+    @Volatile private var floorRevision = 0L
     private var lastFloorUpdateMillis = 0L
     private val sessionId by lazy {
         val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
@@ -58,13 +79,79 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     }
 
     private val sessionTimeout = Runnable {
-        if (active) speakThenStop("This conversation has reached its time limit. Say hello again whenever you are ready.")
+        if (active && !paused) speakThenPause(
+            "This conversation has reached its time limit, so I paused it. Resume whenever you are ready.",
+            "Conversation paused at its time limit",
+        )
+    }
+
+    private val listenRunnable = Runnable { beginListening() }
+    private val turnRetryRunnable = Runnable { submitPendingTurn() }
+    private val recognitionQuietTimeout = Runnable {
+        requestRecognitionFinalization(RecognitionWatchdogPolicy.PARTIAL_QUIET_REASON)
+    }
+    private val recognitionHardTimeout = Runnable {
+        requestRecognitionFinalization(RecognitionWatchdogPolicy.HARD_LIMIT_REASON)
+    }
+    private val recognitionResultFallback = Runnable {
+        if (
+            !recognitionFinalizationRequested || recognitionResultAccepted ||
+            !active || paused || speaking || requestInFlight
+        ) {
+            clearRecognitionWatchdog()
+            return@Runnable
+        }
+        val finalizationReason = recognitionFinalizationReason
+        val partial = latestPartial
+        latestPartial = null
+        recognitionResultAccepted = true
+        clearRecognitionWatchdog()
+        if (
+            recognitionBackend == RecognitionBackend.ON_DEVICE &&
+            RecognitionWatchdogPolicy.hardLimitPartialNeedsPlatformRetry(
+                finalizationReason,
+                partial,
+            )
+        ) {
+            recognitionResultAccepted = false
+            switchToPlatformRecognizer("hard_limit_fragment")
+            recoverRecognizer(SpeechRecognizer.ERROR_CLIENT)
+            return@Runnable
+        }
+        if (partial.isNullOrBlank()) {
+            Log.w(TAG, "event=recognizer_final_result_missing")
+            recoverRecognizer(SpeechRecognizer.ERROR_CLIENT)
+        } else {
+            resetRecognizer()
+            controller.dispatch(ConversationEvent.SpeechDetected)
+            recognizerRecoveryAttempt = 0
+            silencePolicy.markActivity()
+            Log.w(TAG, "event=recognizer_partial_fallback chars=${partial.length}")
+            handleRecognizedText(partial)
+        }
+    }
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            Log.i(TAG, "event=network_available")
+            handler.post {
+                if (active && !paused && pendingTurn != null && !requestInFlight) {
+                    handler.removeCallbacks(turnRetryRunnable)
+                    submitPendingTurn()
+                }
+            }
+        }
+
+        override fun onLost(network: Network) {
+            Log.w(TAG, "event=network_lost")
+        }
     }
 
     private val resumeInterruptedSpeech = object : Runnable {
         override fun run() {
-            if (!active || paused || stopAfterSpeech || pauseAfterSpeech) {
-                interruptedSpeech = null
+            if (!active || paused || stopAfterSpeechReason != null || pauseAfterSpeechDetail != null) {
+                resumableResponse.clear()
+                clearResumableResponse()
                 return
             }
             val audioManager = getSystemService(AudioManager::class.java)
@@ -77,8 +164,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 handler.postDelayed(this, PHONE_AUDIO_RECHECK_MILLIS)
                 return
             }
-            val text = interruptedSpeech ?: return
-            interruptedSpeech = null
+            val text = resumableResponse.peekForResume() ?: return
             publish(STATE_SPEAKING, response = text, detail = "VIC is resuming")
             updateNotification("VIC is resuming", paused = false)
             speakResponse(text)
@@ -87,11 +173,23 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
 
     private val recognitionListener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
+            controller.dispatch(ConversationEvent.ListenerReady)
+            recognitionInProgress = true
+            handler.removeCallbacks(recognitionHardTimeout)
+            handler.postDelayed(
+                recognitionHardTimeout,
+                RecognitionWatchdogPolicy.RECOGNIZER_HARD_LIMIT_MILLIS,
+            )
+            Log.i(TAG, "event=recognizer_ready")
             publish(STATE_LISTENING, detail = "Listening")
         }
 
         override fun onBeginningOfSpeech() {
-            silentAttempts = 0
+            controller.dispatch(ConversationEvent.SpeechDetected)
+            recognitionSpeechDetected = true
+            recognizerRecoveryAttempt = 0
+            silencePolicy.markActivity()
+            Log.i(TAG, "event=speech_started")
             publish(STATE_LISTENING, detail = "I hear you")
         }
 
@@ -99,26 +197,86 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         override fun onBufferReceived(buffer: ByteArray?) = Unit
 
         override fun onEndOfSpeech() {
+            Log.i(TAG, "event=speech_ended")
+            handler.removeCallbacks(recognitionQuietTimeout)
+            handler.removeCallbacks(recognitionHardTimeout)
+            recognitionFinalizationRequested = true
+            recognitionFinalizationReason = RecognitionWatchdogPolicy.END_OF_SPEECH_REASON
+            handler.removeCallbacks(recognitionResultFallback)
+            handler.postDelayed(
+                recognitionResultFallback,
+                RecognitionWatchdogPolicy.FINAL_RESULT_GRACE_MILLIS,
+            )
             if (active && !paused) publish(STATE_PROCESSING, detail = "Finishing transcript")
         }
 
         override fun onError(error: Int) {
+            val stalledAfterSpeech = recognitionFinalizationRequested && recognitionSpeechDetected
+            val finalizationReason = recognitionFinalizationReason
+            val finalizationPartial = latestPartial?.takeIf {
+                recognitionFinalizationRequested && it.isNotBlank()
+            }
+            clearRecognitionWatchdog()
             latestPartial = null
-            if (!active || paused || speaking || requestInFlight) return
+            if (resettingRecognizer || !active || paused || speaking || requestInFlight) return
+            Log.w(TAG, "event=recognizer_error code=$error idle_ms=${silencePolicy.idleDurationMillis()}")
+            if (
+                stalledAfterSpeech && recognitionBackend == RecognitionBackend.ON_DEVICE &&
+                error in setOf(
+                    SpeechRecognizer.ERROR_NO_MATCH,
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
+                    SpeechRecognizer.ERROR_CLIENT,
+                ) &&
+                RecognitionWatchdogPolicy.hardLimitPartialNeedsPlatformRetry(
+                    finalizationReason,
+                    finalizationPartial,
+                )
+            ) {
+                switchToPlatformRecognizer("hard_limit_fragment")
+                recoverRecognizer(error)
+                return
+            }
+            if (finalizationPartial != null) {
+                recognitionResultAccepted = true
+                resetRecognizer()
+                controller.dispatch(ConversationEvent.SpeechDetected)
+                recognizerRecoveryAttempt = 0
+                silencePolicy.markActivity()
+                Log.w(
+                    TAG,
+                    "event=recognizer_partial_fallback chars=${finalizationPartial.length} source=error",
+                )
+                handleRecognizedText(finalizationPartial)
+                return
+            }
+            if (
+                stalledAfterSpeech && recognitionBackend == RecognitionBackend.ON_DEVICE &&
+                error in setOf(
+                    SpeechRecognizer.ERROR_NO_MATCH,
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT,
+                    SpeechRecognizer.ERROR_CLIENT,
+                )
+            ) {
+                switchToPlatformRecognizer("stalled_after_speech")
+                recoverRecognizer(error)
+                return
+            }
             when (error) {
                 SpeechRecognizer.ERROR_NO_MATCH,
                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> handleSilence()
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> {
-                    resetRecognizer()
-                    scheduleListening(500L)
-                }
-                SpeechRecognizer.ERROR_CLIENT -> scheduleListening(350L)
-                else -> speakThenStop(recognitionErrorMessage(error))
+                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS,
+                SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
+                SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
+                    pauseForConfigurationError(recognitionErrorMessage(error))
+
+                else -> recoverRecognizer(error)
             }
         }
 
         override fun onResults(results: Bundle?) {
-            if (!active || paused) return
+            if (!active || paused || recognitionResultAccepted) return
+            recognitionResultAccepted = true
+            clearRecognitionWatchdog()
             val finalText = recognitionText(results)
             val text = moreCompleteTranscript(finalText, latestPartial)
             latestPartial = null
@@ -126,13 +284,25 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 handleSilence()
                 return
             }
-            silentAttempts = 0
+            controller.dispatch(ConversationEvent.SpeechDetected)
+            recognizerRecoveryAttempt = 0
+            silencePolicy.markActivity()
+            Log.i(TAG, "event=recognizer_result")
             handleRecognizedText(text)
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
+            if (!active || paused || recognitionResultAccepted) return
             val partial = recognitionText(partialResults) ?: return
+            silencePolicy.markActivity()
             latestPartial = partial
+            if (recognitionInProgress && !recognitionFinalizationRequested) {
+                handler.removeCallbacks(recognitionQuietTimeout)
+                handler.postDelayed(
+                    recognitionQuietTimeout,
+                    RecognitionWatchdogPolicy.partialResultQuietMillis(partial),
+                )
+            }
             publish(STATE_LISTENING, transcript = partial, detail = "Listening")
         }
 
@@ -141,19 +311,29 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
 
     override fun onCreate() {
         super.onCreate()
+        recognitionBackend = RecognitionBackend.fromPersisted(
+            getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .getString(RECOGNITION_BACKEND, null),
+        )
         createNotificationChannel()
         textToSpeech = TextToSpeech(this, this)
-        bootstrapFloorEvents()
+        runCatching {
+            getSystemService(ConnectivityManager::class.java)
+                .registerDefaultNetworkCallback(networkCallback)
+        }.onFailure { Log.w(TAG, "event=network_callback_unavailable", it) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> stopSession("Conversation ended")
-            ACTION_PAUSE -> pauseSession()
+            ACTION_STOP -> stopSession(
+                ConversationStopReason.fromWire(intent.getStringExtra(EXTRA_STOP_REASON)),
+                "Conversation ended",
+            )
+            ACTION_PAUSE -> pauseSession("Conversation paused")
             ACTION_RESUME -> resumeSession()
             else -> startSession()
         }
-        return START_NOT_STICKY
+        return START_REDELIVER_INTENT
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -161,7 +341,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     override fun onInit(status: Int) {
         ttsReady = status == TextToSpeech.SUCCESS
         if (!ttsReady) {
-            if (active) failAndStop("Android's speech voice is unavailable.")
+            if (active) pauseForConfigurationError("Android's speech voice is unavailable.")
             return
         }
         val engine = textToSpeech ?: return
@@ -178,40 +358,36 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
 
             override fun onDone(utteranceId: String?) {
                 handler.post {
-                    speaking = false
-                    currentSpeech = null
-                    interruptedSpeech = null
-                    if (stopAfterSpeech) {
-                        stopSession("Conversation ended")
-                    } else if (pauseAfterSpeech) {
-                        pauseAfterSpeech = false
-                        pauseSession()
-                    } else if (active && !paused) {
-                        scheduleListening(250L)
-                    }
+                    resumableResponse.markReplayComplete()
+                    clearResumableResponse()
+                    if (!ttsTerminalCompletionGate.tryComplete()) return@post
+                    Log.i(TAG, "event=tts_done")
+                    finishSpeech(LISTEN_AFTER_TTS_DELAY_MILLIS)
                 }
             }
 
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
                 handler.post {
-                    speaking = false
-                    currentSpeech = null
-                    if (stopAfterSpeech) stopSession("Conversation ended")
-                    else if (active && !paused) scheduleListening(350L)
+                    if (!ttsTerminalCompletionGate.tryComplete()) return@post
+                    Log.w(TAG, "event=tts_error")
+                    finishSpeech(350L)
                 }
             }
 
             override fun onStop(utteranceId: String?, interrupted: Boolean) {
                 handler.post {
-                    speaking = false
-                    if (!interrupted || !active || paused || stopAfterSpeech || pauseAfterSpeech) {
+                    if (
+                        !interrupted || !active || paused ||
+                        stopAfterSpeechReason != null || pauseAfterSpeechDetail != null
+                    ) {
                         currentSpeech = null
                         return@post
                     }
-                    interruptedSpeech = currentSpeech
+                    captureCurrentResponseForResume()
                     currentSpeech = null
-                    if (interruptedSpeech.isNullOrBlank()) {
+                    if (resumableResponse.pending.isNullOrBlank()) {
+                        silencePolicy.markActivity()
                         scheduleListening(350L)
                         return@post
                     }
@@ -222,13 +398,16 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 }
             }
         })
-        pendingSpeech?.let {
+        pendingSpeech?.takeIf { active && !paused }?.let {
             pendingSpeech = null
             speakResponse(it)
         }
     }
 
     override fun onDestroy() {
+        val interruptedWhileActive = active
+        captureCurrentResponseForResume()
+        ttsTerminalCompletionGate.reset()
         generation += 1
         handler.removeCallbacksAndMessages(null)
         releaseRecognizer()
@@ -239,34 +418,81 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         floorEvents?.close()
         floorEvents = null
         changeFloor("release", "idle")
-        active = false
-        persistSnapshot(STATE_STOPPED, false, null, null, null, 0L)
+        runCatching {
+            getSystemService(ConnectivityManager::class.java)
+                .unregisterNetworkCallback(networkCallback)
+        }
+        if (interruptedWhileActive) {
+            controller.dispatch(ConversationEvent.Pause)
+            Log.w(TAG, "event=session_interrupted reason=${ConversationStopReason.SERVICE_DESTROYED.wireValue}")
+            persistSnapshot(
+                ConversationSnapshot(
+                    state = STATE_PAUSED,
+                    active = true,
+                    stopReason = ConversationStopReason.SERVICE_DESTROYED.wireValue,
+                ),
+            )
+        } else {
+            persistSnapshot(
+                ConversationSnapshot(
+                    state = STATE_STOPPED,
+                    active = false,
+                    stopReason = controller.lastStopReason?.wireValue,
+                ),
+            )
+        }
         super.onDestroy()
+    }
+
+    private fun finishSpeech(listenDelayMillis: Long) {
+        currentSpeech = null
+        val stopReason = stopAfterSpeechReason
+        val pauseDetail = pauseAfterSpeechDetail
+        stopAfterSpeechReason = null
+        pauseAfterSpeechDetail = null
+        if (stopReason != null) {
+            stopSession(stopReason, "Conversation ended")
+        } else if (pauseDetail != null) {
+            pauseSession(pauseDetail)
+        } else if (active && !paused) {
+            controller.dispatch(ConversationEvent.ResponseFinished)
+            silencePolicy.markActivity()
+            scheduleListening(listenDelayMillis)
+        }
     }
 
     private fun startSession() {
         if (active) {
-            if (paused) resumeSession() else scheduleListening(100L)
+            if (paused) {
+                resumeSession()
+            } else {
+                silencePolicy.markActivity()
+                scheduleListening(100L)
+            }
             return
         }
         startMicrophoneForeground(notification("Starting conversation", paused = false))
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            failAndStop("Microphone permission is required for Conversation Mode.")
+            pauseForConfigurationError("Microphone permission is required for Conversation Mode.")
             return
         }
         if (!SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
-            failAndStop("On-device speech recognition is unavailable. Install the offline English speech model.")
+            pauseForConfigurationError(
+                "On-device speech recognition is unavailable. Install the offline English speech model.",
+            )
             return
         }
         if (DeviceCredentials.token(this).isNullOrBlank()) {
-            failAndStop("VoiceOS device enrollment is required before starting a VIC conversation.")
+            pauseForConfigurationError("VoiceOS device enrollment is required before starting a VIC conversation.")
             return
         }
-        active = true
-        paused = false
-        stopAfterSpeech = false
-        pauseAfterSpeech = false
-        silentAttempts = 0
+        controller.dispatch(ConversationEvent.Start)
+        stopAfterSpeechReason = null
+        pauseAfterSpeechDetail = null
+        pendingTurn = restorePendingTurn()
+        silencePolicy.markActivity()
+        Log.i(TAG, "event=session_started idle_timeout_ms=$CONVERSATION_IDLE_TIMEOUT_MILLIS")
+        bootstrapFloorEvents()
         acquireWakeLock()
         handler.removeCallbacks(sessionTimeout)
         handler.postDelayed(sessionTimeout, SESSION_MAX_MILLIS)
@@ -276,25 +502,30 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 result.fold(
                     onSuccess = {
                         publish(STATE_STARTING, detail = "Conversation Mode starting")
-                        scheduleListening(150L)
+                        if (pendingTurn != null) submitPendingTurn() else scheduleListening(150L)
                     },
-                    onFailure = { failAndStop("I could not claim the VIC conversation channel.") },
+                    onFailure = { scheduleFloorClaimRetry("Connecting conversation channel") },
                 )
             }
         }
     }
 
-    private fun pauseSession() {
+    private fun pauseSession(detail: String = "Conversation paused", releaseFloor: Boolean = true) {
         if (!active || paused) return
+        Log.i(TAG, "event=session_paused detail=${detail.replace(' ', '_')}")
+        captureCurrentResponseForResume()
         generation += 1
-        paused = true
-        speaking = false
-        requestInFlight = false
+        controller.dispatch(ConversationEvent.Pause)
         recognizer?.cancel()
         textToSpeech?.stop()
-        publish(STATE_PAUSED, detail = "Conversation paused")
-        changeFloor("release", "idle")
-        updateNotification("Conversation paused", paused = true)
+        ttsTerminalCompletionGate.reset()
+        handler.removeCallbacks(listenRunnable)
+        handler.removeCallbacks(turnRetryRunnable)
+        handler.removeCallbacks(sessionTimeout)
+        releaseWakeLock()
+        publish(STATE_PAUSED, detail = detail)
+        if (releaseFloor) changeFloor("release", "idle")
+        updateNotification(detail, paused = true)
     }
 
     private fun resumeSession() {
@@ -302,44 +533,69 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             startSession()
             return
         }
-        paused = false
-        stopAfterSpeech = false
-        pauseAfterSpeech = false
+        conversationPrerequisiteError()?.let {
+            pauseForConfigurationError(it)
+            return
+        }
+        controller.dispatch(ConversationEvent.Resume)
+        restoreResumableResponse()
+        stopAfterSpeechReason = null
+        pauseAfterSpeechDetail = null
+        silencePolicy.markActivity()
+        Log.i(TAG, "event=session_resumed")
+        acquireWakeLock()
+        handler.removeCallbacks(sessionTimeout)
+        handler.postDelayed(sessionTimeout, SESSION_MAX_MILLIS)
+        bootstrapFloorEvents()
         changeFloor("claim", "listening") { result ->
             handler.post {
                 result.fold(
                     onSuccess = {
                         publish(STATE_STARTING, detail = "Resuming conversation")
                         updateNotification("Listening for you", paused = false)
-                        scheduleListening(150L)
+                        if (pendingTurn == null) pendingTurn = restorePendingTurn()
+                        if (resumableResponse.pending != null) {
+                            resumeInterruptedSpeech.run()
+                        } else if (pendingTurn != null) {
+                            submitPendingTurn()
+                        } else {
+                            scheduleListening(150L)
+                        }
                     },
-                    onFailure = { pauseSession() },
+                    onFailure = { scheduleFloorClaimRetry("Waiting to reconnect") },
                 )
             }
         }
     }
 
-    private fun stopSession(detail: String) {
+    private fun stopSession(reason: ConversationStopReason, detail: String) {
         if (!active && !speaking) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return
         }
         generation += 1
-        active = false
-        paused = false
-        speaking = false
-        requestInFlight = false
-        stopAfterSpeech = false
+        controller.dispatch(ConversationEvent.End(reason))
+        Log.i(TAG, "event=session_stopped reason=${reason.wireValue}")
+        stopAfterSpeechReason = null
+        pauseAfterSpeechDetail = null
         pendingSpeech = null
         currentSpeech = null
-        interruptedSpeech = null
+        resumableResponse.clear()
+        clearResumableResponse()
         handler.removeCallbacksAndMessages(null)
         releaseRecognizer()
         textToSpeech?.stop()
+        ttsTerminalCompletionGate.reset()
         releaseWakeLock()
         pendingApproval = null
-        publish(STATE_STOPPED, detail = detail, activeOverride = false)
+        clearPendingTurn()
+        publish(
+            STATE_STOPPED,
+            detail = detail,
+            activeOverride = false,
+            stopReason = reason.wireValue,
+        )
         changeFloor("release", "idle")
         VoiceWidgetProvider.updateStatus(this, "Ready")
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -347,56 +603,107 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun beginListening() {
-        if (!active || paused || speaking || requestInFlight) return
+        if (!active || paused || speaking || requestInFlight || pendingTurn != null) return
         if (recognizer == null) {
-            recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this).apply {
-                setRecognitionListener(recognitionListener)
-            }
+            recognizer = createRecognizer()
         }
+        clearRecognitionWatchdog()
         latestPartial = null
+        recognitionResultAccepted = false
+        recognitionSpeechDetected = false
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US.toLanguageTag())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 700L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1_250L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 800L)
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS,
+                RecognitionWatchdogPolicy.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS,
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                RecognitionWatchdogPolicy.SPEECH_INPUT_COMPLETE_SILENCE_MILLIS,
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                RecognitionWatchdogPolicy.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_MILLIS,
+            )
         }
+        Log.i(TAG, "event=recognizer_start idle_ms=${silencePolicy.idleDurationMillis()}")
         publish(STATE_STARTING, detail = "Opening microphone")
         updateNotification("Listening for you", paused = false)
         try {
             recognizer?.startListening(intent)
-        } catch (_: RuntimeException) {
-            resetRecognizer()
-            scheduleListening(500L)
+        } catch (error: RuntimeException) {
+            Log.w(TAG, "event=recognizer_start_failure", error)
+            recoverRecognizer(SpeechRecognizer.ERROR_CLIENT)
         }
     }
 
     private fun scheduleListening(delayMillis: Long) {
-        handler.postDelayed({ beginListening() }, delayMillis)
+        handler.removeCallbacks(listenRunnable)
+        handler.postDelayed(listenRunnable, delayMillis)
+    }
+
+    private fun requestRecognitionFinalization(reason: String) {
+        if (
+            !recognitionInProgress || recognitionFinalizationRequested || recognitionResultAccepted ||
+            !active || paused || speaking || requestInFlight
+        ) return
+        recognitionFinalizationRequested = true
+        recognitionFinalizationReason = reason
+        handler.removeCallbacks(recognitionQuietTimeout)
+        handler.removeCallbacks(recognitionHardTimeout)
+        Log.w(
+            TAG,
+            "event=recognizer_finalization_requested reason=$reason partial_chars=${latestPartial?.length ?: 0}",
+        )
+        publish(STATE_PROCESSING, detail = "Finishing transcript")
+        runCatching { recognizer?.stopListening() }
+            .onFailure { Log.w(TAG, "event=recognizer_stop_failure", it) }
+        handler.removeCallbacks(recognitionResultFallback)
+        handler.postDelayed(
+            recognitionResultFallback,
+            RecognitionWatchdogPolicy.FINAL_RESULT_GRACE_MILLIS,
+        )
+    }
+
+    private fun clearRecognitionWatchdog() {
+        handler.removeCallbacks(recognitionQuietTimeout)
+        handler.removeCallbacks(recognitionHardTimeout)
+        handler.removeCallbacks(recognitionResultFallback)
+        recognitionInProgress = false
+        recognitionFinalizationRequested = false
+        recognitionFinalizationReason = null
+        recognitionSpeechDetected = false
     }
 
     private fun handleSilence() {
-        silentAttempts += 1
-        if (silentAttempts >= MAX_SILENT_ATTEMPTS) {
-            speakThenStop("I haven't heard anything, so I am ending this conversation.")
+        val idleMillis = silencePolicy.idleDurationMillis()
+        if (silencePolicy.shouldEndConversation()) {
+            Log.i(TAG, "event=inactivity_timeout idle_ms=$idleMillis")
+            speakThenPause(
+                "I haven't heard anything, so I paused our conversation. Resume whenever you are ready.",
+                "Paused after inactivity",
+            )
         } else {
+            Log.i(TAG, "event=silence_retry idle_ms=$idleMillis")
             publish(STATE_STARTING, detail = "Still listening")
-            scheduleListening(450L)
+            scheduleListening(SILENCE_RETRY_DELAY_MILLIS)
         }
     }
 
     private fun handleRecognizedText(text: String) {
-        val normalized = ConversationCommands.normalize(text)
         when (ConversationCommands.action(text)) {
             ConversationCommands.Action.STOP -> {
-                speakThenStop("Okay. Conversation ended.")
+                Log.i(TAG, "event=voice_command action=end")
+                speakThenStop("Okay. Conversation ended.", ConversationStopReason.USER_VOICE)
                 return
             }
             ConversationCommands.Action.PAUSE -> {
-                pauseAfterSpeech = true
+                Log.i(TAG, "event=voice_command action=pause")
+                pauseAfterSpeechDetail = "Conversation paused by voice"
                 speakResponse("Conversation paused. Use the notification to resume.")
                 return
             }
@@ -428,21 +735,38 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun submitTurn(text: String) {
+        pendingTurn = PendingConversationTurn(UUID.randomUUID().toString(), text)
+        persistPendingTurn(pendingTurn!!)
+        submitPendingTurn()
+    }
+
+    private fun submitPendingTurn() {
+        val queued = pendingTurn ?: return
+        if (!active || paused || requestInFlight) return
         val requestGeneration = ++generation
-        requestInFlight = true
-        publish(STATE_PROCESSING, transcript = text, detail = "VIC is thinking")
+        controller.dispatch(ConversationEvent.TurnSubmitted)
+        publish(
+            STATE_PROCESSING,
+            transcript = queued.text,
+            detail = if (queued.retryAttempt == 0) "VIC is thinking" else "Connection restored — retrying",
+        )
         updateNotification("VIC is thinking", paused = false)
         GatewayClient.submitText(
             GatewaySettings.baseUrl(this),
             sessionId,
-            text,
+            queued.text,
             DeviceCredentials.token(this),
+            requestId = queued.requestId,
         ) { result ->
             handler.post {
                 if (!active || requestGeneration != generation) return@post
-                requestInFlight = false
                 result.fold(
                     onSuccess = { turn ->
+                        clearPendingTurn()
+                        Log.i(
+                            TAG,
+                            "event=gateway_turn_success provider=${turn.provider} processing_ms=${turn.processingMs}",
+                        )
                         pendingApproval = turn.approval
                         publish(
                             STATE_SPEAKING,
@@ -457,9 +781,8 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                         speakResponse(turn.responseText)
                     },
                     onFailure = { error ->
-                        speakThenStop(
-                            "I couldn't reach VoiceOS. ${error.message.orEmpty()}".trim()
-                        )
+                        Log.e(TAG, "event=gateway_turn_failure", error)
+                        handleTurnFailure(queued, error)
                     },
                 )
             }
@@ -477,7 +800,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             return true
         }
         val requestGeneration = ++generation
-        requestInFlight = true
+        controller.dispatch(ConversationEvent.TurnSubmitted)
         publish(STATE_PROCESSING, transcript = text, detail = "Recording approval decision")
         GatewayClient.decideApproval(
             GatewaySettings.baseUrl(this),
@@ -487,7 +810,6 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         ) { result ->
             handler.post {
                 if (!active || requestGeneration != generation) return@post
-                requestInFlight = false
                 result.fold(
                     onSuccess = { decision ->
                         pendingApproval = null
@@ -497,23 +819,32 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                         publish(STATE_SPEAKING, transcript = text, response = response, detail = "VIC is speaking")
                         speakResponse(response)
                     },
-                    onFailure = { speakResponse("I could not record that approval decision.") },
+                    onFailure = {
+                        controller.dispatch(ConversationEvent.RetryScheduled)
+                        speakResponse("I could not record that approval decision. Please try again.")
+                    },
                 )
             }
         }
         return true
     }
 
-    private fun speakThenStop(text: String) {
-        stopAfterSpeech = true
+    private fun speakThenStop(text: String, reason: ConversationStopReason) {
+        stopAfterSpeechReason = reason
+        speakResponse(text)
+    }
+
+    private fun speakThenPause(text: String, detail: String) {
+        pauseAfterSpeechDetail = detail
         speakResponse(text)
     }
 
     private fun speakResponse(text: String) {
         if (!active) return
+        ttsTerminalCompletionGate.reset()
         handler.removeCallbacks(resumeInterruptedSpeech)
         recognizer?.cancel()
-        speaking = true
+        controller.dispatch(ConversationEvent.ResponseStarted)
         currentSpeech = text
         publish(STATE_SPEAKING, response = text, detail = "VIC is speaking")
         updateNotification("VIC is speaking", paused = false)
@@ -523,10 +854,159 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         }
         textToSpeech?.setSpeechRate(currentSpeechRate())
         if (textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID) == TextToSpeech.ERROR) {
-            speaking = false
             currentSpeech = null
-            if (stopAfterSpeech) stopSession("Conversation ended") else scheduleListening(350L)
+            val stopReason = stopAfterSpeechReason
+            val pauseDetail = pauseAfterSpeechDetail
+            stopAfterSpeechReason = null
+            pauseAfterSpeechDetail = null
+            when {
+                stopReason != null -> stopSession(stopReason, "Conversation ended")
+                pauseDetail != null -> pauseSession(pauseDetail)
+                else -> {
+                    controller.dispatch(ConversationEvent.ResponseFinished)
+                    scheduleListening(350L)
+                }
+            }
         }
+    }
+
+    private fun recoverRecognizer(error: Int) {
+        recognizerRecoveryAttempt += 1
+        val exponent = (recognizerRecoveryAttempt - 1).coerceIn(0, 4)
+        val delay = (350L * (1L shl exponent)).coerceAtMost(5_000L)
+        controller.dispatch(ConversationEvent.RetryScheduled)
+        Log.w(
+            TAG,
+            "event=recognizer_recovery code=$error attempt=$recognizerRecoveryAttempt delay_ms=$delay",
+        )
+        resetRecognizer()
+        publish(STATE_RECONNECTING, detail = "Reopening microphone")
+        updateNotification("Reopening microphone", paused = false)
+        scheduleListening(delay)
+    }
+
+    private fun handleTurnFailure(queued: PendingConversationTurn, error: Throwable) {
+        if (error is GatewayHttpException && error.status in setOf(401, 403)) {
+            pendingTurn = queued
+            persistPendingTurn(queued)
+            pauseForConfigurationError("VoiceOS enrollment needs attention. Your last request is saved.")
+            return
+        }
+        val retry = queued.copy(retryAttempt = queued.retryAttempt + 1)
+        pendingTurn = retry
+        persistPendingTurn(retry)
+        controller.dispatch(ConversationEvent.RetryScheduled)
+        val delay = ConversationRetryPolicy.delayMillis(retry.retryAttempt)
+        Log.w(
+            TAG,
+            "event=turn_retry_scheduled attempt=${retry.retryAttempt} delay_ms=$delay request_id=${retry.requestId}",
+        )
+        publish(
+            STATE_RECONNECTING,
+            transcript = retry.text,
+            detail = "Connection interrupted — retrying automatically",
+        )
+        updateNotification("Connection interrupted — retrying", paused = false)
+        handler.removeCallbacks(turnRetryRunnable)
+        handler.postDelayed(turnRetryRunnable, delay)
+    }
+
+    private fun pauseForConfigurationError(message: String) {
+        if (!active) controller.dispatch(ConversationEvent.Start)
+        Log.w(TAG, "event=configuration_pause detail=${message.replace(' ', '_')}")
+        if (paused) {
+            publish(STATE_PAUSED, response = message, detail = message)
+            updateNotification(message, paused = true)
+        } else {
+            pauseSession(message)
+        }
+    }
+
+    private fun conversationPrerequisiteError(): String? = when {
+        checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ->
+            "Microphone permission is required for Conversation Mode."
+
+        !SpeechRecognizer.isOnDeviceRecognitionAvailable(this) ->
+            "On-device speech recognition is unavailable. Install the offline English speech model."
+
+        DeviceCredentials.token(this).isNullOrBlank() ->
+            "VoiceOS device enrollment is required before starting a VIC conversation."
+
+        else -> null
+    }
+
+    private fun scheduleFloorClaimRetry(detail: String) {
+        if (!active || paused) return
+        floorReconnectAttempt += 1
+        controller.dispatch(ConversationEvent.RetryScheduled)
+        val delay = ConversationRetryPolicy.delayMillis(floorReconnectAttempt)
+        Log.w(TAG, "event=floor_claim_retry attempt=$floorReconnectAttempt delay_ms=$delay")
+        publish(STATE_RECONNECTING, detail = detail)
+        updateNotification(detail, paused = false)
+        handler.postDelayed({
+            if (active && !paused) resumeSession()
+        }, delay)
+    }
+
+    private fun pauseForRemoteHandoff(displayName: String?) {
+        if (!active || paused) return
+        floorLeaseId = null
+        Log.i(TAG, "event=remote_handoff device=${displayName.orEmpty().replace(' ', '_')}")
+        pauseSession(
+            "Conversation continued on ${displayName ?: "another device"}",
+            releaseFloor = false,
+        )
+    }
+
+    private fun captureCurrentResponseForResume() {
+        if (resumableResponse.pause(currentSpeech, speaking)) {
+            getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+                .putString(RESUMABLE_RESPONSE, resumableResponse.pending)
+                .apply()
+        }
+    }
+
+    private fun restoreResumableResponse() {
+        resumableResponse.restore(
+            getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+                .getString(RESUMABLE_RESPONSE, null),
+        )
+    }
+
+    private fun clearResumableResponse() {
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+            .remove(RESUMABLE_RESPONSE)
+            .apply()
+    }
+
+    private fun persistPendingTurn(turn: PendingConversationTurn) {
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+            .putString(PENDING_TURN_REQUEST_ID, turn.requestId)
+            .putString(PENDING_TURN_TEXT, turn.text)
+            .putInt(PENDING_TURN_RETRY_ATTEMPT, turn.retryAttempt)
+            .apply()
+    }
+
+    private fun restorePendingTurn(): PendingConversationTurn? {
+        val preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE)
+        val requestId = preferences.getString(PENDING_TURN_REQUEST_ID, null)?.takeIf(String::isNotBlank)
+            ?: return null
+        val text = preferences.getString(PENDING_TURN_TEXT, null)?.takeIf(String::isNotBlank)
+            ?: return null
+        return PendingConversationTurn(
+            requestId = requestId,
+            text = text,
+            retryAttempt = preferences.getInt(PENDING_TURN_RETRY_ATTEMPT, 0).coerceAtLeast(0),
+        )
+    }
+
+    private fun clearPendingTurn() {
+        pendingTurn = null
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+            .remove(PENDING_TURN_REQUEST_ID)
+            .remove(PENDING_TURN_TEXT)
+            .remove(PENDING_TURN_RETRY_ATTEMPT)
+            .apply()
     }
 
     private fun publish(
@@ -538,8 +1018,19 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         approval: ApprovalRequest? = null,
         detail: String? = null,
         activeOverride: Boolean = active,
+        stopReason: String? = null,
     ) {
-        persistSnapshot(state, activeOverride, transcript, response, provider, processingMillis)
+        persistSnapshot(
+            ConversationSnapshot(
+                state = state,
+                active = activeOverride,
+                transcript = transcript,
+                response = response,
+                provider = provider,
+                processingMillis = processingMillis,
+                stopReason = stopReason,
+            ),
+        )
         sendBroadcast(Intent(ACTION_STATE).apply {
             setPackage(packageName)
             putExtra(EXTRA_STATE, state)
@@ -549,6 +1040,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             putExtra(EXTRA_PROVIDER, provider)
             putExtra(EXTRA_PROCESSING_MS, processingMillis)
             putExtra(EXTRA_DETAIL, detail)
+            putExtra(EXTRA_STOP_REASON, stopReason)
             approval?.let {
                 putExtra(EXTRA_APPROVAL_ID, it.requestId)
                 putExtra(EXTRA_APPROVAL_TOOL, it.tool)
@@ -559,6 +1051,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         VoiceWidgetProvider.updateStatus(this, when (state) {
             STATE_LISTENING, STATE_STARTING -> "Conversation listening"
             STATE_PROCESSING -> "VIC thinking"
+            STATE_RECONNECTING -> "Conversation reconnecting"
             STATE_SPEAKING -> "VIC speaking"
             STATE_PAUSED -> "Conversation paused"
             STATE_ERROR -> "Conversation error"
@@ -566,11 +1059,11 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         })
         val phase = when (state) {
             STATE_LISTENING, STATE_STARTING -> "listening"
-            STATE_PROCESSING -> "processing"
+            STATE_PROCESSING, STATE_RECONNECTING -> "processing"
             STATE_SPEAKING -> "speaking"
             else -> null
         }
-        if (phase != null && activeOverride) {
+        if (phase != null && activeOverride && floorLeaseId != null) {
             val now = android.os.SystemClock.elapsedRealtime()
             if (transcript.isNullOrBlank() || now - lastFloorUpdateMillis >= 750L) {
                 lastFloorUpdateMillis = now
@@ -586,15 +1079,35 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         response: String? = null,
         callback: (Result<ConversationFloor>) -> Unit = {},
     ) {
+        val expectedLeaseId = if (action == "claim") null else floorLeaseId
         GatewayClient.changeConversationFloor(
             baseUrl = GatewaySettings.baseUrl(this),
-            action = action,
-            phase = phase,
-            partialTranscript = transcript,
-            responseText = response,
+            request = ConversationFloorRequest(
+                action = action,
+                phase = phase,
+                partialTranscript = transcript,
+                responseText = response,
+                expectedLeaseId = expectedLeaseId,
+            ),
             deviceToken = DeviceCredentials.token(this),
-            callback = callback,
-        )
+        ) { result ->
+            result.onSuccess { floor ->
+                if (floor.revision >= floorRevision) {
+                    floorRevision = floor.revision
+                    floorLeaseId = floor.leaseId
+                }
+                if (action == "claim") floorReconnectAttempt = 0
+            }.onFailure { error ->
+                if (
+                    action != "claim" && error is GatewayHttpException && error.status == 409 &&
+                    (error.responseBody.contains("conversation_floor_lease_mismatch") ||
+                        error.responseBody.contains("conversation_floor_not_owned"))
+                ) {
+                    handler.post { pauseForRemoteHandoff(null) }
+                }
+            }
+            callback(result)
+        }
     }
 
     private fun bootstrapFloorEvents() {
@@ -607,11 +1120,15 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 if (!active) return@post
                 result.fold(
                     onSuccess = { cursor ->
+                        floorReconnectAttempt = 0
                         floorCursor = cursor
                         startFloorEvents(token)
                     },
                     onFailure = {
-                        handler.postDelayed({ bootstrapFloorEvents() }, FLOOR_RECONNECT_MILLIS)
+                        floorReconnectAttempt += 1
+                        val delay = ConversationRetryPolicy.delayMillis(floorReconnectAttempt)
+                        Log.w(TAG, "event=floor_event_cursor_retry delay_ms=$delay", it)
+                        handler.postDelayed({ bootstrapFloorEvents() }, delay)
                     },
                 )
             }
@@ -626,38 +1143,82 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             floorCursor,
             onEvent = { event ->
                 floorCursor = event.id
-                if (event.type != "conversation.floor.changed") return@streamEvents
-                val value = event.payload.optJSONObject("floor") ?: return@streamEvents
-                val next = GatewayClient.parseConversationFloor(value)
-                val thisDevice = DeviceCredentials.deviceId(this)
-                if (active && next.active && next.holderDeviceId != thisDevice) {
-                    handler.post {
-                        stopSession("Conversation continued on ${next.holderDisplayName ?: "another device"}")
+                when (event.type) {
+                    "conversation.floor.changed" -> {
+                        val value = event.payload.optJSONObject("floor") ?: return@streamEvents
+                        val next = GatewayClient.parseConversationFloor(value)
+                        if (next.revision <= floorRevision) return@streamEvents
+                        floorRevision = next.revision
+                        val thisDevice = DeviceCredentials.deviceId(this)
+                        if (
+                            active && next.active && next.holderDeviceId != thisDevice &&
+                            next.leaseId != floorLeaseId
+                        ) {
+                            handler.post {
+                                pauseForRemoteHandoff(next.holderDisplayName)
+                            }
+                        } else if (next.holderDeviceId == thisDevice) {
+                            floorLeaseId = next.leaseId
+                        }
+                    }
+
+                    "conversation.turn" -> if (
+                        event.payload.optString("provider") == "hermes-subagent" &&
+                        event.payload.optString("session_id") == sessionId
+                    ) {
+                        val report = event.payload.optString("response_text").trim()
+                        if (report.isNotEmpty()) handler.post { deliverBackgroundReport(report) }
                     }
                 }
             },
-            onClosed = {
-                if (active) handler.postDelayed({ startFloorEvents(token) }, FLOOR_RECONNECT_MILLIS)
+            onClosed = { error ->
+                if (active) {
+                    floorReconnectAttempt += 1
+                    val delay = ConversationRetryPolicy.delayMillis(floorReconnectAttempt)
+                    Log.w(TAG, "event=floor_event_stream_closed delay_ms=$delay", error)
+                    handler.postDelayed({ startFloorEvents(token) }, delay)
+                }
             },
         )
     }
 
-    private fun persistSnapshot(
-        state: String,
-        isActive: Boolean,
-        transcript: String?,
-        response: String?,
-        provider: String?,
-        processingMillis: Long,
-    ) {
+    private fun deliverBackgroundReport(report: String) {
+        if (!active || paused) return
+        if (requestInFlight || speaking) {
+            handler.postDelayed({ deliverBackgroundReport(report) }, 1_000L)
+            return
+        }
+        silencePolicy.markActivity()
+        publish(
+            STATE_SPEAKING,
+            response = report,
+            provider = "hermes-subagent",
+            detail = "VIC's project worker finished",
+        )
+        speakResponse(report)
+    }
+
+    private data class ConversationSnapshot(
+        val state: String,
+        val active: Boolean,
+        val transcript: String? = null,
+        val response: String? = null,
+        val provider: String? = null,
+        val processingMillis: Long = 0L,
+        val stopReason: String? = null,
+    )
+
+    private fun persistSnapshot(snapshot: ConversationSnapshot) {
         getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
-            .putBoolean(SNAPSHOT_ACTIVE, isActive)
-            .putString(SNAPSHOT_STATE, state)
+            .putBoolean(SNAPSHOT_ACTIVE, snapshot.active)
+            .putString(SNAPSHOT_STATE, snapshot.state)
             .apply {
-                if (transcript != null) putString(SNAPSHOT_TRANSCRIPT, transcript)
-                if (response != null) putString(SNAPSHOT_RESPONSE, response)
-                if (provider != null) putString(SNAPSHOT_PROVIDER, provider)
-                if (processingMillis > 0) putLong(SNAPSHOT_PROCESSING_MS, processingMillis)
+                if (snapshot.transcript != null) putString(SNAPSHOT_TRANSCRIPT, snapshot.transcript)
+                if (snapshot.response != null) putString(SNAPSHOT_RESPONSE, snapshot.response)
+                if (snapshot.provider != null) putString(SNAPSHOT_PROVIDER, snapshot.provider)
+                if (snapshot.processingMillis > 0) putLong(SNAPSHOT_PROCESSING_MS, snapshot.processingMillis)
+                if (snapshot.stopReason != null) putString(SNAPSHOT_STOP_REASON, snapshot.stopReason)
+                else if (snapshot.state != STATE_STOPPED) remove(SNAPSHOT_STOP_REASON)
             }
             .apply()
     }
@@ -678,10 +1239,13 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 .setAction(if (paused) ACTION_RESUME else ACTION_PAUSE),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val stop = PendingIntent.getService(
+        val stop = PendingIntent.getActivity(
             this,
             512,
-            Intent(this, VICConversationService::class.java).setAction(ACTION_STOP),
+            Intent(this, MainActivity::class.java).apply {
+                action = MainActivity.ACTION_CONFIRM_END_CONVERSATION
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val publicVersion = Notification.Builder(this, CHANNEL_ID)
@@ -699,7 +1263,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
             .addAction(Notification.Action.Builder(null, if (paused) "Resume" else "Pause", pauseOrResume).build())
-            .addAction(Notification.Action.Builder(null, "Stop", stop).build())
+            .addAction(Notification.Action.Builder(null, "End…", stop).build())
             .build()
     }
 
@@ -734,6 +1298,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
         val manager = getSystemService(PowerManager::class.java)
         wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:vic-conversation")
             .apply { acquire(SESSION_MAX_MILLIS + 30_000L) }
@@ -745,13 +1310,31 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun resetRecognizer() {
+        resettingRecognizer = true
         releaseRecognizer()
-        recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this).apply {
-            setRecognitionListener(recognitionListener)
+        recognizer = createRecognizer()
+        handler.post { resettingRecognizer = false }
+    }
+
+    private fun createRecognizer(): SpeechRecognizer {
+        val speechRecognizer = when (recognitionBackend) {
+            RecognitionBackend.ON_DEVICE -> SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+            RecognitionBackend.PLATFORM -> SpeechRecognizer.createSpeechRecognizer(this)
         }
+        Log.i(TAG, "event=recognizer_created backend=${recognitionBackend.name.lowercase()}")
+        return speechRecognizer.apply { setRecognitionListener(recognitionListener) }
+    }
+
+    private fun switchToPlatformRecognizer(reason: String) {
+        recognitionBackend = recognitionBackend.afterStall()
+        getSharedPreferences(PREFERENCES, MODE_PRIVATE).edit()
+            .putString(RECOGNITION_BACKEND, recognitionBackend.name)
+            .apply()
+        Log.w(TAG, "event=recognizer_backend_fallback backend=platform reason=$reason")
     }
 
     private fun releaseRecognizer() {
+        clearRecognitionWatchdog()
         recognizer?.cancel()
         recognizer?.destroy()
         recognizer = null
@@ -774,11 +1357,6 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         .getFloat(SPEECH_RATE_KEY, PlaybackSpeed.DEFAULT)
         .let(PlaybackSpeed::clamp)
 
-    private fun failAndStop(message: String) {
-        publish(STATE_ERROR, response = message, detail = message)
-        stopSession(message)
-    }
-
     private fun recognitionText(results: Bundle?): String? =
         results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.trim()
 
@@ -793,13 +1371,13 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun recognitionErrorMessage(error: Int): String = when (error) {
-        SpeechRecognizer.ERROR_AUDIO -> "The microphone stopped working, so I ended the conversation."
+        SpeechRecognizer.ERROR_AUDIO -> "The microphone had a temporary problem. VIC will reopen it."
         SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Microphone permission is required for Conversation Mode."
         SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
         SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "The offline English speech model is unavailable."
         SpeechRecognizer.ERROR_NETWORK,
-        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Offline speech recognition could not start."
-        else -> "Speech recognition stopped unexpectedly, so I ended the conversation."
+        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Offline speech recognition is reconnecting."
+        else -> "Speech recognition was interrupted. VIC will reopen the microphone."
     }
 
     companion object {
@@ -816,6 +1394,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         const val EXTRA_PROVIDER = "provider"
         const val EXTRA_PROCESSING_MS = "processing_ms"
         const val EXTRA_DETAIL = "detail"
+        const val EXTRA_STOP_REASON = "stop_reason"
         const val EXTRA_APPROVAL_ID = "approval_id"
         const val EXTRA_APPROVAL_TOOL = "approval_tool"
         const val EXTRA_APPROVAL_EXPIRES = "approval_expires"
@@ -824,6 +1403,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         const val STATE_STARTING = "STARTING"
         const val STATE_LISTENING = "LISTENING"
         const val STATE_PROCESSING = "PROCESSING"
+        const val STATE_RECONNECTING = "RECONNECTING"
         const val STATE_SPEAKING = "SPEAKING"
         const val STATE_PAUSED = "PAUSED"
         const val STATE_STOPPED = "STOPPED"
@@ -836,8 +1416,14 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         const val SNAPSHOT_RESPONSE = "snapshot_response"
         const val SNAPSHOT_PROVIDER = "snapshot_provider"
         const val SNAPSHOT_PROCESSING_MS = "snapshot_processing_ms"
+        const val SNAPSHOT_STOP_REASON = "snapshot_stop_reason"
 
         private const val SESSION_ID = "session_id"
+        private const val PENDING_TURN_REQUEST_ID = "pending_turn_request_id"
+        private const val PENDING_TURN_TEXT = "pending_turn_text"
+        private const val PENDING_TURN_RETRY_ATTEMPT = "pending_turn_retry_attempt"
+        private const val RESUMABLE_RESPONSE = "resumable_response"
+        private const val RECOGNITION_BACKEND = "recognition_backend"
         private const val PLAYBACK_PREFERENCES = "voiceos_playback"
         private const val SPEECH_RATE_KEY = "speech_rate"
         private const val TTS_VOICE_KEY = "tts_voice_name"
@@ -845,10 +1431,12 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         private const val NOTIFICATION_ID = 12
         private const val UTTERANCE_ID = "vic-conversation-response"
         private const val SESSION_MAX_MILLIS = 30 * 60 * 1_000L
-        private const val MAX_SILENT_ATTEMPTS = 2
+        private const val CONVERSATION_IDLE_TIMEOUT_MILLIS = 20_000L
+        private const val SILENCE_RETRY_DELAY_MILLIS = 450L
+        private const val LISTEN_AFTER_TTS_DELAY_MILLIS = 250L
         private const val INTERRUPTION_RESUME_DELAY_MILLIS = 900L
         private const val PHONE_AUDIO_RECHECK_MILLIS = 1_000L
-        private const val FLOOR_RECONNECT_MILLIS = 2_000L
+        private const val TAG = "VICConversation"
 
         private val APPROVE_COMMANDS = setOf("approve", "approved", "yes approve", "confirm")
         private val DENY_COMMANDS = setOf("deny", "denied", "no deny", "reject", "cancel")

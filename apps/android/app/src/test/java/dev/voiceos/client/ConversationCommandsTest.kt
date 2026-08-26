@@ -13,7 +13,7 @@ class ConversationCommandsTest {
         )
         assertEquals(
             ConversationCommands.Action.STOP,
-            ConversationCommands.action("That's all!"),
+            ConversationCommands.action("VIC, stop listening."),
         )
     }
 
@@ -29,5 +29,7 @@ class ConversationCommandsTest {
     fun ordinaryDiscussionDoesNotAccidentallyStop() {
         assertNull(ConversationCommands.action("When should I stop listening to that podcast?"))
         assertNull(ConversationCommands.action("Tell me about conversational memory."))
+        assertNull(ConversationCommands.action("That's all I have for the first topic."))
+        assertNull(ConversationCommands.action("End the conversation section with a summary."))
     }
 }

@@ -74,12 +74,10 @@ def handler_route_literals(method: str) -> set[str]:
 def route_is_covered(path: str, literals: set[str]) -> bool:
     if path in literals:
         return True
-    parameter = re.search(r"\{[^}]+\}", path)
-    if not parameter:
+    if not re.search(r"\{[^}]+\}", path):
         return False
-    prefix = path[: parameter.start()]
-    suffix = path[parameter.end() :]
-    return prefix in literals and (not suffix or suffix in literals)
+    fragments = [fragment for fragment in re.split(r"\{[^}]+\}", path) if fragment]
+    return all(fragment in literals for fragment in fragments)
 
 
 class OpenApiContractTests(unittest.TestCase):

@@ -106,10 +106,14 @@ separate touch approval before a task or private review record is created.
 
 Optional Fieldy intake is disabled until `VOICEOS_FIELDY_WEBHOOK_SECRET` is set
 in `~/.config/voiceos/gateway.env`. Configure Fieldy to send transcript events
-to `/v1/integrations/fieldy/transcripts?token=<secret>`. The token is compared
+to the dedicated public Funnel URL on port 8443 at
+`/v1/integrations/fieldy/transcripts?token=<secret>`. Keep the normal port 443
+gateway tailnet-only. The token is compared
 in constant time and redacted from gateway logs before the documented Fieldy
 payload is normalized and passed to the loopback-only Rust authority. Signed
-clients may instead use `X-Fieldy-Signature: sha256=<HMAC-SHA256 hex>`.
+clients may instead use `X-Fieldy-Signature: sha256=<HMAC-SHA256 hex>`. Accepted
+captures are analyzed asynchronously into review-only proposals by default;
+set `VOICEOS_FIELDY_AUTO_EXTRACT=0` to disable automatic analysis.
 
 Touch also renders Hermes activity as a safe live progress trace. It shows
 reasoning phases, animated tool execution, and delegated worker state without

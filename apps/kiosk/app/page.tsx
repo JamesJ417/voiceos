@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Image from "next/image";
 import { approvalDecisionFromText } from "./approval-intent.js";
 import {
   ComponentRegistry,
@@ -24,7 +25,7 @@ type Message = {
   meta: string;
   images?: Array<{ filename: string; url: string }>;
 };
-type PendingImage = { id: string; filename: string };
+type PendingImage = { attachment_id: string; filename: string; media_type: string; previewUrl: string };
 type VicMemory = { id: string; content: string; source: string; category: string; status: string; confidence: number; provenance: string; created_at: string; updated_at: string };
 type SleepCycleChange = { id: string; detail: string; status: string; confidence: number | null; created_at: string };
 type SleepCycleReport = { cycle: { id: string; mode: string; created_at: string }; changes: SleepCycleChange[] };
@@ -83,6 +84,7 @@ type SkillProposal = {
 type SkillUsage = { id: string; skill_id: string; skill_name: string; skill_version: number; outcome: string; feedback: "correct" | "incorrect" | null; used_at: string };
 type VicProject = { id: string; goal_id: string | null; title: string; status: string; created_at: string; updated_at: string };
 type TaskStep = { id: string; title: string; owner: "user" | "vic" | "shared"; status: string };
+type WorkflowStage = { key: string; label: string; owner: "USER" | "VIC" | "AGENT"; detail: string };
 type TaskDetail = {
   task: { id: string; project_id: string | null; title: string; observable_outcome: string; status: string; estimated_minutes: number; due_at: string | null; importance: "low" | "normal" | "high" | "critical" };
   progress: { completed_steps: number; total_steps: number; open_blockers: number; lane: "needs_me" | "vic_working" | "review" | "shared"; vic_status: string; next_user_action?: string | null; next_vic_action?: string | null };
@@ -736,9 +738,10 @@ export default function Home() {
         body: JSON.stringify({
           session_id: sessionId || makeId(),
           text: normalized,
-          attachment_ids: attachment ? [attachment.id] : [],
+          ...(attachment ? { attachment_ids: [attachment.attachment_id] } : {}),
         }),
       });
+      if (attachment) URL.revokeObjectURL(attachment.previewUrl);
       setPendingImage(null);
       setSessionId(result.session_id);
       localStorage.setItem(STORAGE.session, result.session_id);
@@ -993,19 +996,40 @@ export default function Home() {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      setStatusMessage("Images are limited to 5 MB.");
+    if (!(file.type === "image/jpeg" || file.type === "image/png" || file.type === "image/webp")) {
+      setStatusMessage("Choose a JPEG, PNG, or WebP image.");
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024 || file.size === 0) {
+      setStatusMessage("Images must be between 1 byte and 25 MB.");
       return;
     }
     try {
+      setStatusMessage(`Preparing ${file.name}…`);
+      const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+      const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
       const headers = new Headers({
         "Content-Type": file.type,
         "X-VoiceOS-File-Name": encodeURIComponent(file.name),
+        "X-VoiceOS-Upload-Length": String(file.size),
+        "X-VoiceOS-Upload-SHA256": sha256,
       });
-      const response = await client.fetch("/v1/attachments", { method: "POST", headers, body: file });
-      const payload = await response.json().catch(() => ({})) as { attachment?: PendingImage; error?: string };
-      if (!response.ok || !payload.attachment) throw new Error(payload.error ?? `Upload failed with HTTP ${response.status}`);
-      setPendingImage(payload.attachment);
+      const response = await client.fetch("/v1/uploads", { method: "POST", headers });
+      const payload = await response.json().catch(() => ({})) as { upload?: { upload_id: string; chunk_size: number }; error?: string };
+      if (!response.ok || !payload.upload) throw new Error(payload.error ?? `Upload failed with HTTP ${response.status}`);
+      const upload = payload.upload;
+      for (let offset = 0; offset < file.size; offset += upload.chunk_size) {
+        const chunk = file.slice(offset, Math.min(offset + upload.chunk_size, file.size));
+        const chunkResponse = await client.fetch(`/v1/uploads/${encodeURIComponent(upload.upload_id)}/chunks/${offset}`, {
+          method: "PUT", headers: { "Content-Type": "application/octet-stream", "Content-Length": String(chunk.size) }, body: chunk,
+        });
+        if (!chunkResponse.ok) throw new Error(`Upload chunk failed with HTTP ${chunkResponse.status}`);
+      }
+      const finalizeResponse = await client.fetch(`/v1/uploads/${encodeURIComponent(upload.upload_id)}/finalize`, { method: "POST" });
+      const finalized = await finalizeResponse.json().catch(() => ({})) as { attachment?: Omit<PendingImage, "previewUrl">; error?: string };
+      if (!finalizeResponse.ok || !finalized.attachment) throw new Error(finalized.error ?? `Finalize failed with HTTP ${finalizeResponse.status}`);
+      if (pendingImage) URL.revokeObjectURL(pendingImage.previewUrl);
+      setPendingImage({ ...finalized.attachment, previewUrl: URL.createObjectURL(file) });
       setStatusMessage(`${file.name} is ready to send with your next message.`);
     } catch (error) {
       setStatusMessage(errorText(error));
@@ -1072,10 +1096,10 @@ export default function Home() {
               </div>
               <div className="state-track" aria-label={`Current state: ${voiceState}`}>{(["ready", "listening", "processing", "speaking"] as VoiceState[]).map((state) => <span key={state} className={state === voiceState ? "active" : ""}>{state}</span>)}</div>
               {floorIsRemote && <button className="continue-here" onClick={startListening}>Continue here from {floor?.holder_display_name ?? "the other device"}</button>}
-              {voiceTouchOnly ? <div className="voice-touch-only"><div><strong>Voice + touch only</strong><span>No keyboard entry is accepted in VIC-DOM.</span></div><button type="button" onClick={() => imageInput.current?.click()}>＋ Image</button>{pendingImage && <span>{pendingImage.filename} ready</span>}</div> : <form className="text-composer" onSubmit={(event) => { event.preventDefault(); void sendText(draft, "typed"); }}>
+              {voiceTouchOnly ? <div className="voice-touch-only"><div><strong>Voice + touch only</strong><span>No keyboard entry is accepted in VIC-DOM.</span></div><button type="button" onClick={() => imageInput.current?.click()}>＋ Image</button>{pendingImage && <AttachmentPreview image={pendingImage} onRemove={() => { URL.revokeObjectURL(pendingImage.previewUrl); setPendingImage(null); }} />}</div> : <form className="text-composer" onSubmit={(event) => { event.preventDefault(); void sendText(draft, "typed"); }}>
                 <label htmlFor="voiceos-text">Type a request</label>
                 <div><input id="voiceos-text" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask VIC…" /><button disabled={!draft.trim() || voiceState === "processing"}>Send</button></div>
-                <div><button type="button" onClick={() => imageInput.current?.click()}>＋ Image</button>{pendingImage && <span>{pendingImage.filename} ready</span>}</div>
+                <div><button type="button" onClick={() => imageInput.current?.click()}>＋ Image</button>{pendingImage && <AttachmentPreview image={pendingImage} onRemove={() => { URL.revokeObjectURL(pendingImage.previewUrl); setPendingImage(null); }} />}</div>
               </form>}
               <input ref={imageInput} className="visually-hidden" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => void uploadImage(event)} />
             </section>
@@ -1283,6 +1307,10 @@ function MemoryPanel({ memories, sleepCycles, reviewBusy, voiceOnly, restaurantM
   </section>;
 }
 
+function AttachmentPreview({ image, onRemove }: { image: PendingImage; onRemove: () => void }) {
+  return <span className="attachment-preview"><Image src={image.previewUrl} alt={image.filename} width={64} height={64} unoptimized /><span>{image.filename} ready</span><button type="button" aria-label={`Remove ${image.filename}`} onClick={onRemove}>×</button></span>;
+}
+
 function NavButton({ active, icon, label, onClick }: { active: boolean; icon: string; label: string; onClick: () => void }) {
   return <button className={active ? "active" : ""} onClick={onClick}><span aria-hidden="true">{icon}</span>{label}</button>;
 }
@@ -1301,7 +1329,7 @@ function MessageCard({ message, latestVic = false }: { message: Message; latestV
   const showFullReply = latestVic || !collapsible || expanded;
   return <article className={`message ${message.role === "You" ? "user" : "assistant"} ${collapsible ? "message-collapsible" : ""} ${showFullReply ? "message-expanded" : "message-collapsed"}`}>
     <div className="message-label"><strong>{message.role}</strong><span>{message.meta}</span></div>
-    {message.images?.map((image) => <figure className="message-image" key={image.url}><img src={image.url} alt={image.filename} /><figcaption>{image.filename}</figcaption></figure>)}
+    {message.images?.map((image) => <figure className="message-image" key={image.url}><Image src={image.url} alt={image.filename} width={720} height={480} unoptimized /><figcaption>{image.filename}</figcaption></figure>)}
     {collapsible ? <button className="message-reply-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded((current) => !current)}><span>{showFullReply ? message.body : firstSentence(message.body)}</span><small>{expanded ? "Show less" : "View full reply"}</small></button> : <p>{message.body}</p>}
   </article>;
 }
@@ -1312,6 +1340,23 @@ function EmptyState({ text }: { text: string }) {
 
 function VoiceOnlyNotice({ text }: { text: string }) {
   return <div className="voice-only-notice"><span aria-hidden="true">◉</span><div><strong>Voice + touch only</strong><p>{text}</p></div></div>;
+}
+
+const WORKFLOW_STAGES: WorkflowStage[] = [
+  { key: "scope", label: "Scope", owner: "USER", detail: "Confirm outcome and boundaries" },
+  { key: "breakdown", label: "Breakdown", owner: "VIC", detail: "Split into 5–10 minute cards" },
+  { key: "work", label: "Work", owner: "AGENT", detail: "Execute safe cards in parallel" },
+  { key: "integrate", label: "Integrate", owner: "VIC", detail: "Reconcile outputs and conflicts" },
+  { key: "verify", label: "Verify", owner: "VIC", detail: "Run acceptance checks" },
+  { key: "close", label: "Close", owner: "USER", detail: "Review and confirm completion" },
+];
+
+function currentWorkflowStage(detail: TaskDetail) {
+  if (detail.progress.lane === "needs_me") return 0;
+  if (detail.progress.lane === "review") return 5;
+  if (detail.progress.total_steps > 0 && detail.progress.completed_steps >= detail.progress.total_steps) return 4;
+  if (detail.progress.total_steps > 0) return 2;
+  return 1;
 }
 
 function CommandTaskSummary({ tasks, onOpenLane }: { tasks: TaskDetail[]; onOpenLane: (lane: "needs_me" | "vic_working" | "review") => void }) {
@@ -1408,6 +1453,8 @@ function TaskBoard({ projects, tasks, activity, filter, voiceOnly, onFilter, onR
       return <article className={`task-card lane-${detail.progress.lane}`} key={detail.task.id}>
         <div className="task-card-head"><span>{detail.progress.lane.replaceAll("_", " ")}</span><strong>{detail.progress.total_steps ? `${detail.progress.completed_steps}/${detail.progress.total_steps} steps` : "No steps"}</strong></div>
         <h3>{detail.task.title}</h3><p>{detail.task.observable_outcome}</p>
+        <div className="task-workflow-strip" aria-label="Workflow stages">{WORKFLOW_STAGES.map((stage, stageIndex) => <span key={stage.key} className={`${stageIndex === currentWorkflowStage(detail) ? "active" : ""} workflow-${stage.owner.toLowerCase()}`} title={`${stage.owner}: ${stage.detail}`}>{stageIndex + 1} {stage.label}<small>{stage.owner}</small></span>)}</div>
+        <p className="task-ownership">Current owner: <strong>{WORKFLOW_STAGES[currentWorkflowStage(detail)].owner}</strong> · {WORKFLOW_STAGES[currentWorkflowStage(detail)].detail}</p>
         <div className="task-handoff"><small>{detail.progress.lane === "vic_working" ? "VIC NEXT ACTION" : detail.progress.lane === "review" ? "READY FOR REVIEW" : "YOUR NEXT ACTION"}</small><strong>{detail.progress.lane === "vic_working" ? detail.progress.next_vic_action || "Continue safe work" : detail.progress.next_user_action || "Review with VIC"}</strong></div>
         {(live.length > 0 || recorded.length > 0) && <div className="task-updates"><small>PROGRESS UPDATES</small>{live.map((item) => <div className="task-update live" key={item.id}><span className="thinking-pulse" /><p><strong>{item.label}</strong>{item.detail && <small>{item.detail}</small>}</p></div>)}{live.length === 0 && recorded.map((item, index) => <div className="task-update" key={item.id ?? `${item.occurred_at}-${index}`}><span>✓</span><p>{String(item.payload.summary ?? "VIC recorded progress")}</p></div>)}</div>}
         <div className="task-steps">{detail.steps.slice(0, 5).map((step) => <div key={step.id}><span>{step.status === "completed" ? "✓" : "○"}</span><p>{step.title}</p><small>{step.owner}</small></div>)}</div>

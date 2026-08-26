@@ -115,6 +115,29 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(device_id) REFERENCES devices(device_id)
         );
         CREATE INDEX IF NOT EXISTS attachments_owner_status_idx ON attachments(owner_id, status, created_at);
+        CREATE TABLE IF NOT EXISTS upload_sessions (
+            upload_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            device_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            byte_size INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            received_bytes INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'created' CHECK(status IN ('created', 'uploading', 'finalized')),
+            attachment_id TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(device_id) REFERENCES devices(device_id),
+            FOREIGN KEY(attachment_id) REFERENCES attachments(attachment_id)
+        );
+        CREATE INDEX IF NOT EXISTS upload_sessions_owner_idx ON upload_sessions(owner_id, created_at);
+        CREATE TABLE IF NOT EXISTS upload_chunks (
+            upload_id TEXT NOT NULL,
+            offset INTEGER NOT NULL,
+            bytes BLOB NOT NULL,
+            PRIMARY KEY(upload_id, offset),
+            FOREIGN KEY(upload_id) REFERENCES upload_sessions(upload_id) ON DELETE CASCADE
+        );
         CREATE TABLE IF NOT EXISTS message_attachments (
             message_id INTEGER NOT NULL,
             attachment_id TEXT NOT NULL,
@@ -587,6 +610,26 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             UNIQUE(owner_id, source, source_id), FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
         );
         CREATE INDEX IF NOT EXISTS personal_captures_owner_status_created_idx ON personal_captures(owner_id,status,created_at);
+        CREATE TABLE IF NOT EXISTS fieldy_conversation_assemblies (
+            assembly_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, capture_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK(status IN ('assembling','analyzed')),
+            started_at TEXT NOT NULL, last_event_at TEXT NOT NULL, last_received_at TEXT NOT NULL,
+            chunk_count INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(capture_id) REFERENCES personal_captures(capture_id)
+        );
+        CREATE INDEX IF NOT EXISTS fieldy_assemblies_owner_status_received_idx
+            ON fieldy_conversation_assemblies(owner_id,status,last_received_at);
+        CREATE TABLE IF NOT EXISTS fieldy_conversation_chunks (
+            owner_id TEXT NOT NULL, event_id TEXT NOT NULL, assembly_id TEXT NOT NULL,
+            occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, transcript TEXT NOT NULL,
+            recording_id TEXT, session_id TEXT,
+            speakers_json TEXT NOT NULL DEFAULT '[]', metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY(owner_id,event_id),
+            FOREIGN KEY(assembly_id) REFERENCES fieldy_conversation_assemblies(assembly_id)
+        );
+        CREATE INDEX IF NOT EXISTS fieldy_chunks_assembly_occurred_idx
+            ON fieldy_conversation_chunks(assembly_id,occurred_at,event_id);
         CREATE TABLE IF NOT EXISTS capture_proposals (
             proposal_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, capture_id TEXT NOT NULL, title TEXT NOT NULL,
             category TEXT NOT NULL CHECK(category IN ('task','appointment','worry','idea','note')), confidence REAL NOT NULL DEFAULT 0.0,
@@ -624,6 +667,18 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     )?;
     add_column(
         connection,
+        "fieldy_conversation_chunks",
+        "recording_id",
+        "TEXT",
+    )?;
+    add_column(
+        connection,
+        "fieldy_conversation_chunks",
+        "session_id",
+        "TEXT",
+    )?;
+    add_column(
+        connection,
         "capture_proposals",
         "confidence",
         "REAL NOT NULL DEFAULT 0.0",
@@ -640,6 +695,40 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "capture_proposals",
         "evidence_capture_ids_json",
         "TEXT NOT NULL DEFAULT '[]'",
+    )?;
+    add_column(connection, "capture_proposals", "project_id", "TEXT")?;
+    add_column(
+        connection,
+        "capture_proposals",
+        "dedupe_key",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(
+        connection,
+        "capture_proposals",
+        "occurrence_count",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    add_column(
+        connection,
+        "capture_proposals",
+        "last_seen_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(connection, "personal_review_records", "project_id", "TEXT")?;
+    connection.execute(
+        "UPDATE capture_proposals SET last_seen_at=created_at WHERE last_seen_at=''",
+        [],
+    )?;
+    connection.execute(
+        "UPDATE capture_proposals \
+         SET dedupe_key=lower(category || ':' || COALESCE(project_id,'unassigned') || ':' || trim(title)) \
+         WHERE dedupe_key='' OR dedupe_key=lower(category || ':' || title)",
+        [],
+    )?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS capture_proposals_owner_dedupe_status_idx \
+         ON capture_proposals(owner_id,dedupe_key,status,last_seen_at);",
     )?;
     connection.execute_batch(
         r#"

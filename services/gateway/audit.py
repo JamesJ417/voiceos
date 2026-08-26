@@ -28,6 +28,8 @@ class AuditStore:
                 """
                 CREATE TABLE IF NOT EXISTS turns (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT,
+                    request_fingerprint TEXT,
                     session_id TEXT NOT NULL,
                     transcript TEXT NOT NULL,
                     response_text TEXT NOT NULL,
@@ -136,6 +138,17 @@ class AuditStore:
                 self._connection.execute(
                     "ALTER TABLE pending_approvals ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            turn_columns = {
+                str(row[1]) for row in self._connection.execute("PRAGMA table_info(turns)")
+            }
+            if "request_id" not in turn_columns:
+                self._connection.execute("ALTER TABLE turns ADD COLUMN request_id TEXT")
+            if "request_fingerprint" not in turn_columns:
+                self._connection.execute("ALTER TABLE turns ADD COLUMN request_fingerprint TEXT")
+            self._connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS turns_request_id_idx ON turns(request_id) "
+                "WHERE request_id IS NOT NULL"
+            )
 
     def create_enrollment_code(self, ttl_seconds: int = 600) -> tuple[str, int]:
         ttl = min(max(ttl_seconds, 60), 3_600)
@@ -321,17 +334,21 @@ class AuditStore:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         cost_usd: float | None = None,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> int:
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 """
                 INSERT INTO turns (
-                    session_id, transcript, response_text, provider,
+                    request_id, request_fingerprint, session_id, transcript, response_text, provider,
                     tool_requests_json, approvals_json, results_json, errors_json,
                     processing_ms, input_tokens, output_tokens, cost_usd, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    request_id,
+                    request_fingerprint,
                     session_id,
                     transcript,
                     response_text,
@@ -351,6 +368,7 @@ class AuditStore:
                 "conversation.turn",
                 {
                     "turn_id": int(cursor.lastrowid),
+                    "request_id": request_id,
                     "session_id": session_id,
                     "transcript": transcript,
                     "response_text": response_text,
@@ -359,6 +377,37 @@ class AuditStore:
                 },
             )
             return int(cursor.lastrowid)
+
+    def completed_turn(self, request_id: str) -> dict[str, Any] | None:
+        if not request_id.strip():
+            return None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM turns WHERE request_id = ?",
+                (request_id.strip(),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "session_id": row["session_id"],
+            "transcript": row["transcript"],
+            "response_text": row["response_text"],
+            "processing_ms": row["processing_ms"],
+            "provider": row["provider"],
+            "tool_calls": json.loads(row["tool_requests_json"]),
+            "approvals": json.loads(row["approvals_json"]),
+            "results": json.loads(row["results_json"]),
+            "errors": json.loads(row["errors_json"]),
+            "evidence": None,
+            "usage": {
+                "input_tokens": row["input_tokens"],
+                "output_tokens": row["output_tokens"],
+                "cost_usd": row["cost_usd"],
+            },
+            "reply_audio_url": None,
+            "replayed": True,
+            "_request_fingerprint": row["request_fingerprint"],
+        }
 
     def import_hermes_completion(
         self, *, session_id: str, message_id: int, report: str

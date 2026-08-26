@@ -1,5 +1,6 @@
 use super::auth::{authenticate, header_text};
 use super::error::{ApiResult, api_error};
+use super::image_contract::{detected_image_type, is_supported_image_media_type};
 use crate::state::AppState;
 use axum::{
     Json,
@@ -14,19 +15,30 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 const MAX: i64 = 25 * 1024 * 1024;
 const CHUNK: usize = 1024 * 1024;
+type UploadSessionRow = (
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    i64,
+    String,
+    Option<String>,
+);
 fn err(s: StatusCode, e: &str) -> (StatusCode, Json<Value>) {
     api_error(s, e)
 }
-fn valid_type(s: &str) -> bool {
-    matches!(s, "image/jpeg" | "image/png" | "image/webp" | "image/gif")
-}
-
 pub(crate) async fn create(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let owner = state.primary_owner_id.clone();
-    authenticate(&state, &headers)?;
+    let device_id = authenticate(&state, &headers)?;
+    state
+        .store
+        .ensure_owner_device(&owner, &device_id)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let filename = urlencoding::decode(
         header_text(&headers, "x-voiceos-file-name")
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, "file_name_required"))?,
@@ -47,7 +59,7 @@ pub(crate) async fn create(
     let hash = header_text(&headers, "x-voiceos-upload-sha256")
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "upload_sha256_required"))?
         .to_owned();
-    if !valid_type(&media) {
+    if !is_supported_image_media_type(&media) {
         return Err(err(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "unsupported_media_type",
@@ -71,7 +83,7 @@ pub(crate) async fn create(
         .store
         .connection()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    c.execute("INSERT INTO upload_sessions(upload_id,owner_id,filename,media_type,byte_size,sha256,created_at) VALUES(?,?,?,?,?,?,?)",params![id,owner,filename,media,size,hash,Utc::now().to_rfc3339()]).map_err(|e|err(StatusCode::INTERNAL_SERVER_ERROR,&e.to_string()))?;
+    c.execute("INSERT INTO upload_sessions(upload_id,owner_id,device_id,filename,media_type,byte_size,sha256,created_at) VALUES(?,?,?,?,?,?,?,?)",params![id,owner,device_id,filename,media,size,hash,Utc::now().to_rfc3339()]).map_err(|e|err(StatusCode::INTERNAL_SERVER_ERROR,&e.to_string()))?;
     Ok((
         StatusCode::CREATED,
         Json(
@@ -86,7 +98,7 @@ pub(crate) async fn chunk(
     Path((id, offset)): Path<(String, i64)>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    authenticate(&state, &headers)?;
+    let device_id = authenticate(&state, &headers)?;
     if offset < 0 || body.is_empty() || body.len() > CHUNK {
         return Err(err(StatusCode::BAD_REQUEST, "invalid_chunk"));
     }
@@ -94,23 +106,39 @@ pub(crate) async fn chunk(
         .store
         .connection()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let row: Option<(String, i64, i64)> = c
+    let row: Option<(String, String, i64, i64, String)> = c
         .query_row(
-            "SELECT owner_id,byte_size,received_bytes FROM upload_sessions WHERE upload_id=?",
+            "SELECT owner_id,device_id,byte_size,received_bytes,status FROM upload_sessions WHERE upload_id=?",
             [&id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let Some((owner, total, received)) = row else {
+    let Some((owner, upload_device_id, total, received, status)) = row else {
         return Err(err(StatusCode::NOT_FOUND, "upload_not_found"));
     };
-    if owner != state.primary_owner_id {
+    if owner != state.primary_owner_id || upload_device_id != device_id {
         return Err(err(StatusCode::NOT_FOUND, "upload_not_found"));
-    };
-    if offset != received || offset + body.len() as i64 > total {
+    }
+    if status == "finalized" || offset > received || offset + body.len() as i64 > total {
         return Err(err(StatusCode::CONFLICT, "offset_conflict"));
-    };
+    }
+    if offset < received {
+        let stored: Option<Vec<u8>> = c
+            .query_row(
+                "SELECT bytes FROM upload_chunks WHERE upload_id=? AND offset=?",
+                params![id, offset],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        if stored.as_deref() != Some(body.as_ref()) {
+            return Err(err(StatusCode::CONFLICT, "offset_conflict"));
+        }
+        return Ok(Json(
+            json!({"upload_id":id,"received_bytes":received,"next_offset":received,"status":"uploading"}),
+        ));
+    }
     c.execute(
         "INSERT INTO upload_chunks(upload_id,offset,bytes) VALUES(?,?,?)",
         params![id, offset, body.as_ref()],
@@ -137,15 +165,40 @@ pub(crate) async fn finalize(
         .store
         .connection()
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let s:Option<(String,String,String,i64,String,i64,String)>=c.query_row("SELECT owner_id,filename,media_type,byte_size,sha256,received_bytes,status FROM upload_sessions WHERE upload_id=?",[&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).optional().map_err(|e|err(StatusCode::INTERNAL_SERVER_ERROR,&e.to_string()))?;
-    let Some((owner, file, media, total, want, got, status)) = s else {
+    let s: Option<UploadSessionRow> = c
+        .query_row(
+            "SELECT owner_id,device_id,filename,media_type,byte_size,sha256,received_bytes,status,attachment_id FROM upload_sessions WHERE upload_id=?",
+            [&id],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let Some((owner, device_id, file, media, total, want, got, status, attachment_id)) = s else {
         return Err(err(StatusCode::NOT_FOUND, "upload_not_found"));
     };
     if owner != state.primary_owner_id {
         return Err(err(StatusCode::NOT_FOUND, "upload_not_found"));
     };
     if status == "finalized" {
-        let a:Value=c.query_row("SELECT json_object('attachment_id',attachment_id,'filename',filename,'media_type',media_type,'byte_size',byte_size,'sha256',sha256,'status',status) FROM attachments WHERE upload_id=?",[&id],|r|r.get::<_,String>(0)).map_err(|e|err(StatusCode::INTERNAL_SERVER_ERROR,&e.to_string()))?.parse().unwrap();
+        let attachment_id = attachment_id.ok_or_else(|| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "finalized_upload_missing_attachment",
+            )
+        })?;
+        let a:Value=c.query_row("SELECT json_object('attachment_id',attachment_id,'filename',filename,'media_type',media_type,'byte_size',byte_size,'sha256',sha256,'status','ready') FROM attachments WHERE attachment_id=?",[attachment_id],|r|r.get::<_,String>(0)).map_err(|e|err(StatusCode::INTERNAL_SERVER_ERROR,&e.to_string()))?.parse().unwrap();
         return Ok((StatusCode::OK, Json(json!({"attachment":a}))));
     }
     if got != total {
@@ -165,26 +218,34 @@ pub(crate) async fn finalize(
     if actual != want {
         return Err(err(StatusCode::UNPROCESSABLE_ENTITY, "sha256_mismatch"));
     };
+    if detected_image_type(&data) != Some(media.as_str()) {
+        return Err(err(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "attachment_media_type_mismatch",
+        ));
+    }
     let aid = Uuid::new_v4().to_string();
+    let created_at = Utc::now().to_rfc3339();
     c.execute(
-        "INSERT INTO attachments(attachment_id,upload_id,owner_id,filename,media_type,byte_size,sha256,bytes,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO attachments(attachment_id,owner_id,device_id,filename,media_type,byte_size,sha256,source_bytes,status,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         params![
             aid,
-            id,
             owner,
+            device_id,
             file,
             media,
             total,
             want,
             data,
-            "ready",
-            Utc::now().to_rfc3339(),
+            "uploaded",
+            created_at,
+            (Utc::now() + chrono::Duration::days(7)).to_rfc3339(),
         ],
     )
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     c.execute(
-        "UPDATE upload_sessions SET status='finalized' WHERE upload_id=?",
-        [&id],
+        "UPDATE upload_sessions SET status='finalized', attachment_id=? WHERE upload_id=?",
+        params![aid, id],
     )
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     Ok((
@@ -193,16 +254,4 @@ pub(crate) async fn finalize(
             json!({"attachment":{"attachment_id":aid,"filename":file,"media_type":media,"byte_size":total,"sha256":want,"status":"ready"}}),
         ),
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::valid_type;
-    #[test]
-    fn accepts_only_contract_image_media_types() {
-        assert!(valid_type("image/png"));
-        assert!(valid_type("image/jpeg"));
-        assert!(!valid_type("application/pdf"));
-        assert!(!valid_type("image/svg+xml"));
-    }
 }

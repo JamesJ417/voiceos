@@ -36,6 +36,12 @@ pub(crate) struct LimitQuery {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct FieldyPendingQuery {
+    limit: Option<usize>,
+    quiet_seconds: Option<i64>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DecisionRequest {
     status: String,
     audit_id: String,
@@ -315,6 +321,67 @@ pub(crate) async fn fieldy_intake(
         )
         .map_err(err)?;
     Ok((StatusCode::CREATED, Json(json!({"capture": capture}))))
+}
+
+pub(crate) async fn pending_fieldy(
+    State(state): State<AppState>,
+    Query(query): Query<FieldyPendingQuery>,
+) -> ApiResult<Json<Value>> {
+    let quiet_seconds = query.quiet_seconds.unwrap_or(330).clamp(0, 1_800);
+    Ok(Json(json!({
+        "captures": state
+            .store
+            .pending_fieldy_captures(
+                &state.primary_owner_id,
+                query.limit.unwrap_or(50),
+                Utc::now() - Duration::seconds(quiet_seconds),
+            )
+            .map_err(err)?
+    })))
+}
+
+pub(crate) async fn internal_extract(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<ExtractRequest>,
+) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({
+        "proposals": state
+            .store
+            .extract_personal_capture(
+                &state.primary_owner_id,
+                &id,
+                &JsonExtractor(request.output),
+            )
+            .map_err(err)?
+    })))
+}
+
+pub(crate) async fn fieldy_context(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    let capture = state
+        .store
+        .personal_capture(&state.primary_owner_id, &id)
+        .map_err(err)?
+        .filter(|capture| capture.source == "fieldy")
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "fieldy_capture_not_found"))?;
+    let projects = state
+        .store
+        .projects(&state.primary_owner_id, 100)
+        .map_err(err)?
+        .into_iter()
+        .filter(|project| project.status == "active")
+        .take(30)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "capture_id": capture.id,
+        "projects": projects,
+        "tasks": state.store.tasks(&state.primary_owner_id, false, 75).map_err(err)?,
+        "memories": state.store.memories_for_owner(&state.primary_owner_id, 75).map_err(err)?,
+        "reviewing_proposals": state.store.capture_proposals(&state.primary_owner_id, 75).map_err(err)?,
+    })))
 }
 
 pub(crate) async fn capture(
