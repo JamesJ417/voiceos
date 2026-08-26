@@ -71,6 +71,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var skillUsageContainer: LinearLayout
     private lateinit var historyView: TextView
     private lateinit var taskStatusView: TextView
+    private lateinit var taskListControls: LinearLayout
     private lateinit var taskContainer: LinearLayout
     private lateinit var feedStatusView: TextView
     private lateinit var feedContainer: LinearLayout
@@ -121,6 +122,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var conversationPaused = false
     private var conversationReceiverRegistered = false
     private var currentTaskFilter = TaskFilter.TODAY
+    private var selectedTaskId: String? = null
     private var latestTasks: List<VoiceTask> = emptyList()
     private var latestAiUpdates: List<AiUpdate> = emptyList()
     private var aiUpdatesRefreshing = false
@@ -829,15 +831,31 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     addView(heading("Move something forward", 22f).apply { setPadding(0, dp(5), 0, 0) })
                 }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                 addView(header, fullWidthWrap())
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    addView(secondaryButton("+ TASK") { showTaskCreationDialog() }, weightedButton())
-                    addView(secondaryButton("+ PROJECT") { showProjectCreationDialog() }, weightedButton().apply { marginStart = dp(7) })
-                }, fullWidthWrap().apply { topMargin = dp(12) })
-                addView(
-                    secondaryButton("ADD FOCUS WIDGET") { requestFocusWidget() },
-                    fullWidthWrap().apply { topMargin = dp(7) },
-                )
+                taskListControls = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(secondaryButton("+ TASK") { showTaskCreationDialog() }, weightedButton())
+                        addView(secondaryButton("+ PROJECT") { showProjectCreationDialog() }, weightedButton().apply { marginStart = dp(7) })
+                    }, fullWidthWrap().apply { topMargin = dp(12) })
+                    addView(
+                        secondaryButton("ADD FOCUS WIDGET") { requestFocusWidget() },
+                        fullWidthWrap().apply { topMargin = dp(7) },
+                    )
+                    val primaryFilters = LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(actionButton("NEEDS YOU").apply { setOnClickListener { setTaskFilter(TaskFilter.NEEDS_YOU) } }, weightedButton())
+                        addView(secondaryButton("ALL") { setTaskFilter(TaskFilter.TODAY) }, weightedButton().apply { marginStart = dp(5) })
+                        addView(secondaryButton("VIC") { setTaskFilter(TaskFilter.VIC_WORKING) }, weightedButton().apply { marginStart = dp(5) })
+                    }
+                    addView(primaryFilters, fullWidthWrap().apply { topMargin = dp(11) })
+                    addView(LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(secondaryButton("PROJECTS") { setTaskFilter(TaskFilter.PROJECTS) }, weightedButton())
+                        addView(secondaryButton("WINS") { setTaskFilter(TaskFilter.WINS) }, weightedButton().apply { marginStart = dp(5) })
+                    }, fullWidthWrap().apply { topMargin = dp(6) })
+                }
+                addView(taskListControls, fullWidthWrap())
                 taskStatusView = TextView(this@MainActivity).apply {
                     text = "Loading tasks…"
                     textSize = 13f
@@ -845,18 +863,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     setPadding(0, dp(12), 0, 0)
                 }
                 addView(taskStatusView, fullWidthWrap())
-                val primaryFilters = LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    addView(actionButton("NEEDS YOU").apply { setOnClickListener { setTaskFilter(TaskFilter.NEEDS_YOU) } }, weightedButton())
-                    addView(secondaryButton("ALL") { setTaskFilter(TaskFilter.TODAY) }, weightedButton().apply { marginStart = dp(5) })
-                    addView(secondaryButton("VIC") { setTaskFilter(TaskFilter.VIC_WORKING) }, weightedButton().apply { marginStart = dp(5) })
-                }
-                addView(primaryFilters, fullWidthWrap().apply { topMargin = dp(11) })
-                addView(LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    addView(secondaryButton("PROJECTS") { setTaskFilter(TaskFilter.PROJECTS) }, weightedButton())
-                    addView(secondaryButton("WINS") { setTaskFilter(TaskFilter.WINS) }, weightedButton().apply { marginStart = dp(5) })
-                }, fullWidthWrap().apply { topMargin = dp(6) })
                 taskContainer = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
                 }
@@ -1080,6 +1086,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             return
         }
         if (intent?.action == ACTION_WIDGET_OPEN_TASK) {
+            selectedTaskId = intent.getStringExtra(EXTRA_TASK_ID)
             intent.action = null
             currentTaskFilter = TaskFilter.TODAY
             showPage(AppPage.TASKS)
@@ -2311,6 +2318,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         setOnClickListener {
                             if (task.status == "active") {
                                 currentTaskFilter = TaskFilter.TODAY
+                                selectedTaskId = task.id
                                 showPage(AppPage.TASKS)
                             } else {
                                 updateTaskStatus(task, "active")
@@ -2484,6 +2492,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         latestTasks = tasks
         taskContainer.removeAllViews()
         val openTasks = tasks.filter { it.status !in setOf("completed", "cancelled") }
+        val selectedTask = selectedTaskId?.let { selectedId -> tasks.firstOrNull { it.id == selectedId } }
+        if (selectedTask != null) {
+            taskListControls.visibility = View.GONE
+            renderTaskDetail(selectedTask)
+            if (!preserveStatus) {
+                taskStatusView.text = "Task open • ${TaskStageModel.stages(selectedTask).size} stages • ${TaskStageModel.statusLabel(selectedTask.status)}"
+                taskStatusView.setTextColor(if (taskNeedsAttention(selectedTask)) CarbonPalette.amber else CarbonPalette.teal)
+            }
+            return
+        }
+        selectedTaskId = null
+        taskListControls.visibility = View.VISIBLE
         if (currentTaskFilter == TaskFilter.PROJECTS) {
             renderProjects(tasks)
             if (!preserveStatus) {
@@ -2546,7 +2566,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun renderTaskCard(task: VoiceTask, featured: Boolean = false) {
         val needsAttention = taskNeedsAttention(task)
-        val automated = task.title.startsWith("VIC delegated:", ignoreCase = true)
         val card = taskPanel(12)
         val projectTitle = latestProjects.firstOrNull { it.id == task.projectId }?.title
         val weeklyLabel = WeeklyTaskStore.labelForTask(this, task.id)
@@ -2616,46 +2635,157 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             setTextColor(accent)
             setPadding(0, dp(8), 0, 0)
         }, fullWidthWrap())
-        val details = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            visibility = if (featured) View.VISIBLE else View.GONE
-            addView(TextView(this@MainActivity).apply {
-                text = "OUTCOME\n${task.observableOutcome}\n\n${task.completedSteps}/${task.totalSteps.coerceAtLeast(task.completedSteps)} STEPS • ${task.openBlockers} BLOCKERS • ${task.importance.uppercase(Locale.US)} PRIORITY"
-                textSize = 12f
-                setTextColor(CarbonPalette.muted)
-                setLineSpacing(dp(2).toFloat(), 1.12f)
-                setPadding(0, dp(9), 0, 0)
-            }, fullWidthWrap())
-            task.steps.take(5).forEach { step ->
-                addView(TextView(this@MainActivity).apply {
-                    val mark = if (step.status == "completed") "✓" else if (step.status == "active") "▶" else if (step.status == "blocked") "!" else "○"
-                    text = "$mark  ${step.title}  •  ${step.owner.uppercase(Locale.US)}"
-                    textSize = 11f
-                    setTextColor(if (step.status == "completed") CarbonPalette.green else CarbonPalette.muted)
-                    setPadding(0, dp(6), 0, 0)
-                }, fullWidthWrap())
-            }
-        }
-        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        if (automated) {
-            actions.addView(secondaryButton("OPEN VIC UPLINK") { showPage(AppPage.COMMAND) }, weightedButton())
-        } else {
-            if (task.status != "active") {
-                actions.addView(secondaryButton(if (task.estimatedMinutes <= 5) "START 5" else "START") { updateTaskStatus(task, "active") }, weightedButton())
-            }
-            actions.addView(
-                actionButton("DONE + WIN").apply { setOnClickListener { confirmTaskCompletion(task) } },
-                weightedButton().apply { if (task.status != "active") marginStart = dp(7) },
-            )
-        }
-        details.addView(actions, fullWidthWrap().apply { topMargin = dp(11) })
-        details.addView(taskKicker("TAP CARD TO COLLAPSE").apply { setPadding(0, dp(9), 0, 0) }, fullWidthWrap())
-        card.addView(details, fullWidthWrap())
+        card.addView(taskKicker("TAP TO OPEN • VIEW ALL STAGES").apply { setPadding(0, dp(9), 0, 0) }, fullWidthWrap())
         card.isClickable = true
         card.isFocusable = true
-        card.setOnClickListener { details.visibility = if (details.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
-        card.contentDescription = "$marker. ${task.title}. ${taskAttentionText(task)}. Tap for task details."
+        card.setOnClickListener { openTask(task) }
+        card.contentDescription = "$marker. ${task.title}. ${taskAttentionText(task)}. Tap to open the task and view every stage."
         taskContainer.addView(card, fullWidthWrap().apply { topMargin = dp(9) })
+    }
+
+    private fun openTask(task: VoiceTask) {
+        selectedTaskId = task.id
+        renderTasks(latestTasks)
+        rootScroll.post { rootScroll.smoothScrollTo(0, 0) }
+    }
+
+    private fun closeTaskDetail() {
+        selectedTaskId = null
+        renderTasks(latestTasks)
+        rootScroll.post { rootScroll.smoothScrollTo(0, 0) }
+    }
+
+    private fun renderTaskDetail(task: VoiceTask) {
+        val automated = task.title.startsWith("VIC delegated:", ignoreCase = true)
+        val projectTitle = latestProjects.firstOrNull { it.id == task.projectId }?.title ?: "Task inbox"
+        val stages = TaskStageModel.stages(task)
+        val progressPercent = TaskStageModel.progressPercent(stages)
+        val accent = when {
+            task.status == "blocked" || task.openBlockers > 0 -> CarbonPalette.red
+            taskNeedsAttention(task) -> CarbonPalette.amber
+            task.progressLane == "vic_working" -> CarbonPalette.cyan
+            task.status == "completed" -> CarbonPalette.green
+            else -> CarbonPalette.teal
+        }
+
+        taskContainer.addView(secondaryButton("‹ BACK TO TASK LIST") { closeTaskDetail() }, fullWidthWrap().apply { topMargin = dp(9) })
+        taskContainer.addView(taskPanel(18).apply {
+            addView(taskKicker("$projectTitle • ${task.status.replace('_', ' ').uppercase(Locale.US)}"), fullWidthWrap())
+            addView(taskHeading(task.title, 27f).apply { setPadding(0, dp(7), 0, 0) }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = taskAttentionText(task)
+                textSize = 12f
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                setTextColor(accent)
+                setPadding(0, dp(10), 0, 0)
+            }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = "OUTCOME\n${task.observableOutcome.ifBlank { "Complete ${task.title}" }}"
+                textSize = 14f
+                setTextColor(CarbonPalette.white)
+                setLineSpacing(dp(3).toFloat(), 1.14f)
+                setPadding(0, dp(14), 0, 0)
+            }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = "$progressPercent% COMPLETE  •  ${stages.count { it.status == "completed" }}/${stages.size} STAGES  •  ${task.openBlockers} BLOCKERS  •  ${task.estimatedMinutes} MIN"
+                textSize = 10f
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(12), 0, 0)
+            }, fullWidthWrap())
+            addView(
+                taskProgressBar(stages.count { it.status == "completed" }, stages.size, accent),
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(6)).apply { topMargin = dp(9) },
+            )
+        }, fullWidthWrap().apply { topMargin = dp(9) })
+
+        taskContainer.addView(taskPanel(14).apply {
+            addView(taskKicker("STAGE BREAKDOWN // ${stages.size.toString().padStart(2, '0')}"), fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = "Each stage shows who owns it, where it stands, and what must happen before the task is finished."
+                textSize = 12f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(7), 0, dp(2))
+            }, fullWidthWrap())
+            stages.forEachIndexed { index, stage ->
+                addView(taskStageView(index, stage), fullWidthWrap().apply { topMargin = dp(8) })
+            }
+        }, fullWidthWrap().apply { topMargin = dp(9) })
+
+        taskContainer.addView(taskPanel(14).apply {
+            addView(taskKicker(if (taskNeedsAttention(task)) "NEXT REQUIRED ACTION" else "NEXT MOVE"), fullWidthWrap())
+            addView(taskHeading(TaskStageModel.nextAction(task), 19f).apply { setPadding(0, dp(7), 0, 0) }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = when (task.progressLane) {
+                    "vic_working" -> "OWNER • VIC / HERMES"
+                    "review", "needs_me" -> "OWNER • YOU"
+                    else -> "OWNER • SHARED"
+                }
+                textSize = 10f
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                setTextColor(accent)
+                setPadding(0, dp(8), 0, 0)
+            }, fullWidthWrap())
+            val actions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+            if (automated) {
+                actions.addView(secondaryButton("OPEN VIC UPLINK") { showPage(AppPage.COMMAND) }, weightedButton())
+            } else if (task.status != "completed" && task.status != "cancelled") {
+                if (task.status != "active") {
+                    actions.addView(secondaryButton(if (task.estimatedMinutes <= 5) "START 5" else "START TASK") { updateTaskStatus(task, "active") }, weightedButton())
+                }
+                actions.addView(
+                    actionButton("DONE + WIN").apply { setOnClickListener { confirmTaskCompletion(task) } },
+                    weightedButton().apply { if (task.status != "active") marginStart = dp(7) },
+                )
+            }
+            if (actions.childCount > 0) addView(actions, fullWidthWrap().apply { topMargin = dp(13) })
+        }, fullWidthWrap().apply { topMargin = dp(9) })
+
+        if (task.artifacts.isNotEmpty()) {
+            taskContainer.addView(taskPanel(14).apply {
+                addView(taskKicker("OUTPUTS // ${task.artifacts.size.toString().padStart(2, '0')}"), fullWidthWrap())
+                task.artifacts.forEach { artifact ->
+                    addView(TextView(this@MainActivity).apply {
+                        text = "${artifact.kind.uppercase(Locale.US)}  •  ${artifact.description.ifBlank { artifact.uri }}"
+                        textSize = 12f
+                        setTextColor(CarbonPalette.cyan)
+                        setPadding(0, dp(8), 0, 0)
+                    }, fullWidthWrap())
+                }
+            }, fullWidthWrap().apply { topMargin = dp(9) })
+        }
+    }
+
+    private fun taskStageView(index: Int, stage: TaskStage) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.TOP
+        val stageAccent = when (stage.status) {
+            "completed" -> CarbonPalette.green
+            "active" -> CarbonPalette.teal
+            "blocked" -> CarbonPalette.red
+            else -> CarbonPalette.muted
+        }
+        setPadding(dp(11), dp(11), dp(11), dp(11))
+        background = carbonControl(this@MainActivity, stageAccent)
+        addView(TextView(this@MainActivity).apply {
+            text = (index + 1).toString().padStart(2, '0')
+            textSize = 13f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            setTextColor(stageAccent)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, dp(12), 0)
+        })
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(taskKicker("${TaskStageModel.statusLabel(stage.status)} • ${TaskStageModel.ownerLabel(stage.owner)}"), fullWidthWrap())
+            addView(taskHeading(stage.title, 16f).apply { setPadding(0, dp(4), 0, 0) }, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = stage.detail
+                textSize = 11f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(5), 0, 0)
+            }, fullWidthWrap())
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
 
     private fun taskNeedsAttention(task: VoiceTask): Boolean =
@@ -2791,6 +2921,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun setTaskFilter(filter: TaskFilter) {
+        selectedTaskId = null
         currentTaskFilter = filter
         renderTasks(latestTasks)
     }
