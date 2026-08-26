@@ -1033,7 +1033,7 @@ fn speak_reply(gateway: &str, text: &str) {
 
 fn install_styles() {
     let provider = CssProvider::new();
-    provider.load_from_string(include_str!("style.css"));
+    provider.load_from_data(include_str!("style.css"));
     if let Some(display) = Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
