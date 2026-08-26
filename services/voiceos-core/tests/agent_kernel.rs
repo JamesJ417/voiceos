@@ -538,3 +538,112 @@ fn vic_outreach_is_durable_deduplicated_and_actionable() {
     assert!(policy.enabled);
     assert_eq!(policy.max_checkins_per_day, 6);
 }
+#[test]
+fn subagent_work_is_a_durable_idempotent_task_from_start_to_finish() {
+    let store = ConversationStore::in_memory().unwrap();
+    let project = store
+        .create_project("owner", None, "Launch VoiceOS")
+        .unwrap();
+    let parent = store
+        .create_task(
+            "owner",
+            Some(&project.id),
+            None,
+            "Prepare the launch",
+            "VoiceOS is ready to launch.",
+            60,
+        )
+        .unwrap();
+    let task_session = format!("task:{}", parent.id);
+    let (task, job, created) = store
+        .start_subagent_task(
+            "owner",
+            "run_123",
+            Some(&task_session),
+            "Research the launch plan",
+            "A verified launch report is returned to VIC.",
+            30,
+            "normal",
+            "provider:hermes",
+        )
+        .unwrap();
+    assert!(created);
+    assert_eq!("active", task.status);
+    assert_eq!(Some(project.id), task.project_id);
+    assert_eq!(Some(parent.id), task.parent_task_id);
+    assert!(task.due_at.is_some());
+    assert_eq!("running", job.status);
+
+    let (same_task, same_job, created_again) = store
+        .start_subagent_task(
+            "owner",
+            "run_123",
+            Some(&task_session),
+            "A duplicate title that must not replace the task",
+            "A duplicate outcome",
+            45,
+            "high",
+            "provider:hermes",
+        )
+        .unwrap();
+    assert!(!created_again);
+    assert_eq!(task.id, same_task.id);
+    assert_eq!(job.id, same_job.id);
+
+    let (finished_task, finished_job) = store
+        .finish_subagent_task(
+            "owner",
+            "run_123",
+            "completed",
+            "Verified report returned.",
+            "provider:hermes",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!("completed", finished_task.status);
+    assert_eq!("completed", finished_job.status);
+    let detail = store.task_detail("owner", &task.id).unwrap().unwrap();
+    assert_eq!(3, detail.progress.completed_steps);
+    assert_eq!(3, detail.progress.total_steps);
+    assert_eq!(1, detail.handoffs.len());
+    assert_eq!("review", detail.progress.lane);
+}
+
+#[test]
+fn failed_subagent_work_stays_visible_as_a_blocked_task() {
+    let store = ConversationStore::in_memory().unwrap();
+    let (task, _, _) = store
+        .start_subagent_task(
+            "owner",
+            "run_failed",
+            None,
+            "Inspect the unavailable service",
+            "A verified service report is returned to VIC.",
+            15,
+            "high",
+            "provider:hermes",
+        )
+        .unwrap();
+    let (failed_task, failed_job) = store
+        .finish_subagent_task(
+            "owner",
+            "run_failed",
+            "failed",
+            "The provider timed out.",
+            "provider:hermes",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!("blocked", failed_task.status);
+    assert_eq!("failed", failed_job.status);
+    let detail = store.task_detail("owner", &task.id).unwrap().unwrap();
+    assert_eq!(
+        3,
+        detail.progress.open_blockers
+            + detail
+                .steps
+                .iter()
+                .filter(|step| step.status == "blocked")
+                .count()
+    );
+}

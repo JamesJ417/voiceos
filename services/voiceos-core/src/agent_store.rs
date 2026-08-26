@@ -10,6 +10,287 @@ use crate::{
 };
 
 impl ConversationStore {
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_subagent_task(
+        &self,
+        owner_id: &str,
+        worker_id: &str,
+        session_id: Option<&str>,
+        title: &str,
+        observable_outcome: &str,
+        estimated_minutes: u32,
+        importance: &str,
+        actor: &str,
+    ) -> Result<(TaskRecord, JobRecord, bool), StoreError> {
+        require_text("owner_id", owner_id)?;
+        require_text("worker_id", worker_id)?;
+        require_text("task title", title)?;
+        require_text("observable outcome", observable_outcome)?;
+        require_text("actor", actor)?;
+        validate_task_importance(importance)?;
+        if !(1..=1_440).contains(&estimated_minutes) {
+            return Err(StoreError::InvalidInput(
+                "estimated_minutes must be between 1 and 1440".to_owned(),
+            ));
+        }
+
+        let owner_id = owner_id.trim();
+        let worker_id = worker_id.trim();
+        let idempotency_key = format!("hermes-subagent:{worker_id}");
+        let now = Utc::now();
+        let now_text = now.to_rfc3339();
+        let due_at = (now + chrono::Duration::minutes(i64::from(estimated_minutes))).to_rfc3339();
+        let mut connection = self.connection()?;
+        ensure_owner(&connection, owner_id, &now_text)?;
+
+        let existing: Option<JobRecord> = connection
+            .query_row(
+                "SELECT job_id, owner_id, task_id, status, idempotency_key, capability_scope_json, created_at, updated_at FROM jobs WHERE owner_id=?1 AND idempotency_key=?2",
+                params![owner_id, idempotency_key],
+                job_row,
+            )
+            .optional()?;
+        if let Some(job) = existing {
+            let task_id = job
+                .task_id
+                .as_deref()
+                .ok_or_else(|| StoreError::InvalidInput("subagent job has no task".to_owned()))?;
+            let task = connection.query_row(
+                "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, due_at, importance, status, created_at, updated_at FROM tasks WHERE owner_id=?1 AND task_id=?2",
+                params![owner_id, task_id],
+                task_row,
+            )?;
+            return Ok((task, job, false));
+        }
+
+        let transaction = connection.transaction()?;
+        let parent_task =
+            if let Some(candidate) = session_id.and_then(|value| value.strip_prefix("task:")) {
+                transaction
+                    .query_row(
+                        "SELECT project_id FROM tasks WHERE owner_id=?1 AND task_id=?2",
+                        params![owner_id, candidate],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .optional()?
+                    .map(|project_id| (candidate.to_owned(), project_id))
+            } else {
+                None
+            };
+        let project_title = "VIC delegated work";
+        let project_id: String = if let Some(project_id) = parent_task
+            .as_ref()
+            .and_then(|(_, project_id)| project_id.clone())
+        {
+            project_id
+        } else {
+            match transaction
+                .query_row(
+                    "SELECT project_id FROM projects WHERE owner_id=?1 AND title=?2 AND status='active' ORDER BY created_at LIMIT 1",
+                    params![owner_id, project_title],
+                    |row| row.get(0),
+                )
+                .optional()?
+            {
+                Some(id) => id,
+                None => {
+                    let id = Uuid::new_v4().to_string();
+                    transaction.execute(
+                        "INSERT INTO projects(project_id, owner_id, goal_id, title, status, created_at, updated_at) VALUES(?1, ?2, NULL, ?3, 'active', ?4, ?4)",
+                        params![id, owner_id, project_title, now_text],
+                    )?;
+                    id
+                }
+            }
+        };
+        let parent_task_id = parent_task.map(|(task_id, _)| task_id);
+        let task_id = Uuid::new_v4().to_string();
+        let job_id = Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT INTO tasks(task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, due_at, importance, status, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10, ?10)",
+            params![task_id, owner_id, project_id, parent_task_id, title.trim(), observable_outcome.trim(), estimated_minutes, due_at, importance, now_text],
+        )?;
+        let capabilities =
+            serde_json::json!(["task.analysis", "task.progress", "conversation.return"]);
+        transaction.execute(
+            "INSERT INTO jobs(job_id, owner_id, task_id, status, idempotency_key, capability_scope_json, created_at, updated_at) VALUES(?1, ?2, ?3, 'running', ?4, ?5, ?6, ?6)",
+            params![job_id, owner_id, task_id, idempotency_key, capabilities.to_string(), now_text],
+        )?;
+        for (position, step_title) in [
+            format!("Hermes subagent executes: {}", title.trim()),
+            "VIC imports and reviews the worker report".to_owned(),
+            "VIC returns the result to the originating conversation".to_owned(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            transaction.execute(
+                "INSERT INTO task_steps(step_id, owner_id, task_id, title, assigned_owner, status, evidence_json, position, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, 'vic', ?5, '{}', ?6, ?7, ?7)",
+                params![Uuid::new_v4().to_string(), owner_id, task_id, step_title, if position == 0 { "active" } else { "pending" }, position, now_text],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO execution_events(owner_id, stream_id, event_type, actor, payload_json, occurred_at) VALUES(?1, ?2, 'task.subagent.started', ?3, ?4, ?5)",
+            params![
+                owner_id,
+                task_id,
+                actor.trim(),
+                serde_json::json!({
+                    "worker_id": worker_id,
+                    "session_id": session_id,
+                    "job_id": job_id,
+                    "parent_task_id": parent_task_id,
+                    "title": title.trim(),
+                    "status": "active",
+                    "completed_steps": 0,
+                    "total_steps": 3,
+                })
+                .to_string(),
+                now_text,
+            ],
+        )?;
+        transaction.commit()?;
+
+        Ok((
+            TaskRecord {
+                id: task_id.clone(),
+                owner_id: owner_id.to_owned(),
+                project_id: Some(project_id),
+                parent_task_id,
+                title: title.trim().to_owned(),
+                observable_outcome: observable_outcome.trim().to_owned(),
+                estimated_minutes,
+                due_at: Some(due_at),
+                importance: importance.to_owned(),
+                status: "active".to_owned(),
+                created_at: now_text.clone(),
+                updated_at: now_text.clone(),
+            },
+            JobRecord {
+                id: job_id,
+                owner_id: owner_id.to_owned(),
+                task_id: Some(task_id),
+                status: "running".to_owned(),
+                idempotency_key,
+                capability_scope: capabilities,
+                created_at: now_text.clone(),
+                updated_at: now_text,
+            },
+            true,
+        ))
+    }
+
+    pub fn finish_subagent_task(
+        &self,
+        owner_id: &str,
+        worker_id: &str,
+        status: &str,
+        summary: &str,
+        actor: &str,
+    ) -> Result<Option<(TaskRecord, JobRecord)>, StoreError> {
+        require_text("owner_id", owner_id)?;
+        require_text("worker_id", worker_id)?;
+        require_text("summary", summary)?;
+        require_text("actor", actor)?;
+        if !matches!(status, "completed" | "failed") {
+            return Err(StoreError::InvalidInput(
+                "subagent status must be completed or failed".to_owned(),
+            ));
+        }
+        let owner_id = owner_id.trim();
+        let idempotency_key = format!("hermes-subagent:{}", worker_id.trim());
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let existing: Option<JobRecord> = connection
+            .query_row(
+                "SELECT job_id, owner_id, task_id, status, idempotency_key, capability_scope_json, created_at, updated_at FROM jobs WHERE owner_id=?1 AND idempotency_key=?2",
+                params![owner_id, idempotency_key],
+                job_row,
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        let Some(task_id) = existing.task_id.clone() else {
+            return Ok(None);
+        };
+        if matches!(
+            existing.status.as_str(),
+            "completed" | "failed" | "cancelled"
+        ) {
+            let task = connection.query_row(
+                "SELECT task_id, owner_id, project_id, parent_task_id, title, observable_outcome, estimated_minutes, due_at, importance, status, created_at, updated_at FROM tasks WHERE owner_id=?1 AND task_id=?2",
+                params![owner_id, task_id],
+                task_row,
+            )?;
+            return Ok(Some((task, existing)));
+        }
+
+        let task_status = if status == "completed" {
+            "completed"
+        } else {
+            "blocked"
+        };
+        let step_status = if status == "completed" {
+            "completed"
+        } else {
+            "blocked"
+        };
+        let evidence = serde_json::json!({
+            "worker_id": worker_id.trim(),
+            "summary": summary.trim(),
+            "status": status,
+        });
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE jobs SET status=?3, updated_at=?4 WHERE owner_id=?1 AND job_id=?2",
+            params![owner_id, existing.id, status, now],
+        )?;
+        transaction.execute(
+            "UPDATE tasks SET status=?3, updated_at=?4 WHERE owner_id=?1 AND task_id=?2",
+            params![owner_id, task_id, task_status, now],
+        )?;
+        transaction.execute(
+            "UPDATE task_steps SET status=?3, evidence_json=?4, updated_at=?5 WHERE owner_id=?1 AND task_id=?2 AND status NOT IN ('completed', 'cancelled')",
+            params![owner_id, task_id, step_status, evidence.to_string(), now],
+        )?;
+        if status == "completed" {
+            transaction.execute(
+                "INSERT INTO task_handoffs(handoff_id, owner_id, task_id, from_owner, to_owner, kind, summary, status, created_at, completed_at) VALUES(?1, ?2, ?3, 'vic', 'user', 'review', ?4, 'pending', ?5, NULL)",
+                params![Uuid::new_v4().to_string(), owner_id, task_id, summary.trim(), now],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO execution_events(owner_id, stream_id, event_type, actor, payload_json, occurred_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                owner_id,
+                task_id,
+                format!("task.subagent.{status}"),
+                actor.trim(),
+                serde_json::json!({
+                    "worker_id": worker_id.trim(),
+                    "job_id": existing.id,
+                    "status": task_status,
+                    "summary": summary.trim(),
+                    "completed_steps": if status == "completed" { 3 } else { 0 },
+                    "total_steps": 3,
+                })
+                .to_string(),
+                now,
+            ],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+
+        let task = self
+            .task(owner_id, &task_id)?
+            .expect("subagent task exists after update");
+        let job = self
+            .job(owner_id, &existing.id)?
+            .expect("subagent job exists after update");
+        Ok(Some((task, job)))
+    }
+
     pub fn create_goal(
         &self,
         owner_id: &str,

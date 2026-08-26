@@ -61,20 +61,37 @@ class AgentSignalView(context: Context) : View(context) {
         textSize = sp(9f)
         typeface = Typeface.MONOSPACE
     }
-    private var phase = "STANDBY"
+    private var phase = "READY"
     private var workerCount = 0
     private var signalSeed = 0L
+    private var gatewayState = "CHECKING"
+    private var provider = "UNKNOWN"
+    private var memoryConnected = false
+    private var eventStreamConnected = false
 
     init {
-        minimumHeight = (164f * density).toInt()
-        contentDescription = "VIC neural trace. Standby. No active Hermes subagents."
+        minimumHeight = (184f * density).toInt()
+        contentDescription = "VIC live uplink. Checking VoiceOS."
     }
 
-    fun setSignal(newPhase: String, runningWorkers: Int, eventId: Long) {
+    fun setSignal(
+        newPhase: String,
+        runningWorkers: Int,
+        eventId: Long,
+        gateway: String,
+        modelProvider: String,
+        memoryReady: Boolean,
+        eventsLive: Boolean,
+    ) {
         phase = newPhase.replace('.', ' ').uppercase(Locale.US).take(28)
         workerCount = runningWorkers.coerceAtLeast(0)
         signalSeed = eventId
-        contentDescription = "VIC neural trace. $phase. $workerCount active Hermes subagents."
+        gatewayState = gateway.uppercase(Locale.US).take(16)
+        provider = modelProvider.uppercase(Locale.US).take(18)
+        memoryConnected = memoryReady
+        eventStreamConnected = eventsLive
+        val linkDescription = if (gatewayState == "ONLINE") "connected" else gatewayState.lowercase(Locale.US)
+        contentDescription = "VIC live uplink. Voice $phase. VoiceOS $linkDescription. $workerCount active Hermes subagents."
         invalidate()
     }
 
@@ -84,6 +101,12 @@ class AgentSignalView(context: Context) : View(context) {
         val heightValue = height.toFloat()
         val radius = 16f * density
         frame.set(0f, 0f, widthValue, heightValue)
+        val accent = signalAccent()
+        borderPaint.color = accent
+        signalPaint.color = accent
+        signalGlowPaint.color = Color.argb(42, Color.red(accent), Color.green(accent), Color.blue(accent))
+        scanPaint.color = Color.argb(88, Color.red(accent), Color.green(accent), Color.blue(accent))
+        labelPaint.color = accent
         canvas.drawRoundRect(frame, radius, radius, fillPaint)
         canvas.drawRoundRect(
             RectF(density * 0.5f, density * 0.5f, widthValue - density * 0.5f, heightValue - density * 0.5f),
@@ -101,13 +124,16 @@ class AgentSignalView(context: Context) : View(context) {
         canvas.restore()
 
         val left = 15f * density
-        canvas.drawText("VIC // NEURAL TRACE", left, 23f * density, titlePaint)
-        canvas.drawText("PHASE  $phase", left, 43f * density, labelPaint)
-        canvas.drawText("UPLINK LIVE", left, heightValue - 13f * density, labelPaint)
-        val forkText = "FORKS ${workerCount.toString().padStart(2, '0')}"
+        canvas.drawText("VIC // LIVE NEURAL UPLINK", left, 23f * density, titlePaint)
+        canvas.drawText("CORE $gatewayState  •  EVENTS ${if (eventStreamConnected) "LIVE" else "SYNC"}", left, 43f * density, labelPaint)
+        canvas.drawText("VOICE $phase", left, 61f * density, metaPaint)
+        val modelText = "MODEL $provider"
+        canvas.drawText(modelText, widthValue - left - metaPaint.measureText(modelText), 61f * density, metaPaint)
+        canvas.drawText("MEMORY ${if (memoryConnected) "ACTIVE" else "UNAVAILABLE"}", left, heightValue - 13f * density, labelPaint)
+        val forkText = "HERMES FORKS ${workerCount.toString().padStart(2, '0')}"
         canvas.drawText(forkText, widthValue - 15f * density - metaPaint.measureText(forkText), heightValue - 13f * density, metaPaint)
 
-        if (isShown) postInvalidateDelayed(42L)
+        if (isShown) postInvalidateDelayed(if (gatewayState == "OFFLINE") 900L else 42L)
     }
 
     private fun drawGrid(canvas: Canvas, widthValue: Float, heightValue: Float) {
@@ -128,8 +154,16 @@ class AgentSignalView(context: Context) : View(context) {
     }
 
     private fun drawSignal(canvas: Canvas, widthValue: Float, heightValue: Float) {
-        val baseline = heightValue * 0.57f
-        val amplitude = heightValue * 0.09f
+        val baseline = heightValue * 0.62f
+        val activityScale = when {
+            gatewayState == "OFFLINE" -> 0.08f
+            phase.contains("LISTEN") -> 1.55f
+            phase.contains("PROCESS") || phase.contains("COGNITION") -> 1.25f
+            phase.contains("SPEAK") -> 1.65f
+            workerCount > 0 -> 1.35f
+            else -> 0.55f
+        }
+        val amplitude = heightValue * 0.075f * activityScale
         val time = (SystemClock.uptimeMillis() % 4_000L) / 4_000f
         signalPath.reset()
         repeat(49) { index ->
@@ -142,6 +176,17 @@ class AgentSignalView(context: Context) : View(context) {
         }
         canvas.drawPath(signalPath, signalGlowPaint)
         canvas.drawPath(signalPath, signalPaint)
+    }
+
+    private fun signalAccent(): Int = when {
+        gatewayState == "OFFLINE" -> CarbonPalette.red
+        gatewayState in setOf("CHECKING", "RECONNECTING") -> CarbonPalette.amber
+        phase.contains("ERROR") || phase.contains("ATTENTION") -> CarbonPalette.red
+        phase.contains("LISTEN") -> CarbonPalette.cyan
+        phase.contains("PROCESS") || phase.contains("COGNITION") -> CarbonPalette.purple
+        phase.contains("SPEAK") -> CarbonPalette.teal
+        workerCount > 0 -> CarbonPalette.amber
+        else -> CarbonPalette.teal
     }
 
     private fun sp(value: Float): Float = TypedValue.applyDimension(

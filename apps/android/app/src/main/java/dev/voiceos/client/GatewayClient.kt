@@ -34,6 +34,7 @@ data class GatewayHealth(
     val status: String,
     val gateway: String,
     val languageModel: String,
+    val memory: String,
 )
 
 data class AuditTurn(
@@ -573,6 +574,7 @@ object GatewayClient {
                 status = payload.getString("status"),
                 gateway = payload.getString("gateway"),
                 languageModel = payload.optString("language_model", "unknown"),
+                memory = payload.optString("memory", "unavailable"),
             )
         } finally {
             connection.disconnect()

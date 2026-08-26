@@ -49,7 +49,7 @@ import java.util.UUID
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private enum class VoiceState { READY, STARTING, LISTENING, PROCESSING, SPEAKING, ERROR }
     private enum class AppPage { FEED, COMMAND, TASKS, HISTORY, SYSTEM }
-    private enum class TaskFilter { TODAY, PROJECTS, VIC_WORKING, REVIEW, WINS }
+    private enum class TaskFilter { TODAY, NEEDS_YOU, PROJECTS, VIC_WORKING, WINS }
 
     private lateinit var statusView: TextView
     private lateinit var voiceTitleView: TextView
@@ -128,6 +128,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private val weeklyCreationInFlight = mutableSetOf<String>()
     private val agentVisibility = AgentVisibilityModel()
     private var agentRecoveryInFlight = false
+    private var uplinkGatewayState = "CHECKING"
+    private var uplinkProvider = "UNKNOWN"
+    private var uplinkMemoryConnected = false
+    private var uplinkEventStreamConnected = false
 
     private val conversationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -708,8 +712,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         commandPage.addView(approvals, fullWidthWrap().apply { topMargin = dp(12) })
 
         commandPage.addView(panel(17).apply {
-            addView(kicker("System trace // live"), fullWidthWrap())
-            addView(heading("VIC neural uplink", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            addView(kicker("VoiceOS telemetry // live"), fullWidthWrap())
+            addView(heading("VIC live neural uplink", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
             agentSignalView = AgentSignalView(this@MainActivity)
             addView(agentSignalView, fullWidthWrap().apply { topMargin = dp(14) })
             agentSummaryView = TextView(this@MainActivity).apply {
@@ -722,7 +726,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             }
             addView(agentSummaryView, fullWidthWrap())
             addView(TextView(this@MainActivity).apply {
-                text = "DISPLAY LAYER // SAFE PROGRESS ONLY // PRIVATE REASONING SEALED"
+                text = "CORE + VOICE + MEMORY + HERMES // SAFE PROGRESS ONLY // PRIVATE REASONING SEALED"
                 textSize = 10f
                 typeface = Typeface.MONOSPACE
                 setTextColor(CarbonPalette.muted)
@@ -843,14 +847,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 addView(taskStatusView, fullWidthWrap())
                 val primaryFilters = LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    addView(secondaryButton("ALL TASKS") { setTaskFilter(TaskFilter.TODAY) }, weightedButton())
-                    addView(secondaryButton("PROJECTS") { setTaskFilter(TaskFilter.PROJECTS) }, weightedButton().apply { marginStart = dp(5) })
+                    addView(actionButton("NEEDS YOU").apply { setOnClickListener { setTaskFilter(TaskFilter.NEEDS_YOU) } }, weightedButton())
+                    addView(secondaryButton("ALL") { setTaskFilter(TaskFilter.TODAY) }, weightedButton().apply { marginStart = dp(5) })
                     addView(secondaryButton("VIC") { setTaskFilter(TaskFilter.VIC_WORKING) }, weightedButton().apply { marginStart = dp(5) })
                 }
                 addView(primaryFilters, fullWidthWrap().apply { topMargin = dp(11) })
                 addView(LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    addView(secondaryButton("REVIEW") { setTaskFilter(TaskFilter.REVIEW) }, weightedButton())
+                    addView(secondaryButton("PROJECTS") { setTaskFilter(TaskFilter.PROJECTS) }, weightedButton())
                     addView(secondaryButton("WINS") { setTaskFilter(TaskFilter.WINS) }, weightedButton().apply { marginStart = dp(5) })
                 }, fullWidthWrap().apply { topMargin = dp(6) })
                 taskContainer = LinearLayout(this@MainActivity).apply {
@@ -1324,6 +1328,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 preferences.edit().putLong("cursor", event.id).apply()
                 runOnUiThread {
                     if (isFinishing || isDestroyed) return@runOnUiThread
+                    uplinkEventStreamConnected = true
+                    renderAgentVisibility()
                     when (event.type) {
                         "conversation.turn" -> if (currentPage == AppPage.HISTORY) loadHistory()
                         "conversation.floor.changed" -> {
@@ -1380,6 +1386,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             onClosed = { error ->
                 if (error != null && !isFinishing && !isDestroyed) {
                     runOnUiThread {
+                        uplinkEventStreamConnected = false
+                        uplinkGatewayState = "RECONNECTING"
+                        renderAgentVisibility()
                         gatewayView.text = "● RECONNECTING"
                         gatewayView.postDelayed(
                             { if (!isFinishing && !isDestroyed) startSharedEventStream() },
@@ -1491,8 +1500,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         id = "${event.id}-$phase",
                         phase = phase,
                         label = event.payload.optString("label", "VIC is working").ifBlank { "VIC is working" },
-                        detail = event.payload.optString("detail").takeIf { it.isNotBlank() }?.take(500),
-                        sessionId = event.payload.optString("session_id").takeIf { it.isNotBlank() },
+                        detail = event.payload.optionalText("detail")?.take(500),
+                        sessionId = event.payload.optionalText("session_id"),
                     )
                 )
             }
@@ -1503,8 +1512,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         id = event.payload.optString("worker_id", event.id.toString()).ifBlank { event.id.toString() },
                         status = event.payload.optString("status", "running").ifBlank { "running" },
                         label = event.payload.optString("label", "Hermes background worker").ifBlank { "Hermes background worker" },
-                        detail = event.payload.optString("detail").takeIf { it.isNotBlank() }?.take(500),
-                        sessionId = event.payload.optString("session_id").takeIf { it.isNotBlank() },
+                        detail = event.payload.optionalText("detail")?.take(500),
+                        sessionId = event.payload.optionalText("session_id"),
+                        taskId = event.payload.optionalText("task_id"),
+                        taskTitle = event.payload.optionalText("task_title"),
+                        taskStatus = event.payload.optionalText("task_status"),
+                        taskOutcome = event.payload.optionalText("task_outcome"),
+                        taskProjectId = event.payload.optionalText("task_project_id"),
+                        taskDueAt = event.payload.optionalText("task_due_at"),
+                        taskImportance = event.payload.optionalText("task_importance"),
+                        completedSteps = event.payload.optInt("completed_steps", 0),
+                        totalSteps = event.payload.optInt("total_steps", 0),
                     )
                 )
             }
@@ -1520,17 +1538,34 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val runningWorkers = agentVisibility.runningWorkerCount()
         val latest = activities.firstOrNull()
 
+        val livePhase = when {
+            voiceState != VoiceState.READY -> voiceState.name
+            runningWorkers > 0 && latest != null -> activityPhaseLabel(latest.phase)
+            else -> "READY"
+        }
         agentSignalView.setSignal(
-            latest?.let { activityPhaseLabel(it.phase) } ?: "standby",
+            livePhase,
             runningWorkers,
             latest?.eventId ?: 0L,
+            uplinkGatewayState,
+            uplinkProvider,
+            uplinkMemoryConnected,
+            uplinkEventStreamConnected,
         )
         agentSummaryView.text = when {
-            runningWorkers > 0 -> "TRACE ONLINE // FORKS ${runningWorkers.toString().padStart(2, '0')} // VIC WORKING"
-            latest != null -> "TRACE ONLINE // ${latest.label.uppercase(Locale.US)}"
-            else -> "TRACE IDLE // WAITING FOR SIGNAL"
+            uplinkGatewayState == "OFFLINE" -> "UPLINK OFFLINE // VOICEOS UNREACHABLE"
+            uplinkGatewayState == "RECONNECTING" -> "UPLINK DEGRADED // EVENT STREAM RECONNECTING"
+            runningWorkers > 0 -> "UPLINK ONLINE // FORKS ${runningWorkers.toString().padStart(2, '0')} // TASKS TRACKED"
+            latest != null -> "UPLINK ONLINE // ${latest.label.uppercase(Locale.US)}"
+            else -> "UPLINK ONLINE // VIC READY // NO ACTIVE FORKS"
         }
-        agentSummaryView.setTextColor(if (latest != null || runningWorkers > 0) CarbonPalette.teal else CarbonPalette.muted)
+        agentSummaryView.setTextColor(
+            when (uplinkGatewayState) {
+                "OFFLINE" -> CarbonPalette.red
+                "RECONNECTING", "CHECKING" -> CarbonPalette.amber
+                else -> if (latest != null || runningWorkers > 0) CarbonPalette.teal else CarbonPalette.muted
+            }
+        )
         agentActivityContainer.removeAllViews()
         if (activities.isEmpty()) {
             agentActivityContainer.addView(agentEventCard("TRACE 0000 // STANDBY", "> awaiting execution signal", "New agent work will stream here automatically.", CarbonPalette.muted))
@@ -1568,9 +1603,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 }
                 agentWorkerContainer.addView(
                     agentEventCard(
-                        "FORK ${worker.id.takeLast(4).uppercase(Locale.US)} // ${worker.status.uppercase(Locale.US)}",
-                        "> ${worker.label}",
-                        worker.detail,
+                        buildString {
+                            append("FORK ${worker.id.takeLast(4).uppercase(Locale.US)} // ${worker.status.uppercase(Locale.US)}")
+                            if (worker.taskId != null) append(" // TASK ${worker.taskId.takeLast(4).uppercase(Locale.US)}")
+                            if (worker.totalSteps > 0) append(" // ${worker.completedSteps}/${worker.totalSteps}")
+                        },
+                        "> ${worker.taskTitle ?: worker.label}",
+                        listOfNotNull(
+                            worker.taskOutcome,
+                            worker.detail,
+                            worker.taskStatus?.let { "Task status: ${it.uppercase(Locale.US)}" },
+                        ).distinct().joinToString("\n").takeIf { it.isNotBlank() },
                         accent,
                     ),
                     fullWidthWrap().apply { if (index > 0) topMargin = dp(7) },
@@ -1583,10 +1626,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         activity.phase == "tool.started" -> CarbonPalette.cyan
         activity.phase == "tool.completed" && activity.detail?.contains("failed", ignoreCase = true) == true -> CarbonPalette.red
         activity.phase == "tool.completed" -> CarbonPalette.teal
+        activity.phase == "subagent.failed" -> CarbonPalette.red
         activity.phase.startsWith("subagent") -> CarbonPalette.amber
         activity.phase == "reasoning.available" || activity.phase == "response.drafting" -> CarbonPalette.purple
         else -> CarbonPalette.teal
     }
+
+    private fun org.json.JSONObject.optionalText(name: String): String? =
+        if (isNull(name)) null else optString(name).trim().takeIf { it.isNotEmpty() && it != "null" }
 
     private fun activityPhaseLabel(phase: String): String = when (phase) {
         "reasoning.available" -> "COGNITION BUFFER"
@@ -1594,6 +1641,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         "tool.completed" -> "EXEC CHANNEL CLOSED"
         "subagent.start" -> "FORK DISPATCHED"
         "subagent.complete" -> "FORK RETURNED"
+        "subagent.failed" -> "FORK NEEDS ATTENTION"
         "response.drafting" -> "RESPONSE SYNTHESIS"
         else -> phase.replace('.', ' ').uppercase(Locale.US)
     }
@@ -1652,6 +1700,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun checkGatewayHealth(justEnrolled: Boolean) {
         val baseUrl = GatewaySettings.baseUrl(this)
+        uplinkGatewayState = "CHECKING"
+        renderAgentVisibility()
         gatewayView.text = if (justEnrolled) "● ENROLLED" else "● CHECKING"
         gatewayView.setTextColor(CarbonPalette.amber)
         GatewayClient.getHealth(baseUrl, DeviceCredentials.token(this)) { result ->
@@ -1659,19 +1709,27 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 result.fold(
                     onSuccess = { health ->
+                        uplinkGatewayState = "ONLINE"
+                        uplinkProvider = health.languageModel
+                        uplinkMemoryConnected = health.memory != "unavailable"
                         gatewayView.text = "● ONLINE"
                         gatewayView.setTextColor(CarbonPalette.teal)
                         providerStatusView.text = "${health.languageModel.uppercase(Locale.US)}  •  READY"
                         providerStatusView.setTextColor(CarbonPalette.teal)
-                        memoryStatusView.text = "MEMORY ACTIVE"
-                        memoryStatusView.setTextColor(CarbonPalette.teal)
-                        systemStatusView.text = "Gateway active\nTailnet private\nMemory connected"
+                        memoryStatusView.text = if (uplinkMemoryConnected) "MEMORY ACTIVE" else "MEMORY OFFLINE"
+                        memoryStatusView.setTextColor(if (uplinkMemoryConnected) CarbonPalette.teal else CarbonPalette.red)
+                        systemStatusView.text = "Gateway active\nTailnet private\nMemory ${if (uplinkMemoryConnected) "connected" else "unavailable"}"
                         systemStatusView.setTextColor(CarbonPalette.white)
-                        systemDetailView.text = "Gateway  •  ONLINE\nProvider  •  ${health.languageModel.uppercase(Locale.US)}\nTailnet  •  PRIVATE\nMemory  •  CONNECTED"
+                        systemDetailView.text = "Gateway  •  ONLINE\nProvider  •  ${health.languageModel.uppercase(Locale.US)}\nTailnet  •  PRIVATE\nMemory  •  ${if (uplinkMemoryConnected) "CONNECTED" else "UNAVAILABLE"}"
                         systemDetailView.setTextColor(CarbonPalette.white)
                         VoiceWidgetProvider.updateStatus(this, "Online")
+                        renderAgentVisibility()
                     },
                     onFailure = {
+                        uplinkGatewayState = "OFFLINE"
+                        uplinkProvider = "UNAVAILABLE"
+                        uplinkMemoryConnected = false
+                        uplinkEventStreamConnected = false
                         gatewayView.text = "● OFFLINE"
                         gatewayView.setTextColor(CarbonPalette.red)
                         providerStatusView.text = "Provider unavailable"
@@ -1683,6 +1741,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         systemDetailView.text = "Gateway  •  OFFLINE\nProvider  •  UNAVAILABLE\nTailnet  •  CHECK CONNECTION\nMemory  •  UNAVAILABLE"
                         systemDetailView.setTextColor(CarbonPalette.red)
                         VoiceWidgetProvider.updateStatus(this, "Offline")
+                        renderAgentVisibility()
                     },
                 )
             }
@@ -2265,7 +2324,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 }, fullWidthWrap().apply { topMargin = dp(11) })
                 MomentumCardKind.REVIEW -> addView(actionButton("REVIEW WITH VIC").apply {
                     setOnClickListener {
-                        currentTaskFilter = TaskFilter.REVIEW
+                        currentTaskFilter = TaskFilter.NEEDS_YOU
                         showPage(AppPage.TASKS)
                     }
                 }, fullWidthWrap().apply { topMargin = dp(11) })
@@ -2445,13 +2504,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         val visibleTasks = when (currentTaskFilter) {
             TaskFilter.TODAY -> openTasks.sortedWith(
-                compareBy<VoiceTask> { if (it.status == "active") 0 else 1 }
-                    .thenBy { if (it.progressLane == "needs_me") 0 else 1 }
+                compareBy<VoiceTask> { if (taskNeedsAttention(it)) 0 else 1 }
+                    .thenBy { if (it.status == "active") 0 else 1 }
                     .thenBy { when (it.importance) { "high" -> 0; "normal" -> 1; else -> 2 } }
                     .thenBy { it.estimatedMinutes },
             )
+            TaskFilter.NEEDS_YOU -> openTasks.filter(::taskNeedsAttention)
+                .sortedWith(compareByDescending<VoiceTask> { it.openBlockers }.thenBy { it.estimatedMinutes })
             TaskFilter.VIC_WORKING -> openTasks.filter { it.progressLane == "vic_working" }
-            TaskFilter.REVIEW -> openTasks.filter { it.progressLane == "review" }
             TaskFilter.PROJECTS, TaskFilter.WINS -> emptyList()
         }
         if (!preserveStatus) {
@@ -2459,19 +2519,20 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 "You’re clear. Capture one small win or let VIC prepare the next project."
             } else {
                 when (currentTaskFilter) {
-                    TaskFilter.TODAY -> "All ${openTasks.size} unfinished tasks • VIC recommends the first one"
+                    TaskFilter.TODAY -> "${openTasks.size} open • ordered by what needs attention first"
+                    TaskFilter.NEEDS_YOU -> "${visibleTasks.size} items need a decision, input, or unblock from you"
                     TaskFilter.VIC_WORKING -> "${visibleTasks.size} work packets with VIC • you can keep your focus"
-                    TaskFilter.REVIEW -> "${visibleTasks.size} decisions waiting • approve only when ready"
                     else -> "${visibleTasks.size} shown • ${openTasks.size} open"
                 }
             }
             taskStatusView.setTextColor(if (openTasks.isEmpty()) CarbonPalette.green else CarbonPalette.teal)
         }
+        renderTaskQueueSummary(openTasks)
         if (visibleTasks.isEmpty() && openTasks.isNotEmpty()) {
             taskContainer.addView(taskPanel(13).apply {
                 addView(taskKicker("Nothing waiting here"), fullWidthWrap())
                 addView(TextView(this@MainActivity).apply {
-                    text = if (currentTaskFilter == TaskFilter.VIC_WORKING) "VIC has no active work packets." else "You have no reviews waiting. Keep your attention on Today."
+                    text = if (currentTaskFilter == TaskFilter.VIC_WORKING) "VIC has no active work packets." else "Nothing needs you right now. VIC will surface the next decision here."
                     textSize = 14f
                     setTextColor(CarbonPalette.muted)
                     setPadding(0, dp(8), 0, 0)
@@ -2484,17 +2545,57 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun renderTaskCard(task: VoiceTask, featured: Boolean = false) {
-        val card = taskPanel(if (featured) 17 else 13)
+        val needsAttention = taskNeedsAttention(task)
+        val automated = task.title.startsWith("VIC delegated:", ignoreCase = true)
+        val card = taskPanel(12)
         val projectTitle = latestProjects.firstOrNull { it.id == task.projectId }?.title
         val weeklyLabel = WeeklyTaskStore.labelForTask(this, task.id)
         val marker = when {
-            featured -> "DO THIS NOW • ${task.estimatedMinutes} MIN"
+            task.status == "blocked" || task.openBlockers > 0 -> "! BLOCKED"
+            task.progressLane == "review" -> "! REVIEW"
+            task.progressLane == "needs_me" -> "! NEEDS YOU"
+            task.progressLane == "vic_working" -> "◆ VIC WORKING"
             task.status == "active" -> "▶ ACTIVE"
-            task.status == "blocked" -> "! BLOCKED"
+            featured -> "▶ NEXT"
             else -> "○ READY"
         }
-        card.addView(taskKicker(listOfNotNull(marker, projectTitle).joinToString(" • ")), fullWidthWrap())
-        card.addView(taskHeading(task.title, if (featured) 22f else 19f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+        val accent = when {
+            task.status == "blocked" || task.openBlockers > 0 -> CarbonPalette.red
+            needsAttention -> CarbonPalette.amber
+            task.progressLane == "vic_working" -> CarbonPalette.cyan
+            task.status == "active" -> CarbonPalette.teal
+            else -> CarbonPalette.muted
+        }
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(TextView(this).apply {
+            text = "●"
+            textSize = 16f
+            setTextColor(accent)
+            gravity = Gravity.TOP
+            setPadding(0, 0, dp(9), 0)
+        })
+        header.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(taskKicker(listOfNotNull(marker, projectTitle).joinToString(" • ")))
+            addView(taskHeading(task.title, 17f).apply {
+                maxLines = 2
+                setPadding(0, dp(3), 0, 0)
+            })
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val progressPercent = if (task.totalSteps > 0) task.completedSteps * 100 / task.totalSteps else 0
+        header.addView(TextView(this).apply {
+            text = if (task.totalSteps > 0) "$progressPercent%" else "${task.estimatedMinutes}m"
+            textSize = 12f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            setTextColor(accent)
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            background = carbonControl(this@MainActivity, accent)
+        })
+        card.addView(header, fullWidthWrap())
         if (weeklyLabel != null) card.addView(TextView(this).apply {
             text = "↻  $weeklyLabel"
             textSize = 12f
@@ -2502,50 +2603,104 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             setTextColor(CarbonPalette.purple)
             setPadding(0, dp(7), 0, 0)
         }, fullWidthWrap())
-        card.addView(TextView(this).apply {
-            val stepProgress = if (task.totalSteps > 0) "${task.completedSteps}/${task.totalSteps} steps" else "VIC is preparing the breakdown"
-            val blockerText = if (task.openBlockers > 0) " • ${task.openBlockers} blocked" else ""
-            text = "${task.observableOutcome}\n$stepProgress$blockerText • VIC ${task.vicStatus.replace('_', ' ')}"
-            textSize = 13f
-            setTextColor(CarbonPalette.muted)
-            setLineSpacing(dp(2).toFloat(), 1.12f)
-            setPadding(0, dp(7), 0, 0)
-        }, fullWidthWrap())
-        val handoffText = when (task.progressLane) {
-            "needs_me" -> "YOUR NEXT ACTION\n${task.nextUserAction.ifBlank { "Review this task with VIC" }}"
-            "vic_working" -> "VIC IS WORKING\n${task.nextVicAction.ifBlank { "Continue safe preparation work" }}"
-            "review" -> "READY FOR REVIEW\n${task.nextUserAction.ifBlank { "Review VIC's latest work" }}"
-            else -> "SHARED WORK\n${task.nextUserAction.ifBlank { "Ask VIC to choose and prepare the first physical step" }}"
-        }
+        if (task.totalSteps > 0) card.addView(
+            taskProgressBar(task.completedSteps, task.totalSteps, accent),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5)).apply { topMargin = dp(9) },
+        )
+        val handoffText = taskAttentionText(task)
         card.addView(TextView(this).apply {
             text = handoffText
-            textSize = 12f
-            setTextColor(if (task.progressLane == "review") CarbonPalette.amber else CarbonPalette.teal)
-            setPadding(dp(11), dp(10), dp(11), dp(10))
-            background = carbonControl(this@MainActivity, CarbonPalette.line)
-        }, fullWidthWrap().apply { topMargin = dp(9) })
-        task.steps.take(5).forEach { step ->
-            card.addView(TextView(this).apply {
-                val mark = if (step.status == "completed") "✓" else if (step.status == "active") "▶" else "○"
-                text = "$mark  ${step.title}  •  ${step.owner.uppercase(Locale.US)}"
-                textSize = 11f
-                setTextColor(if (step.status == "completed") CarbonPalette.green else CarbonPalette.muted)
-                setPadding(0, dp(6), 0, 0)
+            textSize = 11f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            maxLines = 2
+            setTextColor(accent)
+            setPadding(0, dp(8), 0, 0)
+        }, fullWidthWrap())
+        val details = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = if (featured) View.VISIBLE else View.GONE
+            addView(TextView(this@MainActivity).apply {
+                text = "OUTCOME\n${task.observableOutcome}\n\n${task.completedSteps}/${task.totalSteps.coerceAtLeast(task.completedSteps)} STEPS • ${task.openBlockers} BLOCKERS • ${task.importance.uppercase(Locale.US)} PRIORITY"
+                textSize = 12f
+                setTextColor(CarbonPalette.muted)
+                setLineSpacing(dp(2).toFloat(), 1.12f)
+                setPadding(0, dp(9), 0, 0)
             }, fullWidthWrap())
+            task.steps.take(5).forEach { step ->
+                addView(TextView(this@MainActivity).apply {
+                    val mark = if (step.status == "completed") "✓" else if (step.status == "active") "▶" else if (step.status == "blocked") "!" else "○"
+                    text = "$mark  ${step.title}  •  ${step.owner.uppercase(Locale.US)}"
+                    textSize = 11f
+                    setTextColor(if (step.status == "completed") CarbonPalette.green else CarbonPalette.muted)
+                    setPadding(0, dp(6), 0, 0)
+                }, fullWidthWrap())
+            }
         }
-        val actions = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+        val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        if (automated) {
+            actions.addView(secondaryButton("OPEN VIC UPLINK") { showPage(AppPage.COMMAND) }, weightedButton())
+        } else {
+            if (task.status != "active") {
+                actions.addView(secondaryButton(if (task.estimatedMinutes <= 5) "START 5" else "START") { updateTaskStatus(task, "active") }, weightedButton())
+            }
+            actions.addView(
+                actionButton("DONE + WIN").apply { setOnClickListener { confirmTaskCompletion(task) } },
+                weightedButton().apply { if (task.status != "active") marginStart = dp(7) },
+            )
         }
-        if (task.status != "active") {
-            actions.addView(secondaryButton(if (task.estimatedMinutes <= 5) "START 5" else "START") { updateTaskStatus(task, "active") }, weightedButton())
-        }
-        actions.addView(
-            actionButton("DONE + WIN").apply { setOnClickListener { confirmTaskCompletion(task) } },
-            weightedButton().apply { if (task.status != "active") marginStart = dp(7) },
-        )
-        card.addView(actions, fullWidthWrap().apply { topMargin = dp(11) })
+        details.addView(actions, fullWidthWrap().apply { topMargin = dp(11) })
+        details.addView(taskKicker("TAP CARD TO COLLAPSE").apply { setPadding(0, dp(9), 0, 0) }, fullWidthWrap())
+        card.addView(details, fullWidthWrap())
+        card.isClickable = true
+        card.isFocusable = true
+        card.setOnClickListener { details.visibility = if (details.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
+        card.contentDescription = "$marker. ${task.title}. ${taskAttentionText(task)}. Tap for task details."
         taskContainer.addView(card, fullWidthWrap().apply { topMargin = dp(9) })
+    }
+
+    private fun taskNeedsAttention(task: VoiceTask): Boolean =
+        task.status == "blocked" || task.openBlockers > 0 || task.progressLane in setOf("needs_me", "review")
+
+    private fun taskAttentionText(task: VoiceTask): String = when {
+        task.status == "blocked" || task.openBlockers > 0 -> "NEEDS YOU • ${task.nextUserAction.ifBlank { "Resolve ${task.openBlockers.coerceAtLeast(1)} blocker" }}"
+        task.progressLane == "review" -> "REVIEW READY • ${task.nextUserAction.ifBlank { "Review VIC's completed work" }}"
+        task.progressLane == "needs_me" -> "YOUR MOVE • ${task.nextUserAction.ifBlank { "Choose the next action with VIC" }}"
+        task.progressLane == "vic_working" -> "VIC WORKING • ${task.nextVicAction.ifBlank { "Hermes is moving this forward" }}"
+        task.status == "active" -> "IN PROGRESS • ${task.nextUserAction.ifBlank { "Continue the current step" }}"
+        else -> "READY • ${task.nextUserAction.ifBlank { "Open for the next concrete step" }}"
+    }
+
+    private fun renderTaskQueueSummary(openTasks: List<VoiceTask>) {
+        val attention = openTasks.count(::taskNeedsAttention)
+        val active = openTasks.count { it.status == "active" }
+        val vic = openTasks.count { it.progressLane == "vic_working" }
+        taskContainer.addView(taskPanel(11).apply {
+            addView(taskKicker("QUICK STATUS // LIVE WORK QUEUE"), fullWidthWrap())
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(taskMetric(attention.toString(), "NEEDS YOU", if (attention > 0) CarbonPalette.amber else CarbonPalette.muted), weightedButton())
+                addView(taskMetric(active.toString(), "ACTIVE", CarbonPalette.teal), weightedButton())
+                addView(taskMetric(vic.toString(), "WITH VIC", CarbonPalette.cyan), weightedButton())
+                addView(taskMetric(openTasks.size.toString(), "OPEN", CarbonPalette.white), weightedButton())
+            }, fullWidthWrap().apply { topMargin = dp(8) })
+        }, fullWidthWrap().apply { topMargin = dp(9) })
+    }
+
+    private fun taskMetric(value: String, label: String, accent: Int) = TextView(this).apply {
+        text = "$value\n$label"
+        textSize = 10f
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+        gravity = Gravity.CENTER
+        setTextColor(accent)
+        setPadding(dp(3), dp(7), dp(3), dp(7))
+    }
+
+    private fun taskProgressBar(completed: Int, total: Int, accent: Int) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        val safeTotal = total.coerceAtLeast(1)
+        val safeCompleted = completed.coerceIn(0, safeTotal)
+        if (safeCompleted > 0) addView(View(this@MainActivity).apply { setBackgroundColor(accent) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, safeCompleted.toFloat()))
+        if (safeCompleted < safeTotal) addView(View(this@MainActivity).apply { setBackgroundColor(CarbonPalette.line) }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, (safeTotal - safeCompleted).toFloat()))
     }
 
     private fun renderProjects(tasks: List<VoiceTask>) {
@@ -3365,6 +3520,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         copyButton.visibility = if (copyButton.isEnabled) View.VISIBLE else View.GONE
         correctButton.visibility = if (correctButton.isEnabled) View.VISIBLE else View.GONE
         retryButton.visibility = if (retryButton.isEnabled) View.VISIBLE else View.GONE
+        renderAgentVisibility()
         speedButton.isEnabled = state !in setOf(
             VoiceState.STARTING,
             VoiceState.LISTENING,

@@ -16,6 +16,15 @@ data class AgentWorkerItem(
     val label: String,
     val detail: String?,
     val sessionId: String?,
+    val taskId: String? = null,
+    val taskTitle: String? = null,
+    val taskStatus: String? = null,
+    val taskOutcome: String? = null,
+    val taskProjectId: String? = null,
+    val taskDueAt: String? = null,
+    val taskImportance: String? = null,
+    val completedSteps: Int = 0,
+    val totalSteps: Int = 0,
 )
 
 class AgentVisibilityModel(private val limit: Int = 8) {

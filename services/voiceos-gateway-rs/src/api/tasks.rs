@@ -85,6 +85,19 @@ pub(crate) struct InitiativeResultRequest {
     errors: Vec<Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SubagentTaskRequest {
+    worker_id: String,
+    status: String,
+    session_id: Option<String>,
+    title: Option<String>,
+    observable_outcome: Option<String>,
+    estimated_minutes: Option<u32>,
+    importance: Option<String>,
+    summary: Option<String>,
+}
+
 pub(crate) async fn list_tasks(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -177,6 +190,86 @@ pub(crate) async fn create_task(
         StatusCode::CREATED,
         Json(json!({"task": task, "initiative": initiative})),
     ))
+}
+
+pub(crate) async fn sync_subagent_task(
+    State(state): State<AppState>,
+    Json(request): Json<SubagentTaskRequest>,
+) -> ApiResult<Json<Value>> {
+    let owner = state.primary_owner_id.clone();
+    let store = state.store.clone();
+    let worker_id = request.worker_id.trim().to_owned();
+    if worker_id.is_empty() {
+        return Err(api_error(StatusCode::BAD_REQUEST, "worker_id_required"));
+    }
+    let response = tokio::task::spawn_blocking(move || match request.status.as_str() {
+        "running" => {
+            let title = request
+                .title
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("VIC delegated background work");
+            let outcome = request
+                .observable_outcome
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("A verified subagent report is returned to VIC and the originating conversation.");
+            let (task, job, created) = store.start_subagent_task(
+                &owner,
+                &worker_id,
+                request.session_id.as_deref(),
+                title,
+                outcome,
+                request.estimated_minutes.unwrap_or(30),
+                request.importance.as_deref().unwrap_or("normal"),
+                "provider:hermes",
+            )?;
+            let detail = store.task_detail(&owner, &task.id)?.expect("subagent task exists");
+            Ok::<_, voiceos_core::StoreError>(json!({
+                "created": created,
+                "task": task,
+                "job": job,
+                "detail": detail,
+            }))
+        }
+        "completed" | "failed" => {
+            let summary = request
+                .summary
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(if request.status == "completed" {
+                    "Hermes returned its delegated report to VIC."
+                } else {
+                    "Hermes could not complete the delegated work."
+                });
+            let Some((task, job)) = store.finish_subagent_task(
+                &owner,
+                &worker_id,
+                &request.status,
+                summary,
+                "provider:hermes",
+            )? else {
+                return Ok(json!({"found": false}));
+            };
+            let detail = store.task_detail(&owner, &task.id)?.expect("subagent task exists");
+            Ok(json!({
+                "found": true,
+                "task": task,
+                "job": job,
+                "detail": detail,
+            }))
+        }
+        _ => Err(voiceos_core::StoreError::InvalidInput(
+            "subagent status must be running, completed, or failed".to_owned(),
+        )),
+    })
+    .await
+    .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+    .map_err(store_error)?;
+    if response.get("found") == Some(&Value::Bool(false)) {
+        return Err(api_error(StatusCode::NOT_FOUND, "subagent_task_not_found"));
+    }
+    Ok(Json(response))
 }
 
 pub(crate) async fn update_task_status(

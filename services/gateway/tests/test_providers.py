@@ -309,7 +309,7 @@ class HermesAsyncProviderTest(unittest.TestCase):
         completed = threading.Event()
         reports: list[str] = []
         provider.set_completion_sink(
-            lambda _session, _message_id, report: (reports.append(report), completed.set())
+            lambda _session, _run_id, _message_id, report: (reports.append(report), completed.set())
         )
 
         response = provider.respond(

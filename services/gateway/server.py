@@ -416,11 +416,23 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         if parsed.path == "/v1/health":
             provider = self.gateway.coordinator.router.default_name
+            memory_health = (
+                _get_json(f"{self.gateway.memory_url}/v1/health", timeout_seconds=1.5)
+                if self.gateway.memory_url
+                else None
+            )
+            memory_status = (
+                "ok"
+                if isinstance(memory_health, dict)
+                and memory_health.get("status") in {"ok", "degraded"}
+                else "unavailable"
+            )
             self._json(
                 HTTPStatus.OK,
                 {
-                    "status": "degraded" if provider == "mock" else "ok",
+                    "status": "degraded" if provider == "mock" or memory_status != "ok" else "ok",
                     "gateway": "ok",
+                    "memory": memory_status,
                     "speech_to_text": "android-on-device",
                     "language_model": provider,
                     "text_to_speech": "ava-neural",
@@ -2613,12 +2625,17 @@ def create_server(
     )
     selected_coordinator.router.set_activity_sink(
         lambda session_id, event: _publish_agent_activity(
-            selected_audit, session_id, event
+            selected_audit, selected_memory_url, session_id, event
         )
     )
     selected_coordinator.router.set_completion_sink(
-        lambda session_id, message_id, report: _import_hermes_completion(
-            selected_audit, selected_memory_url, session_id, message_id, report
+        lambda session_id, worker_id, message_id, report: _import_hermes_completion(
+            selected_audit,
+            selected_memory_url,
+            session_id,
+            worker_id,
+            message_id,
+            report,
         )
     )
     if selected_memory_url:
@@ -2704,6 +2721,7 @@ def _safe_agent_activity(
         "tool.completed": "VIC finished a tool",
         "subagent.start": "VIC delegated background work",
         "subagent.complete": "A VIC worker finished",
+        "subagent.failed": "A VIC worker needs attention",
         "response.drafting": "VIC is composing the response",
     }
     if event_name == "tool.started":
@@ -2728,30 +2746,88 @@ def _safe_agent_activity(
 
 def _publish_agent_activity(
     audit_store: AuditStore,
+    memory_url: str | None,
     session_id: str | None,
     event: dict[str, object],
 ) -> None:
-    """Publish live Hermes activity and promote subagents to visible worker cards."""
+    """Publish safe activity and mirror every Hermes fork into a durable Rust task."""
     safe = _safe_agent_activity(session_id, event)
     audit_store.publish_client_event("agent.activity.updated", safe)
     phase = str(safe.get("phase", ""))
-    if phase not in {"subagent.start", "subagent.complete"}:
+    if phase not in {"subagent.start", "subagent.complete", "subagent.failed"}:
         return
-    supplied_id = safe.get("subagent_id") or event.get("agent_id") or event.get("id")
+    supplied_id = (
+        event.get("run_id")
+        or safe.get("subagent_id")
+        or event.get("agent_id")
+        or event.get("id")
+    )
     fallback_seed = f"{session_id or 'vic'}:hermes-subagent"
     worker_id = str(supplied_id).strip() if supplied_id else str(
         uuid.uuid5(uuid.NAMESPACE_URL, fallback_seed)
     )
-    detail = safe.get("detail")
+    detail = str(safe.get("detail") or "Hermes research subagent")[:500]
+    status = {
+        "subagent.start": "running",
+        "subagent.complete": "completed",
+        "subagent.failed": "failed",
+    }[phase]
+    task_sync: dict[str, object] | None = None
+    if memory_url:
+        task_sync = _post_json(
+            f"{memory_url}/internal/v1/tasks/subagents",
+            {
+                "worker_id": worker_id[:160],
+                "status": status,
+                "session_id": session_id,
+                "title": f"VIC delegated: {detail}"[:300],
+                "observable_outcome": (
+                    "A verified Hermes report is returned to VIC and the originating "
+                    f"conversation for: {detail}"
+                )[:1_000],
+                "estimated_minutes": 30,
+                "importance": "normal",
+                "summary": detail,
+            },
+            timeout_seconds=3,
+        )
+    task = task_sync.get("task") if isinstance(task_sync, dict) else None
+    task_detail = task_sync.get("detail") if isinstance(task_sync, dict) else None
+    progress = task_detail.get("progress") if isinstance(task_detail, dict) else None
+    task_fields: dict[str, object] = {}
+    if isinstance(task, dict):
+        task_fields = {
+            "task_id": task.get("id"),
+            "task_title": task.get("title"),
+            "task_status": task.get("status"),
+            "task_project_id": task.get("project_id"),
+            "task_outcome": task.get("observable_outcome"),
+            "task_estimated_minutes": task.get("estimated_minutes"),
+            "task_due_at": task.get("due_at"),
+            "task_importance": task.get("importance"),
+            "completed_steps": progress.get("completed_steps", 0) if isinstance(progress, dict) else 0,
+            "total_steps": progress.get("total_steps", 0) if isinstance(progress, dict) else 0,
+            "progress_lane": progress.get("lane") if isinstance(progress, dict) else None,
+        }
+        audit_store.publish_client_event(
+            "task.changed",
+            {"source": "hermes-subagent", "worker_id": worker_id[:160], "task": task},
+        )
     audit_store.publish_client_event(
         "agent.worker.updated",
         {
             "worker_id": worker_id[:160],
-            "status": "running" if phase == "subagent.start" else "completed",
-            "label": str(detail or "Hermes research subagent")[:300],
-            "detail": "Dispatched by VIC" if phase == "subagent.start" else "Work returned to VIC",
+            "status": status,
+            "label": str(task.get("title") if isinstance(task, dict) else detail)[:300],
+            "detail": {
+                "running": "Task created and assigned to Hermes",
+                "completed": detail,
+                "failed": detail,
+            }[status],
             "session_id": session_id,
             "runtime": "hermes",
+            "task_tracking": "active" if isinstance(task, dict) else "unavailable",
+            **task_fields,
         },
     )
 
@@ -2760,6 +2836,7 @@ def _import_hermes_completion(
     audit_store: AuditStore,
     memory_url: str | None,
     session_id: str,
+    worker_id: str,
     message_id: int,
     report: str,
 ) -> None:
@@ -2792,15 +2869,14 @@ def _import_hermes_completion(
                 response.read()
         except (HTTPError, URLError, TimeoutError):
             pass
-    audit_store.publish_client_event(
-        "agent.worker.updated",
+    _publish_agent_activity(
+        audit_store,
+        memory_url,
+        session_id,
         {
-            "worker_id": f"hermes-message-{message_id}",
-            "status": "completed",
-            "label": "Hermes background report received",
-            "detail": report[:500],
-            "session_id": session_id,
-            "runtime": "hermes",
+            "event": "subagent.complete",
+            "run_id": worker_id,
+            "summary": report[:500],
         },
     )
 
@@ -2938,7 +3014,11 @@ def _apply_structured_task_updates(memory_url: str, task_id: str, response_text:
     return (response_text[:match.start()] + response_text[match.end():]).strip()
 
 
-def _post_json(url: str, payload: dict[str, object]) -> dict[str, object] | None:
+def _post_json(
+    url: str,
+    payload: dict[str, object],
+    timeout_seconds: float = 30,
+) -> dict[str, object] | None:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     request = Request(
         url,
@@ -2947,17 +3027,17 @@ def _post_json(url: str, payload: dict[str, object]) -> dict[str, object] | None
         method="POST",
     )
     try:
-        with urlopen(request, timeout=30) as response:
+        with urlopen(request, timeout=timeout_seconds) as response:
             result = json.loads(response.read(MAX_TEXT_BYTES))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None
     return cast(dict[str, object], result) if isinstance(result, dict) else None
 
 
-def _get_json(url: str) -> dict[str, object] | None:
+def _get_json(url: str, timeout_seconds: float = 10) -> dict[str, object] | None:
     request = Request(url, headers={"Accept": "application/json"}, method="GET")
     try:
-        with urlopen(request, timeout=10) as response:
+        with urlopen(request, timeout=timeout_seconds) as response:
             result = json.loads(response.read(MAX_TEXT_BYTES))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
         return None

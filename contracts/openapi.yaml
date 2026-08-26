@@ -1728,10 +1728,11 @@ components:
             command: { type: string, enum: [show_weather, refresh_dashboard] }
     Health:
       type: object
-      required: [status, gateway, speech_to_text, language_model, text_to_speech]
+      required: [status, gateway, memory, speech_to_text, language_model, text_to_speech]
       properties:
         status: { type: string, enum: [ok, degraded] }
         gateway: { type: string }
+        memory: { type: string }
         speech_to_text: { type: string }
         language_model: { type: string }
         text_to_speech: { type: string }
@@ -1913,7 +1914,7 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, conversation.floor.changed, project.changed, task.changed, task.initiative.updated, task.progress.updated, focus.updated, personal.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
+          enum: [conversation.turn, conversation.floor.changed, project.changed, task.changed, task.initiative.updated, task.progress.updated, focus.updated, personal.updated, agent.activity.updated, agent.worker.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
         payload: { type: object }
         created_at: { type: string, format: date-time }
     Project:

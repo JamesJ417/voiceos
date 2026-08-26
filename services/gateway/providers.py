@@ -309,7 +309,7 @@ class HermesProvider:
         self.skill_worker_url = skill_worker_url.rstrip("/")
         self.skill_worker_token_file = skill_worker_token_file.strip()
         self.activity_sink: Callable[[str | None, dict[str, object]], None] | None = None
-        self.completion_sink: Callable[[str, int, str], None] | None = None
+        self.completion_sink: Callable[[str, str, int, str], None] | None = None
         self._completion_watchers: set[str] = set()
         self._watchers_lock = threading.Lock()
 
@@ -319,7 +319,7 @@ class HermesProvider:
         self.activity_sink = sink
 
     def set_completion_sink(
-        self, sink: Callable[[str, int, str], None] | None
+        self, sink: Callable[[str, str, int, str], None] | None
     ) -> None:
         self.completion_sink = sink
 
@@ -491,6 +491,8 @@ class HermesProvider:
                         "reasoning.available", "tool.started", "tool.completed",
                         "subagent.start", "subagent.complete",
                     }:
+                        if event_name.startswith("subagent."):
+                            safe_event["run_id"] = run_id
                         self.activity_sink(conversation_id, safe_event)
                     if event_name == "subagent.start" and conversation_id:
                         self._start_completion_watcher(
@@ -598,6 +600,7 @@ class HermesProvider:
         cursor: int,
     ) -> None:
         idle_polls = 0
+        completion_found = False
         try:
             while idle_polls < 360:
                 try:
@@ -621,8 +624,14 @@ class HermesProvider:
                             and re.match(r"^\[ASYNC DELEGATION .+ COMPLETE", content.strip())
                         ):
                             found = True
+                            completion_found = True
                             if self.completion_sink:
-                                self.completion_sink(conversation_id, message_id, content.strip())
+                                self.completion_sink(
+                                    conversation_id,
+                                    hermes_session_id,
+                                    message_id,
+                                    content.strip(),
+                                )
                     cursor = newest
                     idle_polls = 0 if found else idle_polls + 1
                 except ProviderUnavailable:
@@ -631,6 +640,15 @@ class HermesProvider:
         finally:
             with self._watchers_lock:
                 self._completion_watchers.discard(hermes_session_id)
+            if not completion_found and self.activity_sink:
+                self.activity_sink(
+                    conversation_id,
+                    {
+                        "event": "subagent.failed",
+                        "run_id": hermes_session_id,
+                        "summary": "Hermes worker timed out before returning a report",
+                    },
+                )
 
     def _poll_run(self, run_id: str, api_key: str) -> ProviderResponse:
         import time
@@ -790,7 +808,7 @@ class ProviderRouter:
         self._hermes.set_activity_sink(sink)
 
     def set_completion_sink(
-        self, sink: Callable[[str, int, str], None] | None
+        self, sink: Callable[[str, str, int, str], None] | None
     ) -> None:
         self._hermes.set_completion_sink(sink)
 

@@ -7,6 +7,7 @@ import os
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +21,7 @@ from services.gateway.server import (
     _clean_hermes_completion_report,
     _normalize_fieldy_webhook,
     _personal_extraction_prompt,
+    _publish_agent_activity,
     _render_conversation_context,
     _single_json_object,
     create_server,
@@ -28,6 +30,48 @@ from services.gateway.coordinator import CoordinatedResponse
 
 
 class GatewayTest(unittest.TestCase):
+    def test_subagent_activity_creates_and_updates_a_durable_task(self) -> None:
+        class EventStore:
+            def __init__(self) -> None:
+                self.events: list[tuple[str, dict[str, object]]] = []
+
+            def publish_client_event(self, kind: str, payload: dict[str, object]) -> None:
+                self.events.append((kind, payload))
+
+        event_store = EventStore()
+        task = {
+            "id": "task-1",
+            "title": "VIC delegated: research launch options",
+            "status": "active",
+            "project_id": "project-vic",
+            "observable_outcome": "A verified report is returned.",
+            "estimated_minutes": 30,
+            "due_at": "2026-08-25T12:30:00Z",
+            "importance": "normal",
+        }
+        response = {
+            "task": task,
+            "detail": {"progress": {"completed_steps": 0, "total_steps": 3, "lane": "vic_working"}},
+        }
+        with patch("services.gateway.server._post_json", return_value=response) as post:
+            _publish_agent_activity(
+                event_store,  # type: ignore[arg-type]
+                "http://rust-core",
+                "conversation-1",
+                {
+                    "event": "subagent.start",
+                    "run_id": "run_123",
+                    "summary": "research launch options",
+                },
+            )
+
+        self.assertEqual("running", post.call_args.args[1]["status"])
+        worker = [payload for kind, payload in event_store.events if kind == "agent.worker.updated"][-1]
+        self.assertEqual("run_123", worker["worker_id"])
+        self.assertEqual("task-1", worker["task_id"])
+        self.assertEqual(3, worker["total_steps"])
+        self.assertIn("task.changed", [kind for kind, _ in event_store.events])
+
     def test_personal_extraction_accepts_only_one_json_object(self) -> None:
         self.assertEqual(
             {"candidates": []},

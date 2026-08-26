@@ -197,6 +197,10 @@ pub(crate) fn router(state: AppState) -> Router {
             post(tasks::internal_task_action),
         )
         .route(
+            "/internal/v1/tasks/subagents",
+            post(tasks::sync_subagent_task),
+        )
+        .route(
             "/internal/v1/tasks/{task_id}/initiative/claim",
             post(tasks::claim_initiative),
         )
@@ -1030,6 +1034,67 @@ mod integration_tests {
             let (status, _) = response(app.clone(), request).await;
             assert_eq!(status, StatusCode::OK);
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn internal_subagent_lifecycle_populates_and_finishes_one_task() {
+        let (app, store, path) = authenticated_router();
+        let start = Request::builder()
+            .method("POST")
+            .uri("/internal/v1/tasks/subagents")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "worker_id": "run_test_1",
+                    "status": "running",
+                    "session_id": "conversation-1",
+                    "title": "VIC delegated: research launch options",
+                    "observable_outcome": "A verified report returns to VIC.",
+                    "estimated_minutes": 30,
+                    "importance": "normal"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let (status, started) = response(app.clone(), start).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(started["created"], true);
+        assert_eq!(started["task"]["status"], "active");
+        assert_eq!(started["detail"]["progress"]["total_steps"], 3);
+        let task_id = started["task"]["id"].as_str().unwrap().to_owned();
+
+        let duplicate = Request::builder()
+            .method("POST")
+            .uri("/internal/v1/tasks/subagents")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"worker_id": "run_test_1", "status": "running"}).to_string(),
+            ))
+            .unwrap();
+        let (status, duplicate) = response(app.clone(), duplicate).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(duplicate["created"], false);
+        assert_eq!(duplicate["task"]["id"], task_id);
+
+        let finish = Request::builder()
+            .method("POST")
+            .uri("/internal/v1/tasks/subagents")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "worker_id": "run_test_1",
+                    "status": "completed",
+                    "summary": "Verified launch report returned."
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let (status, finished) = response(app, finish).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(finished["task"]["status"], "completed");
+        assert_eq!(finished["detail"]["progress"]["completed_steps"], 3);
+        assert_eq!(store.tasks(OWNER, true, 20).unwrap().len(), 1);
         std::fs::remove_file(path).unwrap();
     }
 }
