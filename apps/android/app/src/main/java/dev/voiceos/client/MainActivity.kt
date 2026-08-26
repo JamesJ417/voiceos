@@ -706,6 +706,48 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         approvals.addView(denyButton, weightedButton().apply { marginStart = dp(8) })
         commandPage.addView(approvals, fullWidthWrap().apply { topMargin = dp(12) })
 
+        commandPage.addView(panel(17).apply {
+            addView(kicker("Live execution"), fullWidthWrap())
+            addView(heading("VIC agent", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            agentSummaryView = TextView(this@MainActivity).apply {
+                text = "WAITING FOR LIVE ACTIVITY"
+                textSize = 12f
+                typeface = Typeface.DEFAULT_BOLD
+                letterSpacing = 0.08f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(12), 0, 0)
+            }
+            addView(agentSummaryView, fullWidthWrap())
+            addView(TextView(this@MainActivity).apply {
+                text = "Safe execution status only. Private reasoning is never displayed."
+                textSize = 12f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(7), 0, 0)
+            }, fullWidthWrap())
+            agentActivityContainer = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            addView(agentActivityContainer, fullWidthWrap().apply { topMargin = dp(10) })
+            addView(secondaryButton("REFRESH AGENT ACTIVITY") { refreshAgentVisibility() }, fullWidthWrap().apply { topMargin = dp(14) })
+        }, fullWidthWrap().apply { topMargin = dp(14) })
+        commandPage.addView(panel(17).apply {
+            addView(kicker("Delegated work"), fullWidthWrap())
+            addView(heading("Hermes subagents", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            agentWorkerStatusView = TextView(this@MainActivity).apply {
+                text = "NO SUBAGENTS OBSERVED"
+                textSize = 12f
+                typeface = Typeface.DEFAULT_BOLD
+                letterSpacing = 0.08f
+                setTextColor(CarbonPalette.muted)
+                setPadding(0, dp(12), 0, 0)
+            }
+            addView(agentWorkerStatusView, fullWidthWrap())
+            agentWorkerContainer = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+            }
+            addView(agentWorkerContainer, fullWidthWrap().apply { topMargin = dp(10) })
+        }, fullWidthWrap().apply { topMargin = dp(14) })
+
         val utilityPanel = panel(16)
         utilityPanel.addView(kicker("Voice controls"), fullWidthWrap())
         speedButton = secondaryButton(speechRateButtonLabel()) { cycleSpeechRate() }.apply {
@@ -877,47 +919,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 addView(systemDetailView, fullWidthWrap().apply { topMargin = dp(14) })
                 addView(secondaryButton("REFRESH SYSTEM STATUS") { checkGatewayHealth(justEnrolled = false) }, fullWidthWrap().apply { topMargin = dp(14) })
                 addView(secondaryButton("SEND TEST VIC CHECK-IN") { sendTestVicCheckIn() }, fullWidthWrap().apply { topMargin = dp(12) })
-            }, fullWidthWrap().apply { topMargin = dp(14) })
-            addView(panel(17).apply {
-                addView(kicker("Live execution"), fullWidthWrap())
-                addView(heading("VIC agent", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
-                agentSummaryView = TextView(this@MainActivity).apply {
-                    text = "WAITING FOR LIVE ACTIVITY"
-                    textSize = 12f
-                    typeface = Typeface.DEFAULT_BOLD
-                    letterSpacing = 0.08f
-                    setTextColor(CarbonPalette.muted)
-                    setPadding(0, dp(12), 0, 0)
-                }
-                addView(agentSummaryView, fullWidthWrap())
-                addView(TextView(this@MainActivity).apply {
-                    text = "Safe execution status only. Private reasoning is never displayed."
-                    textSize = 12f
-                    setTextColor(CarbonPalette.muted)
-                    setPadding(0, dp(7), 0, 0)
-                }, fullWidthWrap())
-                agentActivityContainer = LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                }
-                addView(agentActivityContainer, fullWidthWrap().apply { topMargin = dp(10) })
-                addView(secondaryButton("REFRESH AGENT ACTIVITY") { refreshAgentVisibility() }, fullWidthWrap().apply { topMargin = dp(14) })
-            }, fullWidthWrap().apply { topMargin = dp(14) })
-            addView(panel(17).apply {
-                addView(kicker("Delegated work"), fullWidthWrap())
-                addView(heading("Hermes subagents", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
-                agentWorkerStatusView = TextView(this@MainActivity).apply {
-                    text = "NO SUBAGENTS OBSERVED"
-                    textSize = 12f
-                    typeface = Typeface.DEFAULT_BOLD
-                    letterSpacing = 0.08f
-                    setTextColor(CarbonPalette.muted)
-                    setPadding(0, dp(12), 0, 0)
-                }
-                addView(agentWorkerStatusView, fullWidthWrap())
-                agentWorkerContainer = LinearLayout(this@MainActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                }
-                addView(agentWorkerContainer, fullWidthWrap().apply { topMargin = dp(10) })
             }, fullWidthWrap().apply { topMargin = dp(14) })
             addView(panel(17).apply {
                 addView(kicker("Reviewed self-improvement"), fullWidthWrap())
@@ -2016,11 +2017,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         rootScroll.post { rootScroll.smoothScrollTo(0, 0) }
         if (page == AppPage.FEED) loadMomentumFeed()
+        if (page == AppPage.COMMAND) refreshAgentVisibility()
         if (page == AppPage.TASKS) loadTasks()
         if (page == AppPage.HISTORY) loadHistory()
         if (page == AppPage.SYSTEM) {
             checkGatewayHealth(justEnrolled = false)
-            refreshAgentVisibility()
             loadSkillProposals()
         }
     }
