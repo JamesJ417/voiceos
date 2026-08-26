@@ -59,6 +59,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var providerStatusView: TextView
     private lateinit var systemStatusView: TextView
     private lateinit var systemDetailView: TextView
+    private lateinit var agentSignalView: AgentSignalView
     private lateinit var agentSummaryView: TextView
     private lateinit var agentActivityContainer: LinearLayout
     private lateinit var agentWorkerStatusView: TextView
@@ -707,20 +708,23 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         commandPage.addView(approvals, fullWidthWrap().apply { topMargin = dp(12) })
 
         commandPage.addView(panel(17).apply {
-            addView(kicker("Live execution"), fullWidthWrap())
-            addView(heading("VIC agent", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            addView(kicker("System trace // live"), fullWidthWrap())
+            addView(heading("VIC neural uplink", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            agentSignalView = AgentSignalView(this@MainActivity)
+            addView(agentSignalView, fullWidthWrap().apply { topMargin = dp(14) })
             agentSummaryView = TextView(this@MainActivity).apply {
-                text = "WAITING FOR LIVE ACTIVITY"
+                text = "TRACE IDLE // WAITING FOR SIGNAL"
                 textSize = 12f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
                 letterSpacing = 0.08f
                 setTextColor(CarbonPalette.muted)
                 setPadding(0, dp(12), 0, 0)
             }
             addView(agentSummaryView, fullWidthWrap())
             addView(TextView(this@MainActivity).apply {
-                text = "Safe execution status only. Private reasoning is never displayed."
-                textSize = 12f
+                text = "DISPLAY LAYER // SAFE PROGRESS ONLY // PRIVATE REASONING SEALED"
+                textSize = 10f
+                typeface = Typeface.MONOSPACE
                 setTextColor(CarbonPalette.muted)
                 setPadding(0, dp(7), 0, 0)
             }, fullWidthWrap())
@@ -731,12 +735,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             addView(secondaryButton("REFRESH AGENT ACTIVITY") { refreshAgentVisibility() }, fullWidthWrap().apply { topMargin = dp(14) })
         }, fullWidthWrap().apply { topMargin = dp(14) })
         commandPage.addView(panel(17).apply {
-            addView(kicker("Delegated work"), fullWidthWrap())
-            addView(heading("Hermes subagents", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
+            addView(kicker("Delegated work // process forks"), fullWidthWrap())
+            addView(heading("Hermes fork matrix", 22f).apply { setPadding(0, dp(5), 0, 0) }, fullWidthWrap())
             agentWorkerStatusView = TextView(this@MainActivity).apply {
-                text = "NO SUBAGENTS OBSERVED"
+                text = "FORKS 00 // ALL CHANNELS IDLE"
                 textSize = 12f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
                 letterSpacing = 0.08f
                 setTextColor(CarbonPalette.muted)
                 setPadding(0, dp(12), 0, 0)
@@ -1516,23 +1520,29 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val runningWorkers = agentVisibility.runningWorkerCount()
         val latest = activities.firstOrNull()
 
+        agentSignalView.setSignal(
+            latest?.let { activityPhaseLabel(it.phase) } ?: "standby",
+            runningWorkers,
+            latest?.eventId ?: 0L,
+        )
         agentSummaryView.text = when {
-            runningWorkers > 0 -> "VIC WORKING • $runningWorkers HERMES ${if (runningWorkers == 1) "SUBAGENT" else "SUBAGENTS"} ACTIVE"
-            latest != null -> "LIVE FEED • ${latest.label.uppercase(Locale.US)}"
-            else -> "READY • WAITING FOR WORK"
+            runningWorkers > 0 -> "TRACE ONLINE // FORKS ${runningWorkers.toString().padStart(2, '0')} // VIC WORKING"
+            latest != null -> "TRACE ONLINE // ${latest.label.uppercase(Locale.US)}"
+            else -> "TRACE IDLE // WAITING FOR SIGNAL"
         }
         agentSummaryView.setTextColor(if (latest != null || runningWorkers > 0) CarbonPalette.teal else CarbonPalette.muted)
         agentActivityContainer.removeAllViews()
         if (activities.isEmpty()) {
-            agentActivityContainer.addView(agentEventCard("READY", "No recent agent execution", "New work will appear here automatically.", CarbonPalette.muted))
+            agentActivityContainer.addView(agentEventCard("TRACE 0000 // STANDBY", "> awaiting execution signal", "New agent work will stream here automatically.", CarbonPalette.muted))
         } else {
             activities.forEachIndexed { index, activity ->
+                val accent = activityAccent(activity)
                 agentActivityContainer.addView(
                     agentEventCard(
-                        activity.phase.replace('.', ' ').uppercase(Locale.US),
-                        activity.label,
+                        "TRACE ${(activity.eventId % 10_000).toString().padStart(4, '0')} // ${activityPhaseLabel(activity.phase)}",
+                        "> ${activity.label}",
                         activity.detail,
-                        CarbonPalette.teal,
+                        accent,
                     ),
                     fullWidthWrap().apply { if (index > 0) topMargin = dp(7) },
                 )
@@ -1540,14 +1550,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         agentWorkerStatusView.text = when {
-            runningWorkers > 0 -> "$runningWorkers ${if (runningWorkers == 1) "SUBAGENT" else "SUBAGENTS"} RUNNING"
-            workers.isNotEmpty() -> "${workers.size} RECENT ${if (workers.size == 1) "SUBAGENT" else "SUBAGENTS"}"
-            else -> "NO SUBAGENTS OBSERVED"
+            runningWorkers > 0 -> "FORKS ${runningWorkers.toString().padStart(2, '0')} // ACTIVE PROCESS ${if (runningWorkers == 1) "CHANNEL" else "CHANNELS"}"
+            workers.isNotEmpty() -> "FORKS ${workers.size.toString().padStart(2, '0')} // RECENT PROCESS LOG"
+            else -> "FORKS 00 // ALL CHANNELS IDLE"
         }
         agentWorkerStatusView.setTextColor(if (runningWorkers > 0) CarbonPalette.amber else CarbonPalette.muted)
         agentWorkerContainer.removeAllViews()
         if (workers.isEmpty()) {
-            agentWorkerContainer.addView(agentEventCard("IDLE", "No delegated work", "Hermes workers will appear when VIC delegates a task.", CarbonPalette.muted))
+            agentWorkerContainer.addView(agentEventCard("FORK 00 // DORMANT", "> no delegated process", "Hermes channels materialize when VIC forks background work.", CarbonPalette.muted))
         } else {
             workers.forEachIndexed { index, worker ->
                 val accent = when (worker.status.lowercase(Locale.US)) {
@@ -1557,11 +1567,35 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     else -> CarbonPalette.muted
                 }
                 agentWorkerContainer.addView(
-                    agentEventCard(worker.status.uppercase(Locale.US), worker.label, worker.detail, accent),
+                    agentEventCard(
+                        "FORK ${worker.id.takeLast(4).uppercase(Locale.US)} // ${worker.status.uppercase(Locale.US)}",
+                        "> ${worker.label}",
+                        worker.detail,
+                        accent,
+                    ),
                     fullWidthWrap().apply { if (index > 0) topMargin = dp(7) },
                 )
             }
         }
+    }
+
+    private fun activityAccent(activity: AgentActivityItem): Int = when {
+        activity.phase == "tool.started" -> CarbonPalette.cyan
+        activity.phase == "tool.completed" && activity.detail?.contains("failed", ignoreCase = true) == true -> CarbonPalette.red
+        activity.phase == "tool.completed" -> CarbonPalette.teal
+        activity.phase.startsWith("subagent") -> CarbonPalette.amber
+        activity.phase == "reasoning.available" || activity.phase == "response.drafting" -> CarbonPalette.purple
+        else -> CarbonPalette.teal
+    }
+
+    private fun activityPhaseLabel(phase: String): String = when (phase) {
+        "reasoning.available" -> "COGNITION BUFFER"
+        "tool.started" -> "EXEC CHANNEL OPEN"
+        "tool.completed" -> "EXEC CHANNEL CLOSED"
+        "subagent.start" -> "FORK DISPATCHED"
+        "subagent.complete" -> "FORK RETURNED"
+        "response.drafting" -> "RESPONSE SYNTHESIS"
+        else -> phase.replace('.', ' ').uppercase(Locale.US)
     }
 
     private fun agentEventCard(overline: String, title: String, detail: String?, accent: Int) =
@@ -1572,25 +1606,48 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             addView(TextView(this@MainActivity).apply {
                 text = overline
                 textSize = 9f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
                 letterSpacing = 0.12f
                 setTextColor(accent)
             }, fullWidthWrap())
             addView(TextView(this@MainActivity).apply {
                 text = title
                 textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
+                typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
                 setTextColor(CarbonPalette.white)
                 setPadding(0, dp(5), 0, 0)
             }, fullWidthWrap())
-            detail?.takeIf { it.isNotBlank() }?.let { visibleDetail ->
-                addView(TextView(this@MainActivity).apply {
-                    text = visibleDetail
+            detail?.trim()?.takeIf { it.isNotBlank() }?.let { fullDetail ->
+                val compactDetail = fullDetail.replace(Regex("\\s+"), " ")
+                val canExpand = compactDetail.length > 150 || fullDetail.contains('\n')
+                var expanded = false
+                val detailView = TextView(this@MainActivity).apply {
+                    text = "└─ ${if (canExpand) compactDetail.take(147) + "…" else compactDetail}"
                     textSize = 12f
+                    typeface = Typeface.MONOSPACE
                     setTextColor(CarbonPalette.muted)
                     setPadding(0, dp(5), 0, 0)
-                }, fullWidthWrap())
+                }
+                addView(detailView, fullWidthWrap())
+                if (canExpand) {
+                    val toggleView = TextView(this@MainActivity).apply {
+                        text = "[ TAP TO EXPAND TRACE ]"
+                        textSize = 9f
+                        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                        setTextColor(accent)
+                        setPadding(0, dp(8), 0, 0)
+                    }
+                    addView(toggleView, fullWidthWrap())
+                    isClickable = true
+                    isFocusable = true
+                    setOnClickListener {
+                        expanded = !expanded
+                        detailView.text = "└─ ${if (expanded) fullDetail else compactDetail.take(147) + "…"}"
+                        toggleView.text = if (expanded) "[ COLLAPSE TRACE ]" else "[ TAP TO EXPAND TRACE ]"
+                    }
+                }
             }
+            contentDescription = listOfNotNull(overline, title, detail).joinToString(". ")
         }
 
     private fun checkGatewayHealth(justEnrolled: Boolean) {
