@@ -2167,9 +2167,10 @@ components:
       type: object
       required: [action]
       properties:
-        action: { type: string, enum: [step.create, step.update, blocker.create, blocker.resolve, handoff.create, progress.record, artifact.attach, review.request] }
+        action: { type: string, enum: [step.create, step.update, step.advance, blocker.create, blocker.resolve, handoff.create, handoff.update, progress.record, artifact.attach, review.request] }
         step_id: { type: string }
         blocker_id: { type: string }
+        handoff_id: { type: string }
         title: { type: string }
         owner: { type: string, enum: [user, vic, shared] }
         status: { type: string }

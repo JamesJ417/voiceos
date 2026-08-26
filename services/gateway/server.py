@@ -291,8 +291,8 @@ class VoiceOSServer(ThreadingHTTPServer):
             "or administrative action must remain behind the existing approval flow. After completing "
             "safe analysis, append at most eight task-board updates in exactly one fenced block named "
             "voiceos-task-update. Its JSON must be an object with an actions array. Each action must use "
-            "one of: progress.record, step.create, step.update, blocker.create, blocker.resolve, "
-            "handoff.create, review.request, artifact.attach. Include only verified work, concrete next "
+            "one of: progress.record, step.create, step.update, step.advance, blocker.create, blocker.resolve, "
+            "handoff.create, handoff.update, review.request, artifact.attach. Include only verified work, concrete next "
             "actions, or real blockers. Do not include task_id; VoiceOS binds updates to this task. "
             "The block is machine-readable and will be removed from the user-facing response.\n\n"
             f"UNTRUSTED_TASK_JSON={json.dumps(task, separators=(',', ':'))}\n"
@@ -2979,9 +2979,11 @@ _TASK_UPDATE_ACTIONS = {
     "progress.record",
     "step.create",
     "step.update",
+    "step.advance",
     "blocker.create",
     "blocker.resolve",
     "handoff.create",
+    "handoff.update",
     "review.request",
     "artifact.attach",
 }
@@ -3048,9 +3050,11 @@ def _rust_task_tool_executor(memory_url: str):
     actions = {
         "task.step.create": "step.create",
         "task.step.update": "step.update",
+        "task.step.advance": "step.advance",
         "task.blocker.create": "blocker.create",
         "task.blocker.resolve": "blocker.resolve",
         "task.handoff.create": "handoff.create",
+        "task.handoff.update": "handoff.update",
         "task.progress.record": "progress.record",
         "task.artifact.attach": "artifact.attach",
         "task.review.request": "review.request",

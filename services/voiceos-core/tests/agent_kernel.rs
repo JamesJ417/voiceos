@@ -481,6 +481,122 @@ fn task_detail_projects_owned_steps_blockers_handoffs_artifacts_and_activity() {
 }
 
 #[test]
+fn advancing_stages_closes_and_creates_owner_handoffs_until_task_completion() {
+    let store = ConversationStore::in_memory().unwrap();
+    let task = store
+        .create_task(
+            "owner",
+            None,
+            None,
+            "Ship the handoff loop",
+            "Every stage moves cleanly between VIC and the user",
+            30,
+        )
+        .unwrap();
+    let plan = store
+        .create_task_step("owner", &task.id, "Plan", "vic", "provider:vic")
+        .unwrap();
+    let review = store
+        .create_task_step("owner", &task.id, "Review", "user", "provider:vic")
+        .unwrap();
+    let finish = store
+        .create_task_step("owner", &task.id, "Finish", "vic", "provider:vic")
+        .unwrap();
+
+    let after_plan = store
+        .advance_task_step(
+            "owner",
+            &task.id,
+            &plan.id,
+            "Plan is ready",
+            json!({"source": "test"}),
+            "provider:vic",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_plan.steps[0].status, "completed");
+    assert_eq!(after_plan.steps[1].status, "active");
+    let user_handoff = after_plan
+        .handoffs
+        .iter()
+        .find(|handoff| handoff.to_owner == "user" && handoff.status == "pending")
+        .unwrap();
+    assert!(
+        store
+            .advance_task_step(
+                "owner",
+                &task.id,
+                &review.id,
+                "Review approved too early",
+                json!({"source": "test"}),
+                "device:pixel",
+            )
+            .is_err()
+    );
+    store
+        .update_task_handoff(
+            "owner",
+            &task.id,
+            &user_handoff.id,
+            "accepted",
+            "device:pixel",
+        )
+        .unwrap()
+        .unwrap();
+
+    let after_review = store
+        .advance_task_step(
+            "owner",
+            &task.id,
+            &review.id,
+            "Review approved",
+            json!({"source": "test"}),
+            "device:pixel",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_review.steps[2].status, "active");
+    assert!(after_review.handoffs.iter().any(|handoff| {
+        handoff.from_owner == "user" && handoff.to_owner == "vic" && handoff.status == "pending"
+    }));
+    let vic_handoff = after_review
+        .handoffs
+        .iter()
+        .find(|handoff| handoff.to_owner == "vic" && handoff.status == "pending")
+        .unwrap();
+    store
+        .update_task_handoff(
+            "owner",
+            &task.id,
+            &vic_handoff.id,
+            "accepted",
+            "provider:vic",
+        )
+        .unwrap()
+        .unwrap();
+
+    let completed = store
+        .advance_task_step(
+            "owner",
+            &task.id,
+            &finish.id,
+            "Finished",
+            json!({"source": "test"}),
+            "provider:vic",
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.task.status, "completed");
+    assert_eq!(completed.progress.completed_steps, 3);
+    assert!(
+        completed
+            .handoffs
+            .iter()
+            .all(|handoff| handoff.status == "completed")
+    );
+}
+
+#[test]
 fn vic_outreach_is_durable_deduplicated_and_actionable() {
     let store = ConversationStore::in_memory().unwrap();
     let actions = vec![

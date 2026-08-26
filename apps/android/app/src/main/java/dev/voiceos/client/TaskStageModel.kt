@@ -1,21 +1,32 @@
 package dev.voiceos.client
 
+import java.time.Duration
+import java.time.Instant
+
 data class TaskStage(
     val title: String,
     val owner: String,
     val status: String,
     val detail: String,
+    val id: String? = null,
+    val position: Int = 0,
+    val updatedAt: String = "",
 )
+
+data class TaskFollowUp(val label: String, val owner: String, val urgent: Boolean)
 
 object TaskStageModel {
     fun stages(task: VoiceTask): List<TaskStage> {
         if (task.steps.isNotEmpty()) {
-            return task.steps.map { step ->
+            return task.steps.sortedBy(VoiceTaskStep::position).map { step ->
                 TaskStage(
                     title = step.title.ifBlank { "Untitled stage" },
                     owner = step.owner.ifBlank { "shared" },
                     status = normalizeStatus(step.status),
                     detail = stageDetail(step.status, step.owner),
+                    id = step.id.takeIf(String::isNotBlank),
+                    position = step.position,
+                    updatedAt = step.updatedAt,
                 )
             }
         }
@@ -39,6 +50,39 @@ object TaskStageModel {
 
     fun progressPercent(stages: List<TaskStage>): Int =
         if (stages.isEmpty()) 0 else stages.count { it.status == "completed" } * 100 / stages.size
+
+    fun currentStage(task: VoiceTask): TaskStage? = stages(task).firstOrNull { it.status != "completed" }
+
+    fun currentStageIndex(task: VoiceTask): Int {
+        val stages = stages(task)
+        val index = stages.indexOfFirst { it.status != "completed" }
+        return index
+    }
+
+    fun activeHandoff(task: VoiceTask): VoiceTaskHandoff? =
+        task.handoffs.lastOrNull { it.status == "pending" || it.status == "accepted" }
+
+    fun followUp(task: VoiceTask, now: Instant = Instant.now()): TaskFollowUp? {
+        val handoff = activeHandoff(task)
+        if (handoff?.status == "pending") {
+            return if (handoff.toOwner == "user") {
+                TaskFollowUp("ACCEPT VIC HANDOFF", "user", true)
+            } else {
+                TaskFollowUp("VIC HANDOFF QUEUED", "vic", false)
+            }
+        }
+        val stage = currentStage(task) ?: return null
+        if (stage.status == "blocked") {
+            return TaskFollowUp("BLOCKER FOLLOW-UP", stage.owner, true)
+        }
+        val timestamp = sequenceOf(stage.updatedAt, task.updatedAt)
+            .mapNotNull { runCatching { Instant.parse(it) }.getOrNull() }
+            .firstOrNull()
+        if (timestamp != null && Duration.between(timestamp, now).toHours() >= 24) {
+            return TaskFollowUp("FOLLOW UP • NO MOVE IN 24H", stage.owner, stage.owner == "user")
+        }
+        return null
+    }
 
     fun nextAction(task: VoiceTask): String = when (task.progressLane) {
         "vic_working" -> task.nextVicAction.ifBlank { "VIC is completing the active stage" }

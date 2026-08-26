@@ -132,6 +132,122 @@ impl ConversationStore {
         Ok(Some(step))
     }
 
+    /// Completes one stage, closes the handoff that delivered it, activates the next
+    /// unfinished stage, and creates the next owner handoff as one transaction.
+    pub fn advance_task_step(
+        &self,
+        owner_id: &str,
+        task_id: &str,
+        step_id: &str,
+        summary: &str,
+        evidence: Value,
+        actor: &str,
+    ) -> Result<Option<TaskDetail>, StoreError> {
+        validate_text("stage completion summary", summary)?;
+        if !evidence.is_object() {
+            return Err(StoreError::InvalidInput(
+                "step evidence must be an object".to_owned(),
+            ));
+        }
+        let actor_owner = if actor.starts_with("provider:") || actor == "vic" {
+            "vic"
+        } else {
+            "user"
+        };
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let current: Option<(String, String, u32)> = transaction
+            .query_row(
+                "SELECT title, status, position FROM task_steps WHERE owner_id=?1 AND task_id=?2 AND step_id=?3",
+                params![owner_id.trim(), task_id.trim(), step_id.trim()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((current_title, current_status, current_position)) = current else {
+            return Ok(None);
+        };
+        let unaccepted_handoff: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM task_handoffs WHERE owner_id=?1 AND task_id=?2 AND to_owner=?3 AND status='pending')",
+            params![owner_id.trim(), task_id.trim(), actor_owner],
+            |row| row.get(0),
+        )?;
+        if unaccepted_handoff {
+            return Err(StoreError::InvalidInput(
+                "handoff must be accepted before the stage can advance".to_owned(),
+            ));
+        }
+        if current_status != "completed" {
+            transaction.execute(
+                "UPDATE task_steps SET status='completed', evidence_json=?4, updated_at=?5 WHERE owner_id=?1 AND task_id=?2 AND step_id=?3",
+                params![owner_id.trim(), task_id.trim(), step_id.trim(), evidence.to_string(), now],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE task_handoffs SET status='completed', completed_at=?4 WHERE owner_id=?1 AND task_id=?2 AND to_owner=?3 AND status IN ('pending','accepted')",
+            params![owner_id.trim(), task_id.trim(), actor_owner, now],
+        )?;
+        let next: Option<(String, String, String, String)> = transaction
+            .query_row(
+                "SELECT step_id, title, assigned_owner, status FROM task_steps WHERE owner_id=?1 AND task_id=?2 AND status NOT IN ('completed','cancelled') ORDER BY position, created_at LIMIT 1",
+                params![owner_id.trim(), task_id.trim()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let mut handoff_id = None;
+        if let Some((next_id, next_title, next_owner, next_status)) = &next {
+            if next_status == "pending" {
+                transaction.execute(
+                    "UPDATE task_steps SET status='active', updated_at=?4 WHERE owner_id=?1 AND task_id=?2 AND step_id=?3",
+                    params![owner_id.trim(), task_id.trim(), next_id, now],
+                )?;
+            }
+            transaction.execute(
+                "UPDATE tasks SET status='active', updated_at=?3 WHERE owner_id=?1 AND task_id=?2",
+                params![owner_id.trim(), task_id.trim(), now],
+            )?;
+            if matches!(next_owner.as_str(), "user" | "vic") && next_owner != actor_owner {
+                let existing: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM task_handoffs WHERE owner_id=?1 AND task_id=?2 AND to_owner=?3 AND status IN ('pending','accepted'))",
+                    params![owner_id.trim(), task_id.trim(), next_owner],
+                    |row| row.get(0),
+                )?;
+                if !existing {
+                    let id = Uuid::new_v4().to_string();
+                    transaction.execute(
+                        "INSERT INTO task_handoffs(handoff_id, owner_id, task_id, from_owner, to_owner, kind, summary, status, created_at) VALUES(?1, ?2, ?3, ?4, ?5, 'handoff', ?6, 'pending', ?7)",
+                        params![id, owner_id.trim(), task_id.trim(), actor_owner, next_owner, format!("Stage ready: {next_title}"), now],
+                    )?;
+                    handoff_id = Some(id);
+                }
+            }
+        } else {
+            transaction.execute(
+                "UPDATE tasks SET status='completed', updated_at=?3 WHERE owner_id=?1 AND task_id=?2",
+                params![owner_id.trim(), task_id.trim(), now],
+            )?;
+        }
+        transaction.commit()?;
+        drop(connection);
+        self.append_execution_event(
+            owner_id,
+            task_id,
+            "task.step.advanced",
+            actor,
+            json!({
+                "step_id": step_id,
+                "step_title": current_title,
+                "step_position": current_position,
+                "summary": summary.trim(),
+                "next_step_id": next.as_ref().map(|item| item.0.as_str()),
+                "next_owner": next.as_ref().map(|item| item.2.as_str()),
+                "handoff_id": handoff_id,
+                "task_completed": next.is_none(),
+            }),
+        )?;
+        self.task_detail(owner_id, task_id)
+    }
+
     pub fn create_task_blocker(
         &self,
         owner_id: &str,
@@ -242,6 +358,73 @@ impl ConversationStore {
             serde_json::to_value(&handoff)?,
         )?;
         Ok(handoff)
+    }
+
+    pub fn update_task_handoff(
+        &self,
+        owner_id: &str,
+        task_id: &str,
+        handoff_id: &str,
+        status: &str,
+        actor: &str,
+    ) -> Result<Option<TaskHandoffRecord>, StoreError> {
+        if !matches!(status, "accepted" | "completed" | "cancelled") {
+            return Err(StoreError::InvalidInput(
+                "invalid task handoff status".to_owned(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let to_owner: Option<String> = transaction
+            .query_row(
+                "SELECT to_owner FROM task_handoffs WHERE owner_id=?1 AND task_id=?2 AND handoff_id=?3",
+                params![owner_id.trim(), task_id.trim(), handoff_id.trim()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(to_owner) = to_owner else {
+            return Ok(None);
+        };
+        let actor_owner = if actor.starts_with("provider:") || actor == "vic" {
+            "vic"
+        } else {
+            "user"
+        };
+        if status == "accepted" && actor_owner != to_owner {
+            return Err(StoreError::InvalidInput(
+                "only the receiving owner can accept a handoff".to_owned(),
+            ));
+        }
+        transaction.execute(
+            "UPDATE task_handoffs SET status=?4, completed_at=CASE WHEN ?4 IN ('completed','cancelled') THEN ?5 ELSE NULL END WHERE owner_id=?1 AND task_id=?2 AND handoff_id=?3",
+            params![owner_id.trim(), task_id.trim(), handoff_id.trim(), status, now],
+        )?;
+        if status == "accepted" {
+            transaction.execute(
+                "UPDATE task_steps SET status='active', updated_at=?4 WHERE owner_id=?1 AND task_id=?2 AND assigned_owner=?3 AND status='pending' AND position=(SELECT MIN(position) FROM task_steps WHERE owner_id=?1 AND task_id=?2 AND assigned_owner=?3 AND status='pending')",
+                params![owner_id.trim(), task_id.trim(), to_owner, now],
+            )?;
+            transaction.execute(
+                "UPDATE tasks SET status='active', updated_at=?3 WHERE owner_id=?1 AND task_id=?2 AND status IN ('proposed','ready','blocked')",
+                params![owner_id.trim(), task_id.trim(), now],
+            )?;
+        }
+        transaction.commit()?;
+        drop(connection);
+        let handoff = self
+            .task_handoffs(owner_id, task_id)?
+            .into_iter()
+            .find(|item| item.id == handoff_id)
+            .expect("updated handoff");
+        self.append_execution_event(
+            owner_id,
+            task_id,
+            "task.handoff.updated",
+            actor,
+            serde_json::to_value(&handoff)?,
+        )?;
+        Ok(Some(handoff))
     }
 
     #[allow(clippy::too_many_arguments)]

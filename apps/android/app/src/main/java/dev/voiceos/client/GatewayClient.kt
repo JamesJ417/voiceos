@@ -103,10 +103,28 @@ data class VoiceTask(
     val nextUserAction: String = "",
     val nextVicAction: String = "",
     val steps: List<VoiceTaskStep> = emptyList(),
+    val handoffs: List<VoiceTaskHandoff> = emptyList(),
     val artifacts: List<VoiceTaskArtifact> = emptyList(),
 )
 
-data class VoiceTaskStep(val title: String, val owner: String, val status: String)
+data class VoiceTaskStep(
+    val title: String,
+    val owner: String,
+    val status: String,
+    val id: String = "",
+    val position: Int = 0,
+    val updatedAt: String = "",
+)
+data class VoiceTaskHandoff(
+    val id: String,
+    val fromOwner: String,
+    val toOwner: String,
+    val kind: String,
+    val summary: String,
+    val status: String,
+    val createdAt: String,
+    val completedAt: String? = null,
+)
 data class VoiceTaskArtifact(val kind: String, val uri: String, val description: String)
 
 data class VoiceProject(
@@ -374,6 +392,83 @@ object GatewayClient {
                 retryConnection { recordTaskProgressBlocking(baseUrl, taskId, summary, deviceToken) }
             })
         }, "voiceos-task-progress").start()
+    }
+
+    fun updateTaskStep(
+        baseUrl: String,
+        taskId: String,
+        stepId: String,
+        status: String,
+        deviceToken: String?,
+        callback: (Result<VoiceTask>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection {
+                    taskActionBlocking(
+                        baseUrl,
+                        taskId,
+                        JSONObject()
+                            .put("action", "step.update")
+                            .put("step_id", stepId)
+                            .put("status", status)
+                            .put("evidence", JSONObject().put("source", "voiceos_android")),
+                        deviceToken,
+                    )
+                }
+            })
+        }, "voiceos-stage-update").start()
+    }
+
+    fun advanceTaskStep(
+        baseUrl: String,
+        taskId: String,
+        stepId: String,
+        summary: String,
+        deviceToken: String?,
+        callback: (Result<VoiceTask>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection {
+                    taskActionBlocking(
+                        baseUrl,
+                        taskId,
+                        JSONObject()
+                            .put("action", "step.advance")
+                            .put("step_id", stepId)
+                            .put("summary", summary)
+                            .put("evidence", JSONObject().put("source", "voiceos_android")),
+                        deviceToken,
+                    )
+                }
+            })
+        }, "voiceos-stage-advance").start()
+    }
+
+    fun updateTaskHandoff(
+        baseUrl: String,
+        taskId: String,
+        handoffId: String,
+        status: String,
+        deviceToken: String?,
+        callback: (Result<VoiceTask>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection {
+                    taskActionBlocking(
+                        baseUrl,
+                        taskId,
+                        JSONObject()
+                            .put("action", "handoff.update")
+                            .put("handoff_id", handoffId)
+                            .put("status", status),
+                        deviceToken,
+                    )
+                }
+            })
+        }, "voiceos-handoff-update").start()
     }
 
     fun setTaskAttention(
@@ -769,6 +864,23 @@ object GatewayClient {
         }
     }
 
+    private fun taskActionBlocking(
+        baseUrl: String,
+        taskId: String,
+        request: JSONObject,
+        deviceToken: String?,
+    ): VoiceTask {
+        val encodedId = URLEncoder.encode(taskId, Charsets.UTF_8.name())
+        val connection = URL("$baseUrl/v1/tasks/$encodedId/actions").openConnection() as HttpURLConnection
+        try {
+            GatewayHttp.configure(connection, deviceToken, request.toString().toByteArray(Charsets.UTF_8))
+            val detail = GatewayHttp.responseJson(connection).getJSONObject("detail")
+            return parseTask(detail.getJSONObject("task"), detail = detail)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun setTaskAttentionBlocking(
         baseUrl: String,
         taskId: String,
@@ -799,6 +911,7 @@ object GatewayClient {
         val progress = detail?.optJSONObject("progress")
         val detailInitiative = detail?.optJSONObject("initiative")
         val steps = detail?.optJSONArray("steps")
+        val handoffs = detail?.optJSONArray("handoffs")
         val artifacts = detail?.optJSONArray("artifacts")
         return VoiceTask(
         id = payload.getString("id"),
@@ -828,7 +941,29 @@ object GatewayClient {
         steps = buildList {
             if (steps != null) for (index in 0 until steps.length()) {
                 val step = steps.optJSONObject(index) ?: continue
-                add(VoiceTaskStep(step.optString("title"), step.optString("owner"), step.optString("status")))
+                add(VoiceTaskStep(
+                    title = step.optString("title"),
+                    owner = step.optString("owner"),
+                    status = step.optString("status"),
+                    id = step.optString("id"),
+                    position = step.optInt("position", index),
+                    updatedAt = step.optString("updated_at"),
+                ))
+            }
+        },
+        handoffs = buildList {
+            if (handoffs != null) for (index in 0 until handoffs.length()) {
+                val handoff = handoffs.optJSONObject(index) ?: continue
+                add(VoiceTaskHandoff(
+                    id = handoff.optString("id"),
+                    fromOwner = handoff.optString("from_owner"),
+                    toOwner = handoff.optString("to_owner"),
+                    kind = handoff.optString("kind"),
+                    summary = handoff.optString("summary"),
+                    status = handoff.optString("status"),
+                    createdAt = handoff.optString("created_at"),
+                    completedAt = handoff.optString("completed_at").takeIf { it.isNotBlank() && it != "null" },
+                ))
             }
         },
         artifacts = buildList {

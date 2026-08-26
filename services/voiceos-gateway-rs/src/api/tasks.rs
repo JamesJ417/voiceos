@@ -52,6 +52,7 @@ pub(crate) struct TaskActionRequest {
     task_id: String,
     step_id: Option<String>,
     blocker_id: Option<String>,
+    handoff_id: Option<String>,
     title: Option<String>,
     owner: Option<String>,
     status: Option<String>,
@@ -371,6 +372,26 @@ fn run_task_action(
             required(&request.status, "status")?, request.owner.as_deref(),
             object_or_empty(request.evidence), actor,
         ).map_err(store_error)?.ok_or_else(|| api_error(StatusCode::NOT_FOUND, "step_not_found"))?}),
+        "step.advance" => {
+            let detail = state
+                .store
+                .advance_task_step(
+                    owner_id,
+                    task_id,
+                    required(&request.step_id, "step_id")?,
+                    request
+                        .summary
+                        .as_deref()
+                        .unwrap_or("Stage completed from the task board"),
+                    object_or_empty(request.evidence),
+                    actor,
+                )
+                .map_err(store_error)?
+                .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "step_not_found"))?;
+            return Ok(Json(
+                json!({"action": request.action, "result": {"advanced": true}, "detail": detail}),
+            ));
+        }
         "blocker.create" => json!({"blocker": state.store.create_task_blocker(
             owner_id, task_id, required(&request.description, "description")?,
             request.owner.as_deref().unwrap_or("shared"), actor,
@@ -385,6 +406,10 @@ fn run_task_action(
             if request.action == "review.request" { "review" } else { request.kind.as_deref().unwrap_or("handoff") },
             required(&request.summary, "summary")?, actor,
         ).map_err(store_error)?}),
+        "handoff.update" => json!({"handoff": state.store.update_task_handoff(
+            owner_id, task_id, required(&request.handoff_id, "handoff_id")?,
+            required(&request.status, "status")?, actor,
+        ).map_err(store_error)?.ok_or_else(|| api_error(StatusCode::NOT_FOUND, "handoff_not_found"))?}),
         "artifact.attach" => json!({"artifact": state.store.attach_task_artifact(
             owner_id, task_id, request.kind.as_deref().unwrap_or("reference"),
             required(&request.uri, "uri")?, required(&request.description, "description")?,

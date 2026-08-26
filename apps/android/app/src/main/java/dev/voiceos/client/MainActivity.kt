@@ -1239,7 +1239,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         VoiceWidgetProvider.updateStatus(this, "Ready")
     }
 
-    private fun submitText(text: String, displayTranscript: String? = null) {
+    private fun submitText(
+        text: String,
+        displayTranscript: String? = null,
+        conversationSessionId: String = sessionId,
+    ) {
         val generation = ++requestGeneration
         val attachment = pendingAttachment
         renderState(VoiceState.PROCESSING, "Contacting gateway")
@@ -1248,7 +1252,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         GatewayClient.submitText(
             GatewaySettings.baseUrl(this),
-            sessionId,
+            conversationSessionId,
             text,
             DeviceCredentials.token(this),
             attachment?.let { listOf(it.id) } ?: emptyList(),
@@ -2524,7 +2528,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         val visibleTasks = when (currentTaskFilter) {
             TaskFilter.TODAY -> openTasks.sortedWith(
-                compareBy<VoiceTask> { if (taskNeedsAttention(it)) 0 else 1 }
+                compareBy<VoiceTask> { if (TaskStageModel.followUp(it) != null) 0 else 1 }
+                    .thenBy { if (taskNeedsAttention(it)) 0 else 1 }
                     .thenBy { if (it.status == "active") 0 else 1 }
                     .thenBy { when (it.importance) { "high" -> 0; "normal" -> 1; else -> 2 } }
                     .thenBy { it.estimatedMinutes },
@@ -2566,11 +2571,16 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun renderTaskCard(task: VoiceTask, featured: Boolean = false) {
         val needsAttention = taskNeedsAttention(task)
+        val stages = TaskStageModel.stages(task)
+        val currentStage = TaskStageModel.currentStage(task)
+        val currentStageIndex = TaskStageModel.currentStageIndex(task)
+        val followUp = TaskStageModel.followUp(task)
         val card = taskPanel(12)
         val projectTitle = latestProjects.firstOrNull { it.id == task.projectId }?.title
         val weeklyLabel = WeeklyTaskStore.labelForTask(this, task.id)
         val marker = when {
             task.status == "blocked" || task.openBlockers > 0 -> "! BLOCKED"
+            followUp?.urgent == true -> "! FOLLOW UP"
             task.progressLane == "review" -> "! REVIEW"
             task.progressLane == "needs_me" -> "! NEEDS YOU"
             task.progressLane == "vic_working" -> "◆ VIC WORKING"
@@ -2580,6 +2590,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         val accent = when {
             task.status == "blocked" || task.openBlockers > 0 -> CarbonPalette.red
+            followUp?.urgent == true -> CarbonPalette.amber
             needsAttention -> CarbonPalette.amber
             task.progressLane == "vic_working" -> CarbonPalette.cyan
             task.status == "active" -> CarbonPalette.teal
@@ -2604,9 +2615,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 setPadding(0, dp(3), 0, 0)
             })
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val progressPercent = if (task.totalSteps > 0) task.completedSteps * 100 / task.totalSteps else 0
+        val progressPercent = TaskStageModel.progressPercent(stages)
         header.addView(TextView(this).apply {
-            text = if (task.totalSteps > 0) "$progressPercent%" else "${task.estimatedMinutes}m"
+            text = if (stages.isNotEmpty()) "$progressPercent%" else "${task.estimatedMinutes}m"
             textSize = 12f
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             setTextColor(accent)
@@ -2622,13 +2633,20 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             setTextColor(CarbonPalette.purple)
             setPadding(0, dp(7), 0, 0)
         }, fullWidthWrap())
-        if (task.totalSteps > 0) card.addView(
-            taskProgressBar(task.completedSteps, task.totalSteps, accent),
+        if (stages.isNotEmpty()) card.addView(
+            taskProgressBar(stages.count { it.status == "completed" }, stages.size, accent),
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(5)).apply { topMargin = dp(9) },
         )
-        val handoffText = taskAttentionText(task)
+        if (currentStage != null) card.addView(TextView(this).apply {
+            text = "STAGE ${(currentStageIndex + 1).toString().padStart(2, '0')}/${stages.size.toString().padStart(2, '0')}  •  ${TaskStageModel.statusLabel(currentStage.status)}  •  ${TaskStageModel.ownerLabel(currentStage.owner)}\n${currentStage.title}"
+            textSize = 11f
+            typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            maxLines = 3
+            setTextColor(CarbonPalette.white)
+            setPadding(0, dp(8), 0, 0)
+        }, fullWidthWrap())
         card.addView(TextView(this).apply {
-            text = handoffText
+            text = followUp?.label ?: taskAttentionText(task)
             textSize = 11f
             typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
             maxLines = 2
@@ -2659,6 +2677,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val automated = task.title.startsWith("VIC delegated:", ignoreCase = true)
         val projectTitle = latestProjects.firstOrNull { it.id == task.projectId }?.title ?: "Task inbox"
         val stages = TaskStageModel.stages(task)
+        val currentStageIndex = TaskStageModel.currentStageIndex(task)
+        val activeHandoff = TaskStageModel.activeHandoff(task)
+        val followUp = TaskStageModel.followUp(task)
         val progressPercent = TaskStageModel.progressPercent(stages)
         val accent = when {
             task.status == "blocked" || task.openBlockers > 0 -> CarbonPalette.red
@@ -2669,6 +2690,28 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         taskContainer.addView(secondaryButton("‹ BACK TO TASK LIST") { closeTaskDetail() }, fullWidthWrap().apply { topMargin = dp(9) })
+        if (activeHandoff != null) {
+            val handoffAccent = if (activeHandoff.toOwner == "user") CarbonPalette.amber else CarbonPalette.cyan
+            taskContainer.addView(taskPanel(14).apply {
+                addView(taskKicker("HANDOFF // ${activeHandoff.fromOwner.uppercase(Locale.US)} → ${activeHandoff.toOwner.uppercase(Locale.US)}"), fullWidthWrap())
+                addView(taskHeading(activeHandoff.summary.take(220) + if (activeHandoff.summary.length > 220) "…" else "", 18f).apply {
+                    setPadding(0, dp(7), 0, 0)
+                    maxLines = 5
+                }, fullWidthWrap())
+                addView(TextView(this@MainActivity).apply {
+                    text = "${activeHandoff.kind.uppercase(Locale.US)} • ${activeHandoff.status.uppercase(Locale.US)}${followUp?.let { " • ${it.label}" }.orEmpty()}"
+                    textSize = 10f
+                    typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                    setTextColor(handoffAccent)
+                    setPadding(0, dp(8), 0, 0)
+                }, fullWidthWrap())
+                if (activeHandoff.status == "pending" && activeHandoff.toOwner == "user") {
+                    addView(actionButton("ACCEPT HANDOFF").apply {
+                        setOnClickListener { updateTaskHandoff(task, activeHandoff, "accepted") }
+                    }, fullWidthWrap().apply { topMargin = dp(12) })
+                }
+            }, fullWidthWrap().apply { topMargin = dp(9) })
+        }
         taskContainer.addView(taskPanel(18).apply {
             addView(taskKicker("$projectTitle • ${task.status.replace('_', ' ').uppercase(Locale.US)}"), fullWidthWrap())
             addView(taskHeading(task.title, 27f).apply { setPadding(0, dp(7), 0, 0) }, fullWidthWrap())
@@ -2708,7 +2751,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 setPadding(0, dp(7), 0, dp(2))
             }, fullWidthWrap())
             stages.forEachIndexed { index, stage ->
-                addView(taskStageView(index, stage), fullWidthWrap().apply { topMargin = dp(8) })
+                addView(taskStageView(task, index, stage, index == currentStageIndex), fullWidthWrap().apply { topMargin = dp(8) })
             }
         }, fullWidthWrap().apply { topMargin = dp(9) })
 
@@ -2726,17 +2769,16 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 setTextColor(accent)
                 setPadding(0, dp(8), 0, 0)
             }, fullWidthWrap())
-            val actions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+            val actions = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
             if (automated) {
-                actions.addView(secondaryButton("OPEN VIC UPLINK") { showPage(AppPage.COMMAND) }, weightedButton())
+                actions.addView(secondaryButton("OPEN VIC UPLINK") { showPage(AppPage.COMMAND) }, fullWidthWrap())
             } else if (task.status != "completed" && task.status != "cancelled") {
-                if (task.status != "active") {
-                    actions.addView(secondaryButton(if (task.estimatedMinutes <= 5) "START 5" else "START TASK") { updateTaskStatus(task, "active") }, weightedButton())
+                actions.addView(actionButton("WORK ALL STAGES WITH VIC").apply {
+                    setOnClickListener { workTaskWithVic(task) }
+                }, fullWidthWrap())
+                if (stages.none { it.id != null }) {
+                    actions.addView(secondaryButton("COMPLETE TASK") { confirmTaskCompletion(task) }, fullWidthWrap().apply { topMargin = dp(7) })
                 }
-                actions.addView(
-                    actionButton("DONE + WIN").apply { setOnClickListener { confirmTaskCompletion(task) } },
-                    weightedButton().apply { if (task.status != "active") marginStart = dp(7) },
-                )
             }
             if (actions.childCount > 0) addView(actions, fullWidthWrap().apply { topMargin = dp(13) })
         }, fullWidthWrap().apply { topMargin = dp(9) })
@@ -2756,7 +2798,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun taskStageView(index: Int, stage: TaskStage) = LinearLayout(this).apply {
+    private fun taskStageView(
+        task: VoiceTask,
+        index: Int,
+        stage: TaskStage,
+        current: Boolean,
+    ) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.TOP
         val stageAccent = when (stage.status) {
@@ -2777,7 +2824,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         })
         addView(LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
-            addView(taskKicker("${TaskStageModel.statusLabel(stage.status)} • ${TaskStageModel.ownerLabel(stage.owner)}"), fullWidthWrap())
+            addView(taskKicker("${if (current) "CURRENT • " else ""}${TaskStageModel.statusLabel(stage.status)} • ${TaskStageModel.ownerLabel(stage.owner)}"), fullWidthWrap())
             addView(taskHeading(stage.title, 16f).apply { setPadding(0, dp(4), 0, 0) }, fullWidthWrap())
             addView(TextView(this@MainActivity).apply {
                 text = stage.detail
@@ -2785,11 +2832,145 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 setTextColor(CarbonPalette.muted)
                 setPadding(0, dp(5), 0, 0)
             }, fullWidthWrap())
+            if (current && stage.id != null && stage.status != "completed") {
+                val pendingHandoff = TaskStageModel.activeHandoff(task)?.takeIf {
+                    it.status == "pending" && TaskStageModel.ownerLabel(it.toOwner) == TaskStageModel.ownerLabel(stage.owner)
+                }
+                if (pendingHandoff != null) {
+                    addView(TextView(this@MainActivity).apply {
+                        text = "LOCKED • ACCEPT THE ${pendingHandoff.fromOwner.uppercase(Locale.US)} → ${pendingHandoff.toOwner.uppercase(Locale.US)} HANDOFF ABOVE"
+                        textSize = 10f
+                        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+                        setTextColor(CarbonPalette.amber)
+                        setPadding(0, dp(10), 0, 0)
+                    }, fullWidthWrap())
+                } else {
+                    val controls = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL }
+                    if (stage.status == "ready") {
+                        controls.addView(secondaryButton("START STAGE") { updateTaskStage(task, stage, "active") }, weightedButton())
+                    }
+                    controls.addView(
+                        actionButton("COMPLETE + HAND OFF").apply {
+                            setOnClickListener { confirmStageAdvance(task, stage) }
+                        },
+                        weightedButton().apply { if (stage.status == "ready") marginStart = dp(7) },
+                    )
+                    addView(controls, fullWidthWrap().apply { topMargin = dp(10) })
+                }
+            }
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
     }
 
+    private fun updateTaskStage(task: VoiceTask, stage: TaskStage, status: String) {
+        val stageId = stage.id ?: return
+        taskStatusView.text = "Updating stage ${stage.position + 1}…"
+        taskStatusView.setTextColor(CarbonPalette.amber)
+        GatewayClient.updateTaskStep(
+            GatewaySettings.baseUrl(this),
+            task.id,
+            stageId,
+            status,
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { updated -> applyTaskWorkflowUpdate(updated, "Stage started") },
+                    onFailure = { showTaskWorkflowError("Stage could not be updated", it) },
+                )
+            }
+        }
+    }
+
+    private fun confirmStageAdvance(task: VoiceTask, stage: TaskStage) {
+        val stages = TaskStageModel.stages(task)
+        val next = stages.dropWhile { it.id != stage.id }.drop(1).firstOrNull { it.status != "completed" }
+        val handoff = next?.let { "\n\nNext handoff: ${TaskStageModel.ownerLabel(it.owner)} • ${it.title}" }
+            ?: "\n\nThis is the final stage. Completing it will close the task."
+        AlertDialog.Builder(this)
+            .setTitle("Complete this stage?")
+            .setMessage("${stage.title}$handoff")
+            .setNegativeButton("Not yet", null)
+            .setPositiveButton("Complete + hand off") { _, _ -> advanceTaskStage(task, stage) }
+            .show()
+    }
+
+    private fun advanceTaskStage(task: VoiceTask, stage: TaskStage) {
+        val stageId = stage.id ?: return
+        taskStatusView.text = "Completing stage and preparing the next handoff…"
+        taskStatusView.setTextColor(CarbonPalette.amber)
+        GatewayClient.advanceTaskStep(
+            GatewaySettings.baseUrl(this),
+            task.id,
+            stageId,
+            "Completed from the VIC task board: ${stage.title}",
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { updated ->
+                        val message = if (updated.status == "completed") "Task complete • every stage closed" else "Stage complete • next owner notified"
+                        applyTaskWorkflowUpdate(updated, message)
+                    },
+                    onFailure = { showTaskWorkflowError("Stage handoff failed", it) },
+                )
+            }
+        }
+    }
+
+    private fun updateTaskHandoff(task: VoiceTask, handoff: VoiceTaskHandoff, status: String) {
+        taskStatusView.text = "Accepting handoff from ${handoff.fromOwner.uppercase(Locale.US)}…"
+        taskStatusView.setTextColor(CarbonPalette.amber)
+        GatewayClient.updateTaskHandoff(
+            GatewaySettings.baseUrl(this),
+            task.id,
+            handoff.id,
+            status,
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { updated -> applyTaskWorkflowUpdate(updated, "Handoff accepted • this stage is now yours") },
+                    onFailure = { showTaskWorkflowError("Handoff could not be accepted", it) },
+                )
+            }
+        }
+    }
+
+    private fun applyTaskWorkflowUpdate(updated: VoiceTask, message: String) {
+        latestTasks = latestTasks.map { if (it.id == updated.id) updated else it }
+        TaskWidgetStore.replace(this, updated)
+        VoiceWidgetProvider.refreshTasks(this)
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        renderTasks(latestTasks)
+    }
+
+    private fun showTaskWorkflowError(message: String, error: Throwable) {
+        taskStatusView.text = "$message: ${error.message.orEmpty()}"
+        taskStatusView.setTextColor(CarbonPalette.red)
+    }
+
+    private fun workTaskWithVic(task: VoiceTask) {
+        val stage = TaskStageModel.currentStage(task)
+        val prompt = buildString {
+            append("Work this task with me from its current stage through completion. ")
+            append("Task: ${task.title}. Outcome: ${task.observableOutcome}. ")
+            if (stage != null) append("Current stage: ${stage.title}, owned by ${TaskStageModel.ownerLabel(stage.owner)}. ")
+            append("Keep the durable stages and handoffs updated as we work. Use subagents when useful, and return each handoff clearly before advancing.")
+        }
+        showPage(AppPage.COMMAND)
+        submitText(
+            prompt,
+            displayTranscript = "Let’s work through every stage of ${task.title}.",
+            conversationSessionId = "task:${task.id}",
+        )
+    }
+
     private fun taskNeedsAttention(task: VoiceTask): Boolean =
-        task.status == "blocked" || task.openBlockers > 0 || task.progressLane in setOf("needs_me", "review")
+        task.status == "blocked" || task.openBlockers > 0 ||
+            task.progressLane in setOf("needs_me", "review") || TaskStageModel.followUp(task)?.urgent == true
 
     private fun taskAttentionText(task: VoiceTask): String = when {
         task.status == "blocked" || task.openBlockers > 0 -> "NEEDS YOU • ${task.nextUserAction.ifBlank { "Resolve ${task.openBlockers.coerceAtLeast(1)} blocker" }}"
@@ -2802,14 +2983,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun renderTaskQueueSummary(openTasks: List<VoiceTask>) {
         val attention = openTasks.count(::taskNeedsAttention)
-        val active = openTasks.count { it.status == "active" }
+        val followUps = openTasks.count { TaskStageModel.followUp(it) != null }
         val vic = openTasks.count { it.progressLane == "vic_working" }
         taskContainer.addView(taskPanel(11).apply {
             addView(taskKicker("QUICK STATUS // LIVE WORK QUEUE"), fullWidthWrap())
             addView(LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.HORIZONTAL
                 addView(taskMetric(attention.toString(), "NEEDS YOU", if (attention > 0) CarbonPalette.amber else CarbonPalette.muted), weightedButton())
-                addView(taskMetric(active.toString(), "ACTIVE", CarbonPalette.teal), weightedButton())
+                addView(taskMetric(followUps.toString(), "FOLLOW UPS", if (followUps > 0) CarbonPalette.purple else CarbonPalette.muted), weightedButton())
                 addView(taskMetric(vic.toString(), "WITH VIC", CarbonPalette.cyan), weightedButton())
                 addView(taskMetric(openTasks.size.toString(), "OPEN", CarbonPalette.white), weightedButton())
             }, fullWidthWrap().apply { topMargin = dp(8) })

@@ -44,12 +44,26 @@ class RootToolTest(unittest.TestCase):
 
         names = {schema["function"]["name"] for schema in broker.model_schemas()}
         self.assertIn("task_step_create", names)
+        self.assertIn("task_step_advance", names)
+        self.assertIn("task_handoff_update", names)
         result = broker.execute(
             "task_step_create",
             {"task_id": "task-1", "title": "Prepare layout", "owner": "vic"},
         )
         self.assertEqual("completed", result.status)
         self.assertEqual("task.step.create", seen[0]["tool"])
+        advanced = broker.execute(
+            "task_step_advance",
+            {"task_id": "task-1", "step_id": "step-1", "summary": "Verified complete"},
+        )
+        self.assertEqual("completed", advanced.status)
+        self.assertEqual("task.step.advance", seen[1]["tool"])
+        accepted = broker.execute(
+            "task_handoff_update",
+            {"task_id": "task-1", "handoff_id": "handoff-1", "status": "accepted"},
+        )
+        self.assertEqual("completed", accepted.status)
+        self.assertEqual("task.handoff.update", seen[2]["tool"])
         denied = broker.execute(
             "task_step_create",
             {"task_id": "task-1", "title": "Prepare layout", "owner": "root"},

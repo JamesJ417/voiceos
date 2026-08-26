@@ -161,6 +161,13 @@ class ToolBroker:
                     "owner": _party_schema(True), "evidence": {"type": "object"},
                 }, ["task_id", "step_id", "status"]),
             ),
+            "task.step.advance": (
+                "Complete a verified task stage and atomically activate and hand off the next stage.",
+                _task_parameters({
+                    "step_id": {"type": "string"}, "summary": {"type": "string"},
+                    "evidence": {"type": "object"},
+                }, ["task_id", "step_id", "summary"]),
+            ),
             "task.blocker.create": (
                 "Record a blocker and who must resolve it.",
                 _task_parameters({"description": {"type": "string"}, "owner": _party_schema(True)}, ["task_id", "description", "owner"]),
@@ -175,6 +182,13 @@ class ToolBroker:
                     "from_owner": _party_schema(False), "to_owner": _party_schema(False),
                     "kind": {"type": "string", "enum": ["handoff", "review", "approval"]}, "summary": {"type": "string"},
                 }, ["task_id", "from_owner", "to_owner", "kind", "summary"]),
+            ),
+            "task.handoff.update": (
+                "Accept, complete, or cancel a durable owner handoff.",
+                _task_parameters({
+                    "handoff_id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["accepted", "completed", "cancelled"]},
+                }, ["task_id", "handoff_id", "status"]),
             ),
             "task.progress.record": (
                 "Record an evidence-backed progress update without claiming the overall task is complete.",
@@ -526,9 +540,11 @@ def _validate_task_tool(name: str, arguments: dict[str, object]) -> str | None:
     required = {
         "task.step.create": {"task_id", "title", "owner"},
         "task.step.update": {"task_id", "step_id", "status"},
+        "task.step.advance": {"task_id", "step_id", "summary"},
         "task.blocker.create": {"task_id", "description", "owner"},
         "task.blocker.resolve": {"task_id", "blocker_id"},
         "task.handoff.create": {"task_id", "from_owner", "to_owner", "kind", "summary"},
+        "task.handoff.update": {"task_id", "handoff_id", "status"},
         "task.progress.record": {"task_id", "summary"},
         "task.artifact.attach": {"task_id", "kind", "uri", "description", "owner"},
         "task.review.request": {"task_id", "summary"},
