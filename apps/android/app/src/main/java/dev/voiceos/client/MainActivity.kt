@@ -118,6 +118,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var failedTranscript: String? = null
     private var pendingApproval: ApprovalRequest? = null
     private var eventSubscription: EventSubscription? = null
+    private var eventStreamGeneration = 0
+    private var eventReconnectAttempt = 0
     private var conversationActive = false
     private var conversationPaused = false
     private var conversationReceiverRegistered = false
@@ -134,6 +136,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var uplinkProvider = "UNKNOWN"
     private var uplinkMemoryConnected = false
     private var uplinkEventStreamConnected = false
+    private var uplinkRoundTripMs: Long? = null
+    private var taskLoadGeneration = 0
+    private var taskSurfaceRefreshGeneration = 0
 
     private val conversationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -203,9 +208,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 }
             }
             if (!response.isNullOrBlank()) {
-                VoiceWidgetProvider.refreshTasks(this@MainActivity)
-                if (currentPage == AppPage.TASKS) loadTasks()
-                if (currentPage == AppPage.FEED) loadMomentumFeed()
+                refreshTaskSurfaces()
             }
         }
     }
@@ -346,6 +349,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         requestGeneration += 1
+        eventStreamGeneration += 1
+        taskSurfaceRefreshGeneration += 1
         eventSubscription?.close()
         eventSubscription = null
         speechRecognizer?.cancel()
@@ -1090,7 +1095,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             intent.action = null
             currentTaskFilter = TaskFilter.TODAY
             showPage(AppPage.TASKS)
-            loadTasks()
             return
         }
         if (BuildConfig.DEBUG && intent?.action == ACTION_VIC_TEST_CHECKIN) {
@@ -1110,7 +1114,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (intent?.action == ACTION_VIC_SHOW_PROGRESS) {
             intent.action = null
             showPage(AppPage.TASKS)
-            loadTasks()
             return
         }
         if (intent?.action == ACTION_SCRIPTURE_REFLECTION) {
@@ -1283,9 +1286,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             "Speaking ${speechRateLabel()} • ${turn.provider} • ${turn.processingMs} ms",
                         )
                         VoiceWidgetProvider.updateStatus(this, "Speaking")
-                        VoiceWidgetProvider.refreshTasks(this)
-                        if (currentPage == AppPage.TASKS) loadTasks()
-                        if (currentPage == AppPage.FEED) loadMomentumFeed()
+                        refreshTaskSurfaces()
                         changeFloor("update", "speaking", turn.transcript, turn.responseText)
                         speak(turn.responseText, RESPONSE_UTTERANCE_ID)
                     },
@@ -1329,17 +1330,32 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun startSharedEventStream() {
         val token = DeviceCredentials.token(this) ?: return
+        eventStreamGeneration += 1
+        val generation = eventStreamGeneration
         eventSubscription?.close()
         val preferences = getSharedPreferences("voiceos_shared_events", MODE_PRIVATE)
         eventSubscription = GatewayClient.streamEvents(
             GatewaySettings.baseUrl(this),
             token,
             preferences.getLong("cursor", 0),
-            onEvent = { event ->
-                preferences.edit().putLong("cursor", event.id).apply()
+            onConnected = { roundTripMs ->
                 runOnUiThread {
-                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    if (generation != eventStreamGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                    eventReconnectAttempt = 0
                     uplinkEventStreamConnected = true
+                    uplinkRoundTripMs = roundTripMs
+                    if (uplinkGatewayState == "RECONNECTING") uplinkGatewayState = "ONLINE"
+                    gatewayView.text = "● ONLINE • ${roundTripMs}MS"
+                    gatewayView.setTextColor(CarbonPalette.teal)
+                    renderAgentVisibility()
+                }
+            },
+            onEvent = { event ->
+                runOnUiThread {
+                    if (generation != eventStreamGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                    preferences.edit().putLong("cursor", event.id).apply()
+                    uplinkEventStreamConnected = true
+                    eventReconnectAttempt = 0
                     renderAgentVisibility()
                     when (event.type) {
                         "conversation.turn" -> if (currentPage == AppPage.HISTORY) loadHistory()
@@ -1359,12 +1375,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             }
                         }
                         "task.changed", "task.progress.updated", "daily_plan.proposed" -> {
-                            VoiceWidgetProvider.refreshTasks(this)
-                            if (currentPage == AppPage.TASKS) loadTasks()
+                            refreshTaskSurfaces()
                         }
                         "task.initiative.updated" -> {
-                            VoiceWidgetProvider.refreshTasks(this)
-                            if (currentPage == AppPage.TASKS) loadTasks()
+                            refreshTaskSurfaces()
                             val response = event.payload.optString("response_text")
                             val status = event.payload.optString("status", "updated")
                             if (response.isNotBlank()) {
@@ -1394,18 +1408,25 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     }
                 }
             },
-            onClosed = { error ->
-                if (error != null && !isFinishing && !isDestroyed) {
-                    runOnUiThread {
-                        uplinkEventStreamConnected = false
-                        uplinkGatewayState = "RECONNECTING"
-                        renderAgentVisibility()
-                        gatewayView.text = "● RECONNECTING"
-                        gatewayView.postDelayed(
-                            { if (!isFinishing && !isDestroyed) startSharedEventStream() },
-                            2_000,
-                        )
-                    }
+            onClosed = { _ ->
+                runOnUiThread {
+                    if (generation != eventStreamGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                    eventSubscription = null
+                    uplinkEventStreamConnected = false
+                    uplinkGatewayState = "RECONNECTING"
+                    eventReconnectAttempt += 1
+                    val reconnectDelay = GatewayTransportPolicy.reconnectDelayMillis(eventReconnectAttempt)
+                    renderAgentVisibility()
+                    gatewayView.text = "● RECONNECTING • ${reconnectDelay / 1_000.0}S"
+                    gatewayView.setTextColor(CarbonPalette.amber)
+                    gatewayView.postDelayed(
+                        {
+                            if (generation == eventStreamGeneration && !isFinishing && !isDestroyed) {
+                                startSharedEventStream()
+                            }
+                        },
+                        reconnectDelay,
+                    )
                 }
             },
         )
@@ -1563,13 +1584,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             uplinkMemoryConnected,
             uplinkEventStreamConnected,
         )
-        agentSummaryView.text = when {
+        val linkTiming = uplinkRoundTripMs?.let { " // RTT ${it}MS" }.orEmpty()
+        agentSummaryView.text = (when {
             uplinkGatewayState == "OFFLINE" -> "UPLINK OFFLINE // VOICEOS UNREACHABLE"
             uplinkGatewayState == "RECONNECTING" -> "UPLINK DEGRADED // EVENT STREAM RECONNECTING"
             runningWorkers > 0 -> "UPLINK ONLINE // FORKS ${runningWorkers.toString().padStart(2, '0')} // TASKS TRACKED"
             latest != null -> "UPLINK ONLINE // ${latest.label.uppercase(Locale.US)}"
             else -> "UPLINK ONLINE // VIC READY // NO ACTIVE FORKS"
-        }
+        }) + linkTiming
         agentSummaryView.setTextColor(
             when (uplinkGatewayState) {
                 "OFFLINE" -> CarbonPalette.red
@@ -1711,6 +1733,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun checkGatewayHealth(justEnrolled: Boolean) {
         val baseUrl = GatewaySettings.baseUrl(this)
+        val startedAt = System.nanoTime()
         uplinkGatewayState = "CHECKING"
         renderAgentVisibility()
         gatewayView.text = if (justEnrolled) "● ENROLLED" else "● CHECKING"
@@ -1720,10 +1743,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 result.fold(
                     onSuccess = { health ->
+                        uplinkRoundTripMs = (System.nanoTime() - startedAt) / 1_000_000
                         uplinkGatewayState = "ONLINE"
                         uplinkProvider = health.languageModel
                         uplinkMemoryConnected = health.memory != "unavailable"
-                        gatewayView.text = "● ONLINE"
+                        gatewayView.text = "● ONLINE • ${uplinkRoundTripMs}MS"
                         gatewayView.setTextColor(CarbonPalette.teal)
                         providerStatusView.text = "${health.languageModel.uppercase(Locale.US)}  •  READY"
                         providerStatusView.setTextColor(CarbonPalette.teal)
@@ -1731,12 +1755,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         memoryStatusView.setTextColor(if (uplinkMemoryConnected) CarbonPalette.teal else CarbonPalette.red)
                         systemStatusView.text = "Gateway active\nTailnet private\nMemory ${if (uplinkMemoryConnected) "connected" else "unavailable"}"
                         systemStatusView.setTextColor(CarbonPalette.white)
-                        systemDetailView.text = "Gateway  •  ONLINE\nProvider  •  ${health.languageModel.uppercase(Locale.US)}\nTailnet  •  PRIVATE\nMemory  •  ${if (uplinkMemoryConnected) "CONNECTED" else "UNAVAILABLE"}"
+                        systemDetailView.text = "Gateway  •  ONLINE (${uplinkRoundTripMs}MS)\nProvider  •  ${health.languageModel.uppercase(Locale.US)}\nTailnet  •  PRIVATE\nMemory  •  ${if (uplinkMemoryConnected) "CONNECTED" else "UNAVAILABLE"}"
                         systemDetailView.setTextColor(CarbonPalette.white)
                         VoiceWidgetProvider.updateStatus(this, "Online")
                         renderAgentVisibility()
                     },
                     onFailure = {
+                        uplinkRoundTripMs = null
                         uplinkGatewayState = "OFFLINE"
                         uplinkProvider = "UNAVAILABLE"
                         uplinkMemoryConnected = false
@@ -2171,7 +2196,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 result.fold(
                     onSuccess = { tasks ->
                         latestTasks = tasks
-                        TaskWidgetStore.save(this, tasks)
+                        VoiceWidgetProvider.applyTasks(this, tasks)
                         renderMomentumFeed(tasks)
                     },
                     onFailure = {
@@ -2186,6 +2211,22 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 )
             }
         }
+    }
+
+    private fun refreshTaskSurfaces() {
+        taskSurfaceRefreshGeneration += 1
+        val generation = taskSurfaceRefreshGeneration
+        rootScroll.postDelayed(
+            {
+                if (generation != taskSurfaceRefreshGeneration || isFinishing || isDestroyed) return@postDelayed
+                when (currentPage) {
+                    AppPage.TASKS -> loadTasks()
+                    AppPage.FEED -> loadMomentumFeed()
+                    else -> VoiceWidgetProvider.refreshTasks(this)
+                }
+            },
+            100,
+        )
     }
 
     private fun renderMomentumFeed(tasks: List<VoiceTask>) {
@@ -2453,42 +2494,59 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun loadTasks() {
         if (!::taskStatusView.isInitialized) return
+        taskLoadGeneration += 1
+        val generation = taskLoadGeneration
         taskStatusView.text = "Loading projects, ownership, and next actions…"
         taskStatusView.setTextColor(CarbonPalette.muted)
+        val resultLock = Any()
+        var projectResult: Result<List<VoiceProject>>? = null
+        var taskResult: Result<List<VoiceTask>>? = null
+
+        fun finishIfReady() {
+            val results = synchronized(resultLock) {
+                val projects = projectResult ?: return
+                val tasks = taskResult ?: return
+                projects to tasks
+            }
+            runOnUiThread {
+                if (generation != taskLoadGeneration || isFinishing || isDestroyed) return@runOnUiThread
+                latestProjects = results.first.getOrElse { latestProjects }
+                results.second.fold(
+                    onSuccess = { tasks ->
+                        VoiceWidgetProvider.applyTasks(this, tasks)
+                        renderTasks(tasks)
+                        ensureWeeklyTaskInstances(tasks)
+                    },
+                    onFailure = { error ->
+                        val cached = TaskWidgetStore.load(this)
+                        if (cached.isNotEmpty()) {
+                            taskStatusView.text = "Showing cached tasks • sync unavailable"
+                            taskStatusView.setTextColor(CarbonPalette.amber)
+                            renderTasks(cached, preserveStatus = true)
+                        } else {
+                            taskContainer.removeAllViews()
+                            taskStatusView.text = "Tasks are unavailable.\n${error.message.orEmpty()}"
+                            taskStatusView.setTextColor(CarbonPalette.red)
+                        }
+                    },
+                )
+            }
+        }
+
         GatewayClient.getProjects(
             GatewaySettings.baseUrl(this),
             DeviceCredentials.token(this),
-        ) { projectResult ->
-            latestProjects = projectResult.getOrDefault(emptyList())
-            GatewayClient.getTasks(
-                GatewaySettings.baseUrl(this),
-                DeviceCredentials.token(this),
-                limit = 100,
-            ) { result ->
-                runOnUiThread {
-                    if (isFinishing || isDestroyed) return@runOnUiThread
-                    result.fold(
-                        onSuccess = { tasks ->
-                            TaskWidgetStore.save(this, tasks)
-                            VoiceWidgetProvider.updateStatus(this, "Online")
-                            renderTasks(tasks)
-                            ensureWeeklyTaskInstances(tasks)
-                        },
-                        onFailure = { error ->
-                            val cached = TaskWidgetStore.load(this)
-                            if (cached.isNotEmpty()) {
-                                taskStatusView.text = "Showing cached tasks • sync unavailable"
-                                taskStatusView.setTextColor(CarbonPalette.amber)
-                                renderTasks(cached, preserveStatus = true)
-                            } else {
-                                taskContainer.removeAllViews()
-                                taskStatusView.text = "Tasks are unavailable.\n${error.message.orEmpty()}"
-                                taskStatusView.setTextColor(CarbonPalette.red)
-                            }
-                        },
-                    )
-                }
-            }
+        ) { result ->
+            synchronized(resultLock) { projectResult = result }
+            finishIfReady()
+        }
+        GatewayClient.getTasks(
+            GatewaySettings.baseUrl(this),
+            DeviceCredentials.token(this),
+            limit = 100,
+        ) { result ->
+            synchronized(resultLock) { taskResult = result }
+            finishIfReady()
         }
     }
 
@@ -2942,7 +3000,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun applyTaskWorkflowUpdate(updated: VoiceTask, message: String) {
         latestTasks = latestTasks.map { if (it.id == updated.id) updated else it }
         TaskWidgetStore.replace(this, updated)
-        VoiceWidgetProvider.refreshTasks(this)
+        VoiceWidgetProvider.applyTasks(this, latestTasks)
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
         renderTasks(latestTasks)
     }

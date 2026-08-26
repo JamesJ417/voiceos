@@ -61,6 +61,9 @@ DAILY_CHECKIN_QUESTIONS = (
 
 
 class VoiceOSServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
     def __init__(
         self,
         server_address: tuple[str, int],
@@ -2234,8 +2237,10 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         cursor = _event_cursor(query, self.headers.get("Last-Event-ID"))
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-cache, no-transform")
         self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("X-Content-Type-Options", "nosniff")
         origin = self._allowed_cors_origin()
         if origin:
             self._write_cors_headers(origin)
@@ -2243,7 +2248,10 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         last_keepalive = time.monotonic()
         try:
             while True:
-                events = self.gateway.audit_store.list_client_events(cursor, 100)
+                keepalive_due_in = max(0.0, 15.0 - (time.monotonic() - last_keepalive))
+                events = self.gateway.audit_store.wait_for_client_events(
+                    cursor, 100, keepalive_due_in
+                )
                 for event in events:
                     cursor = int(event["id"])
                     data = json.dumps(event, separators=(",", ":"))
@@ -2256,7 +2264,6 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
                     last_keepalive = now
-                time.sleep(0.5)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
@@ -2557,6 +2564,8 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         origin = self._allowed_cors_origin()
         if origin is not None:
             self._write_cors_headers(origin)

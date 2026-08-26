@@ -16,8 +16,8 @@ android {
         applicationId = "dev.voiceos.client"
         minSdk = 31
         targetSdk = 36
-        versionCode = 22
-        versionName = "0.15.2"
+        versionCode = 23
+        versionName = "0.15.3"
 
         buildConfigField("String", "GATEWAY_BASE_URL", "\"$gatewayUrl\"")
     }

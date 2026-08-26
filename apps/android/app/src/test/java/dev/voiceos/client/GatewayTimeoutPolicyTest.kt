@@ -1,6 +1,8 @@
 package dev.voiceos.client
 
 import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.net.ConnectException
 import java.net.HttpURLConnection
 import java.net.URL
 import org.junit.Assert.assertEquals
@@ -29,6 +31,15 @@ class GatewayTimeoutPolicyTest {
 
         assertEquals("turn-123", connection.recordedProperties["Idempotency-Key"])
         assertEquals(request.toList(), connection.writtenBytes.toByteArray().toList())
+    }
+
+    @Test
+    fun retriesOnlyFailuresThatCannotHaveReachedTheGateway() {
+        assertTrue(GatewayTransportPolicy.canRetryWithoutDuplicatingRequest(ConnectException()))
+        assertTrue(!GatewayTransportPolicy.canRetryWithoutDuplicatingRequest(IOException("reset")))
+        assertEquals(150L, GatewayTransportPolicy.retryDelayMillis(0))
+        assertEquals(500L, GatewayTransportPolicy.reconnectDelayMillis(1))
+        assertEquals(30_000L, GatewayTransportPolicy.reconnectDelayMillis(20))
     }
 
     private class RecordingConnection : HttpURLConnection(URL("http://voiceos.test")) {

@@ -3,14 +3,24 @@ package dev.voiceos.client
 import android.content.Context
 
 interface OutreachEventTransport {
-    fun start(after: Long, onOutreach: (Long, VicOutreach) -> Unit, onClosed: (Throwable?) -> Unit)
+    fun start(
+        after: Long,
+        onConnected: () -> Unit,
+        onOutreach: (Long, VicOutreach) -> Unit,
+        onClosed: (Throwable?) -> Unit,
+    )
     fun stop()
 }
 
 class SseOutreachTransport(private val context: Context) : OutreachEventTransport {
     private var subscription: EventSubscription? = null
 
-    override fun start(after: Long, onOutreach: (Long, VicOutreach) -> Unit, onClosed: (Throwable?) -> Unit) {
+    override fun start(
+        after: Long,
+        onConnected: () -> Unit,
+        onOutreach: (Long, VicOutreach) -> Unit,
+        onClosed: (Throwable?) -> Unit,
+    ) {
         val token = DeviceCredentials.token(context)
         if (token.isNullOrBlank()) {
             onClosed(IllegalStateException("VoiceOS enrollment is required"))
@@ -18,6 +28,7 @@ class SseOutreachTransport(private val context: Context) : OutreachEventTranspor
         }
         subscription = GatewayClient.streamEvents(
             GatewaySettings.baseUrl(context), token, after,
+            onConnected = { onConnected() },
             onEvent = { event ->
                 if (event.type == "vic.outreach.created") {
                     onOutreach(event.id, GatewayClient.parseOutreach(event.payload))

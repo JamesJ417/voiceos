@@ -1,11 +1,26 @@
 package dev.voiceos.client
 
 import org.json.JSONObject
+import java.io.IOException
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.NoRouteToHostException
+import java.net.UnknownHostException
+import kotlin.math.min
 
 internal object GatewayTimeoutPolicy {
     const val DEFAULT_READ_MILLIS = 90_000
     const val LONG_TURN_READ_MILLIS = 420_000
+}
+
+internal object GatewayTransportPolicy {
+    fun canRetryWithoutDuplicatingRequest(error: IOException): Boolean =
+        error is ConnectException || error is NoRouteToHostException || error is UnknownHostException
+
+    fun retryDelayMillis(attempt: Int): Long = min(600L, 150L shl attempt.coerceIn(0, 2))
+
+    fun reconnectDelayMillis(attempt: Int): Long =
+        min(30_000L, 500L shl (attempt - 1).coerceIn(0, 6))
 }
 
 class GatewayHttpException(
@@ -25,6 +40,7 @@ internal object GatewayHttp {
         connection.connectTimeout = 7_000
         connection.readTimeout = readTimeoutMillis
         connection.setRequestProperty("Accept", "application/json")
+        connection.setRequestProperty("Connection", "keep-alive")
         if (!deviceToken.isNullOrBlank()) {
             connection.setRequestProperty("Authorization", "Bearer $deviceToken")
         }

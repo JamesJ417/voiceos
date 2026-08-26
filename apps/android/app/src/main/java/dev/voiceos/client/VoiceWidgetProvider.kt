@@ -54,6 +54,15 @@ class VoiceWidgetProvider : AppWidgetProvider() {
             }
         }
 
+        fun applyTasks(context: Context, tasks: List<VoiceTask>, status: String = "Online") {
+            TaskWidgetStore.save(context, tasks)
+            context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .putString(STATUS, status)
+                .apply()
+            updateAll(context)
+        }
+
         private fun updateAll(context: Context) {
             val manager = AppWidgetManager.getInstance(context)
             val component = ComponentName(context, VoiceWidgetProvider::class.java)

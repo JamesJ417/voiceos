@@ -1141,6 +1141,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             GatewaySettings.baseUrl(this),
             token,
             floorCursor,
+            onConnected = { floorReconnectAttempt = 0 },
             onEvent = { event ->
                 floorCursor = event.id
                 when (event.type) {

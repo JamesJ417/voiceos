@@ -255,6 +255,7 @@ object GatewayClient {
         after: Long,
         onEvent: (ClientEvent) -> Unit,
         onClosed: (Throwable?) -> Unit,
+        onConnected: (Long) -> Unit = {},
     ): EventSubscription {
         val connection = URL("$baseUrl/v1/events?after=${after.coerceAtLeast(0)}")
             .openConnection() as HttpURLConnection
@@ -262,13 +263,17 @@ object GatewayClient {
         connection.connectTimeout = 7_000
         connection.readTimeout = 0
         connection.setRequestProperty("Accept", "text/event-stream")
+        connection.setRequestProperty("Cache-Control", "no-cache")
         connection.setRequestProperty("Authorization", "Bearer $deviceToken")
+        if (after > 0) connection.setRequestProperty("Last-Event-ID", after.toString())
         Thread({
             var failure: Throwable? = null
+            val startedAt = System.nanoTime()
             try {
                 if (connection.responseCode !in 200..299) {
                     throw IOException("Event stream returned HTTP ${connection.responseCode}")
                 }
+                onConnected((System.nanoTime() - startedAt) / 1_000_000)
                 connection.inputStream.bufferedReader().use { reader ->
                     var data: String? = null
                     while (active.get()) {
@@ -1435,7 +1440,8 @@ object GatewayClient {
                 return action()
             } catch (error: IOException) {
                 lastError = error
-                if (attempt < 2) Thread.sleep(500L shl attempt)
+                if (!GatewayTransportPolicy.canRetryWithoutDuplicatingRequest(error)) throw error
+                if (attempt < 2) Thread.sleep(GatewayTransportPolicy.retryDelayMillis(attempt))
             }
         }
         throw lastError ?: IOException("Gateway connection failed")

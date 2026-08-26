@@ -21,6 +21,7 @@ class AuditStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._lock = threading.Lock()
+        self._client_event_condition = threading.Condition(self._lock)
         self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         with self._connection:
@@ -495,20 +496,46 @@ class AuditStore:
         return [_event_row(row) for row in rows]
 
     def publish_client_event(self, event_type: str, payload: dict[str, Any]) -> int:
-        with self._lock, self._connection:
-            return self._append_client_event_locked(event_type, payload)
+        with self._client_event_condition, self._connection:
+            event_id = self._append_client_event_locked(event_type, payload)
+            self._client_event_condition.notify_all()
+            return event_id
 
     def list_client_events(self, after: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         safe_after = max(0, int(after))
         safe_limit = min(max(int(limit), 1), 500)
         with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT event_id, event_type, payload_json, created_at
-                FROM client_events WHERE event_id > ? ORDER BY event_id LIMIT ?
-                """,
-                (safe_after, safe_limit),
-            ).fetchall()
+            rows = self._list_client_event_rows_locked(safe_after, safe_limit)
+        return self._client_events_from_rows(rows)
+
+    def wait_for_client_events(
+        self, after: int = 0, limit: int = 100, timeout: float = 15.0
+    ) -> list[dict[str, Any]]:
+        """Wait until a newer client event exists or the heartbeat deadline arrives."""
+
+        safe_after = max(0, int(after))
+        safe_limit = min(max(int(limit), 1), 500)
+        safe_timeout = min(max(float(timeout), 0.0), 30.0)
+        with self._client_event_condition:
+            rows = self._list_client_event_rows_locked(safe_after, safe_limit)
+            if not rows and safe_timeout > 0:
+                self._client_event_condition.wait(safe_timeout)
+                rows = self._list_client_event_rows_locked(safe_after, safe_limit)
+        return self._client_events_from_rows(rows)
+
+    def _list_client_event_rows_locked(
+        self, after: int, limit: int
+    ) -> list[sqlite3.Row]:
+        return self._connection.execute(
+            """
+            SELECT event_id, event_type, payload_json, created_at
+            FROM client_events WHERE event_id > ? ORDER BY event_id LIMIT ?
+            """,
+            (after, limit),
+        ).fetchall()
+
+    @staticmethod
+    def _client_events_from_rows(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
         return [
             {
                 "id": int(row["event_id"]),

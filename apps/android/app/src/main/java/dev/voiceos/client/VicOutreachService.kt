@@ -18,6 +18,7 @@ class VicOutreachService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var transport: OutreachEventTransport? = null
     private var stopping = false
+    private var reconnectAttempt = 0
     private val recoveryPoll = object : Runnable {
         override fun run() {
             syncPendingOutreach()
@@ -60,13 +61,20 @@ class VicOutreachService : Service() {
         transport = SseOutreachTransport(this).also { selected ->
             selected.start(
                 preferences.getLong(CURSOR, 0),
+                onConnected = { reconnectAttempt = 0 },
                 onOutreach = { eventId, outreach ->
                     preferences.edit().putLong(CURSOR, eventId).apply()
                     deliver(outreach)
                 },
                 onClosed = {
                     transport = null
-                    if (!stopping) handler.postDelayed({ connect() }, RECONNECT_DELAY_MILLIS)
+                    if (!stopping) {
+                        reconnectAttempt += 1
+                        handler.postDelayed(
+                            { connect() },
+                            GatewayTransportPolicy.reconnectDelayMillis(reconnectAttempt),
+                        )
+                    }
                 },
             )
         }
@@ -98,7 +106,6 @@ class VicOutreachService : Service() {
         private const val PREFERENCES = "vic_outreach_events"
         private const val CURSOR = "cursor"
         private const val CONNECTION_NOTIFICATION_ID = 4_200
-        private const val RECONNECT_DELAY_MILLIS = 5_000L
         private const val RECOVERY_POLL_MILLIS = 30_000L
     }
 }
