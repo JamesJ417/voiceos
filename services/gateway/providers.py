@@ -781,6 +781,17 @@ class ProviderRouter:
             skill_worker_url=os.environ.get("VOICEOS_HERMES_SKILL_WORKER_URL", ""),
             skill_worker_token_file=os.environ.get("VOICEOS_HERMES_SKILL_WORKER_TOKEN_FILE", ""),
         )
+        # Structured classifiers must receive a direct completion, never the
+        # asynchronous agent's temporary delegation acknowledgement.
+        self._hermes_sync = HermesProvider(
+            os.environ.get("VOICEOS_HERMES_URL", "http://127.0.0.1:8642"),
+            api_key_file=os.environ.get("VOICEOS_HERMES_API_KEY_FILE", ""),
+            api_key=os.environ.get("VOICEOS_HERMES_API_KEY", ""),
+            model=os.environ.get("VOICEOS_HERMES_MODEL", "hermes"),
+            use_async_runs=False,
+            skill_worker_url=os.environ.get("VOICEOS_HERMES_SKILL_WORKER_URL", ""),
+            skill_worker_token_file=os.environ.get("VOICEOS_HERMES_SKILL_WORKER_TOKEN_FILE", ""),
+        )
         self._openai = UnconfiguredCloudProvider(
             "openai", "OPENAI_API_KEY", "VOICEOS_OPENAI_MODEL"
         )
@@ -793,6 +804,7 @@ class ProviderRouter:
             "ollama-deep": self._ollama_deep,
             "codex-sol": self._codex,
             "hermes": self._hermes,
+            "hermes-sync": self._hermes_sync,
             "openai": self._openai,
             "claude-review": self._claude,
         }

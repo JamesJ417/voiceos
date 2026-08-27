@@ -241,6 +241,28 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/ClientEvent" }
         "401": { description: Device authentication required }
+  /v1/bridge/inbox:
+    get:
+      operationId: getBridgeInbox
+      summary: Read durable owner-scoped notifications for the authenticated device
+      parameters:
+        - $ref: "#/components/parameters/DeviceAuthorization"
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Unacknowledged notifications addressed to this device or all enrolled devices
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notifications]
+                properties:
+                  notifications:
+                    type: array
+                    items: { $ref: "#/components/schemas/BridgeNotification" }
+        "401": { description: Device authentication required }
   /v1/capabilities/speech/health:
     get:
       operationId: getSpeechCapabilityHealth
@@ -1917,6 +1939,16 @@ components:
           enum: [conversation.turn, conversation.floor.changed, project.changed, task.changed, task.initiative.updated, task.progress.updated, focus.updated, personal.updated, agent.activity.updated, agent.worker.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
         payload: { type: object }
         created_at: { type: string, format: date-time }
+    BridgeNotification:
+      type: object
+      required: [id, owner_id, device_id, payload, created_at, acknowledged_at]
+      properties:
+        id: { type: integer, minimum: 1 }
+        owner_id: { type: string }
+        device_id: { type: [string, "null"] }
+        payload: { type: object }
+        created_at: { type: string, format: date-time }
+        acknowledged_at: { type: [string, "null"], format: date-time }
     Project:
       type: object
       required: [id, owner_id, title, status, created_at, updated_at]

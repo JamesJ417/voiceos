@@ -166,6 +166,7 @@ class VoiceOSServer(ThreadingHTTPServer):
                     coordinated = self.coordinator.respond(
                         prompt,
                         conversation_id=f"personal-extraction:{capture_id}",
+                        provider="hermes-sync",
                         allowed_tools=set(),
                     )
                     output = _single_json_object(coordinated.text)
@@ -404,7 +405,7 @@ class VoiceOSServer(ThreadingHTTPServer):
         )
         outreach = outreach_result.get("outreach") if outreach_result else None
         if isinstance(outreach, dict):
-            self.audit_store.publish_client_event("vic.outreach.created", outreach)
+            _publish_outreach_created(self.audit_store, outreach)
 
 
 class VoiceOSHandler(BaseHTTPRequestHandler):
@@ -459,6 +460,15 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                     "providers": self.gateway.coordinator.router.describe(),
                 },
             )
+            return
+        if parsed.path == "/v1/bridge/inbox":
+            if not self._require_device():
+                return
+            device_id = self.authenticated_device_id or "development-device"
+            limit = parse_qs(parsed.query).get("limit", ["50"])[0]
+            self._json(HTTPStatus.OK, {"notifications": self.gateway.audit_store.list_bridge_notifications(
+                os.environ.get("VOICEOS_OWNER_ID", "vic"), device_id, int(limit)
+            )})
             return
         if parsed.path == "/v1/events":
             if not self._require_device():
@@ -2223,7 +2233,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         if path == "/v1/outreach" and method == "POST" and status < HTTPStatus.BAD_REQUEST:
             outreach = payload.get("outreach")
             if isinstance(outreach, dict):
-                self.gateway.audit_store.publish_client_event("vic.outreach.created", outreach)
+                _publish_outreach_created(self.gateway.audit_store, outreach)
         if path.startswith("/v1/outreach/") and path.endswith("/actions") and status < HTTPStatus.BAD_REQUEST:
             outreach = payload.get("outreach")
             if isinstance(outreach, dict):
@@ -3085,6 +3095,15 @@ def _rust_task_tool_executor(memory_url: str):
     return execute
 
 
+def _publish_outreach_created(audit_store: AuditStore, outreach: dict[str, object]) -> None:
+    audit_store.publish_client_event("vic.outreach.created", outreach)
+    audit_store.enqueue_bridge_notification(
+        owner_id=str(outreach.get("owner_id") or os.environ.get("VOICEOS_OWNER_ID", "vic")),
+        device_id=cast(str | None, outreach.get("device_id")),
+        payload=outreach,
+    )
+
+
 def _rust_outreach_tool_executor(memory_url: str, audit_store: AuditStore):
     def execute(arguments: dict[str, object]) -> dict[str, object]:
         result = _post_json(
@@ -3098,7 +3117,7 @@ def _rust_outreach_tool_executor(memory_url: str, audit_store: AuditStore):
             raise RuntimeError("rust_outreach_authority_unavailable")
         outreach = result.get("outreach")
         if isinstance(outreach, dict):
-            audit_store.publish_client_event("vic.outreach.created", outreach)
+            _publish_outreach_created(audit_store, outreach)
         return result
 
     return execute

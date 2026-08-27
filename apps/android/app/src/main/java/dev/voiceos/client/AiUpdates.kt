@@ -8,6 +8,7 @@ import org.xmlpull.v1.XmlPullParserFactory
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.Instant
+import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Callable
@@ -32,6 +33,12 @@ data class AiUpdateSource(
 )
 
 object AiUpdateModel {
+    fun publishedToday(updates: List<AiUpdate>, nowEpochSeconds: Long = Instant.now().epochSecond): List<AiUpdate> {
+        val zone = ZoneId.systemDefault()
+        val startOfToday = Instant.ofEpochSecond(nowEpochSeconds).atZone(zone).toLocalDate().atStartOfDay(zone).toEpochSecond()
+        return updates.filter { it.publishedEpochSeconds >= startOfToday }
+    }
+
     fun select(updates: List<AiUpdate>, limit: Int = 4): List<AiUpdate> {
         val safeLimit = limit.coerceIn(1, 8)
         val ranked = updates
@@ -195,7 +202,7 @@ object AiUpdateStore {
     private const val PREFERENCES = "ov_ai_updates"
     private const val ITEMS = "items"
     private const val UPDATED_AT = "updated_at"
-    private const val MAX_CACHE_AGE_MS = 30L * 60L * 1_000L
+
 
     fun save(context: Context, updates: List<AiUpdate>) {
         val payload = JSONArray()
@@ -239,8 +246,4 @@ object AiUpdateStore {
         }.getOrDefault(emptyList())
     }
 
-    fun isFresh(context: Context): Boolean {
-        val updatedAt = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getLong(UPDATED_AT, 0)
-        return updatedAt > 0 && System.currentTimeMillis() - updatedAt < MAX_CACHE_AGE_MS
-    }
 }

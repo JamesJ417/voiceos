@@ -30,6 +30,8 @@ fn public_event_type(event_type: &str) -> Option<&str> {
         "status.changed" => Some("status.changed"),
         "vic.outreach.created" => Some("vic.outreach.created"),
         "vic.outreach.updated" => Some("vic.outreach.updated"),
+        "agent.activity.updated" => Some("agent.activity.updated"),
+        "agent.worker.updated" => Some("agent.worker.updated"),
         value if value.starts_with("task.initiative.") => Some("task.initiative.updated"),
         "task.progress.recorded" => Some("task.progress.updated"),
         value if value.starts_with("task.") => Some("task.changed"),
@@ -42,12 +44,77 @@ fn public_event_type(event_type: &str) -> Option<&str> {
 
 fn client_event(event: ExecutionEvent) -> Option<Value> {
     let event_type = public_event_type(&event.event_type)?;
-    Some(json!({
+    let (channel, attention, interrupt_audio) = match event_type {
+        "conversation.turn" => ("conversation", "conversation", true),
+        "conversation.floor.changed" => ("conversation", "floor", true),
+        "approval.proposed" | "approval.decided" => ("conversation", "approval", false),
+        _ => ("background", "none", false),
+    };
+    let mut result = json!({
         "id": event.id,
         "type": event_type,
         "payload": event.payload,
         "created_at": event.occurred_at,
-    }))
+        "delivery": { "channel": channel, "attention": attention, "interrupt_audio": interrupt_audio },
+    });
+    if let Some(object) = result.as_object_mut() {
+        for key in ["turn_id", "session_id"] {
+            if let Some(value) = event.payload.get(key).filter(|value| !value.is_null()) {
+                object.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+    Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::client_event;
+    use serde_json::json;
+    use voiceos_core::ExecutionEvent;
+
+    fn event(event_type: &str, payload: serde_json::Value) -> ExecutionEvent {
+        ExecutionEvent {
+            id: 7,
+            owner_id: "owner".into(),
+            stream_id: "stream".into(),
+            event_type: event_type.into(),
+            actor: "vic".into(),
+            payload,
+            occurred_at: "now".into(),
+        }
+    }
+
+    #[test]
+    fn background_events_are_non_interrupting_and_preserve_origin_metadata() {
+        let value = client_event(event(
+            "agent.worker.updated",
+            json!({"session_id":"s-1", "turn_id":"t-2"}),
+        ))
+        .unwrap();
+        assert_eq!(
+            value["delivery"],
+            json!({"channel":"background", "attention":"none", "interrupt_audio":false})
+        );
+        assert_eq!(value["session_id"], "s-1");
+        assert_eq!(value["turn_id"], "t-2");
+    }
+
+    #[test]
+    fn conversation_and_approval_attention_remains_distinct() {
+        assert_eq!(
+            client_event(event("conversation.turn", json!({}))).unwrap()["delivery"]["channel"],
+            "conversation"
+        );
+        assert_eq!(
+            client_event(event("conversation.floor.changed", json!({}))).unwrap()["delivery"]["attention"],
+            "floor"
+        );
+        assert_eq!(
+            client_event(event("approval.proposed", json!({}))).unwrap()["delivery"]["attention"],
+            "approval"
+        );
+    }
 }
 
 pub(crate) async fn recovery(

@@ -134,6 +134,12 @@ data class VoiceProject(
     val updatedAt: String,
 )
 
+data class BridgeNotification(
+    val id: Long,
+    val payload: JSONObject,
+    val createdAt: String,
+)
+
 data class ClientEvent(val id: Long, val type: String, val payload: JSONObject)
 
 data class EventRecovery(
@@ -236,6 +242,14 @@ object GatewayClient {
         callback: (Result<List<VicOutreach>>) -> Unit,
     ) {
         Thread({ callback(runCatching { getPendingOutreachBlocking(baseUrl, deviceToken) }) }, "vic-outreach-recovery").start()
+    }
+
+    fun getBridgeInbox(
+        baseUrl: String,
+        deviceToken: String?,
+        callback: (Result<List<BridgeNotification>>) -> Unit,
+    ) {
+        Thread({ callback(runCatching { getBridgeInboxBlocking(baseUrl, deviceToken) }) }, "voiceos-bridge-inbox").start()
     }
 
     fun actOnOutreach(
@@ -1381,6 +1395,22 @@ object GatewayClient {
         try {
             GatewayHttp.configure(connection, deviceToken, request)
             return parseOutreach(GatewayHttp.responseJson(connection).getJSONObject("outreach"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun getBridgeInboxBlocking(baseUrl: String, deviceToken: String?): List<BridgeNotification> {
+        val connection = URL("$baseUrl/v1/bridge/inbox?limit=50").openConnection() as HttpURLConnection
+        try {
+            GatewayHttp.configure(connection, deviceToken)
+            val records = GatewayHttp.responseJson(connection).getJSONArray("notifications")
+            return buildList {
+                for (index in 0 until records.length()) {
+                    val item = records.getJSONObject(index)
+                    add(BridgeNotification(item.getLong("id"), item.optJSONObject("payload") ?: JSONObject(), item.getString("created_at")))
+                }
+            }
         } finally {
             connection.disconnect()
         }

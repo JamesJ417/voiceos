@@ -152,6 +152,10 @@ Add metrics/log fields for source, event ID hash, intake ID, status, latency, an
 - logs and public events contain no transcript body or secret
 - OpenAPI and route-ownership contracts are updated together
 
-## Not yet done
+## Current activation status
 
-This scaffold intentionally does not add the route, schema, secret, tunnel, or Fieldy configuration. Those changes should be implemented as a reviewable slice, beginning with contract types, signature verification, migration, and tests.
+The reviewed implementation now includes the public signed ingress route, Fieldy payload normalization, durable conversation assembly, quiet-window background extraction, review-only proposal persistence, explicit approval boundaries, OpenAPI, route ownership, and focused tests.
+
+The installed local gateway has the Fieldy webhook configured and is healthy. It remains bound to localhost; Fieldy delivery is not activated until a private signed endpoint is entered in Fieldy Developer Settings and a controlled live event is sent. Do not expose the root gateway. Keep the normal gateway tailnet-only and expose only `/v1/integrations/fieldy/transcripts` through a dedicated Funnel path if remote Fieldy delivery is required.
+
+Follow-on hardening remains: configurable retention cleanup/redaction, a Fieldy-specific operator list/detail/discard surface, and moving public ingress ownership from the Python gateway into the Rust control plane.

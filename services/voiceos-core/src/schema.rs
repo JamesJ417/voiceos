@@ -273,6 +273,32 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS task_handoffs_task_idx ON task_handoffs(owner_id, task_id, status);
+        CREATE TABLE IF NOT EXISTS task_review_state (
+            owner_id TEXT PRIMARY KEY,
+            cursor_task_id TEXT,
+            active_review_id TEXT,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(cursor_task_id) REFERENCES tasks(task_id)
+        );
+        CREATE TABLE IF NOT EXISTS task_review_runs (
+            review_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('running','completed','failed','expired')),
+            lease_expires_at TEXT NOT NULL,
+            safe_actions_json TEXT NOT NULL DEFAULT '[]',
+            blockers_json TEXT NOT NULL DEFAULT '[]',
+            ideas_json TEXT NOT NULL DEFAULT '[]',
+            summary TEXT,
+            error_code TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(task_id) REFERENCES tasks(task_id)
+        );
+        CREATE INDEX IF NOT EXISTS task_review_runs_owner_status_lease_idx ON task_review_runs(owner_id, status, lease_expires_at);
+        CREATE INDEX IF NOT EXISTS task_review_runs_owner_task_started_idx ON task_review_runs(owner_id, task_id, started_at DESC);
         CREATE TABLE IF NOT EXISTS task_artifacts (
             task_artifact_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,
@@ -773,6 +799,21 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE TRIGGER IF NOT EXISTS outreach_delivery_audit AFTER INSERT ON outreach_deliveries BEGIN INSERT INTO execution_events(owner_id,stream_id,event_type,actor,payload_json,occurred_at) VALUES(NEW.owner_id,NEW.delivery_id,'proactive.delivery_recorded','voiceos-core','{}',NEW.created_at); END;
         CREATE TRIGGER IF NOT EXISTS proactive_feedback_audit AFTER INSERT ON proactive_feedback BEGIN INSERT INTO execution_events(owner_id,stream_id,event_type,actor,payload_json,occurred_at) VALUES(NEW.owner_id,NEW.feedback_id,'proactive.feedback_recorded','voiceos-core','{}',NEW.created_at); END;
     "#)?;
+    connection.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS google_calendar_connections (
+            owner_id TEXT PRIMARY KEY, provider TEXT NOT NULL, account_email TEXT NOT NULL,
+            provider_account_id TEXT NOT NULL, secret_reference TEXT, connected_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id)
+        );
+    "#,
+    )?;
+    add_column(
+        connection,
+        "google_calendar_connections",
+        "secret_reference",
+        "TEXT",
+    )?;
     Ok(())
 }
 
@@ -844,6 +885,17 @@ fn migrate_memory_lifecycle_constraint(connection: &Connection) -> rusqlite::Res
          DROP TABLE memories;
          ALTER TABLE memories_rebuilt RENAME TO memories;
          COMMIT;",
+    )?;
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS google_calendar_connections (\
+            owner_id TEXT PRIMARY KEY,\
+            provider TEXT NOT NULL,\
+            account_email TEXT NOT NULL,\
+            provider_account_id TEXT NOT NULL,\
+            secret_reference TEXT,\
+            connected_at TEXT NOT NULL,\
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id)\
+        );",
     )
 }
 

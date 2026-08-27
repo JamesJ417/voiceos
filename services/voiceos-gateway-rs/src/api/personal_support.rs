@@ -48,6 +48,11 @@ pub(crate) struct DecisionRequest {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct DiscardRequest {
+    audit_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ExtractRequest {
     output: Value,
 }
@@ -297,7 +302,7 @@ fn personal_result(
     Json(Value::Object(payload))
 }
 
-pub(crate) async fn fieldy_intake(
+pub(crate) async fn fieldy_webhook_intake(
     State(state): State<AppState>,
     body: Bytes,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
@@ -411,6 +416,50 @@ pub(crate) async fn inbox(State(s): State<AppState>, h: HeaderMap) -> ApiResult<
     Ok(Json(
         json!({"captures":s.store.personal_inbox(&s.primary_owner_id).map_err(err)?}),
     ))
+}
+
+pub(crate) async fn list_fieldy_intake(
+    State(s): State<AppState>,
+    h: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    authenticate(&s, &h)?;
+    let intake = s
+        .store
+        .personal_inbox(&s.primary_owner_id)
+        .map_err(err)?
+        .into_iter()
+        .filter(|capture| capture.source == "fieldy")
+        .collect::<Vec<_>>();
+    Ok(Json(json!({"intake": intake})))
+}
+
+pub(crate) async fn fieldy_intake_detail(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Value>> {
+    authenticate(&s, &h)?;
+    let intake = s
+        .store
+        .personal_capture(&s.primary_owner_id, &id)
+        .map_err(err)?
+        .filter(|capture| capture.source == "fieldy")
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "fieldy_intake_not_found"))?;
+    Ok(Json(json!({"intake": intake})))
+}
+
+pub(crate) async fn discard_fieldy_intake(
+    State(s): State<AppState>,
+    h: HeaderMap,
+    Path(id): Path<String>,
+    Json(r): Json<DiscardRequest>,
+) -> ApiResult<Json<Value>> {
+    authenticate(&s, &h)?;
+    let decision = s
+        .store
+        .decide_personal_capture(&s.primary_owner_id, &id, "discarded", &r.audit_id)
+        .map_err(err)?;
+    Ok(Json(json!({"decision": decision})))
 }
 pub(crate) async fn capture_decision(
     State(s): State<AppState>,

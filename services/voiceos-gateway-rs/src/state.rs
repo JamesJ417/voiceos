@@ -3,12 +3,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use voiceos_core::{ConversationEngine, ConversationStore, ProviderRouter};
+use voiceos_core::{
+    CalendarSecretStore, ConversationEngine, ConversationStore,
+    GoogleCalendarOAuthConfigurationError, ProviderRouter,
+};
 use voiceos_ontology::Interpreter;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) store: Arc<ConversationStore>,
+    pub(crate) calendar_secret_store: Arc<dyn CalendarSecretStore>,
+    pub(crate) google_calendar_oauth_configuration_error:
+        Option<GoogleCalendarOAuthConfigurationError>,
     pub(crate) engine: Arc<ConversationEngine>,
     pub(crate) router: Arc<ProviderRouter>,
     pub(crate) ontology: Arc<Interpreter>,

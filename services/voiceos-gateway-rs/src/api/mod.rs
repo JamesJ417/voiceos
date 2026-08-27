@@ -8,6 +8,7 @@ mod error;
 mod events;
 mod floor;
 mod focus;
+mod google_calendar;
 mod health;
 mod image_contract;
 mod memories;
@@ -29,6 +30,14 @@ use crate::state::AppState;
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(health::health))
+        .route(
+            "/v1/integrations/google-calendar/status",
+            get(google_calendar::status),
+        )
+        .route(
+            "/v1/integrations/google-calendar/disconnect",
+            post(google_calendar::disconnect),
+        )
         .route("/v1/attachments", post(attachments::upload_attachment))
         .route(
             "/v1/attachments/{attachment_id}",
@@ -112,6 +121,7 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/skills/{skill_id}/status", post(skills::set_status))
         .route("/v1/tasks", get(tasks::list_tasks).post(tasks::create_task))
+        .route("/v1/tasks/review/claim", post(tasks::claim_task_review))
         .route("/v1/projects", get(projects::list).post(projects::create))
         .route("/v1/tasks/{task_id}", get(tasks::task_detail))
         .route(
@@ -127,6 +137,15 @@ pub(crate) fn router(state: AppState) -> Router {
             post(tasks::update_task_status),
         )
         .route("/v1/tasks/{task_id}/actions", post(tasks::task_action))
+        .route(
+            "/v1/fieldy/intake",
+            get(personal_support::list_fieldy_intake),
+        )
+        .route(
+            "/v1/fieldy/intake/{capture_id}",
+            get(personal_support::fieldy_intake_detail)
+                .delete(personal_support::discard_fieldy_intake),
+        )
         .route("/v1/outreach", get(outreach::list).post(outreach::create))
         .route("/v1/outreach/policy", get(outreach::policy))
         .route("/v1/outreach/{outreach_id}/actions", post(outreach::act))
@@ -173,7 +192,7 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route(
             "/internal/v1/personal/fieldy",
-            post(personal_support::fieldy_intake),
+            post(personal_support::fieldy_webhook_intake),
         )
         .route(
             "/internal/v1/personal/fieldy/pending",
@@ -305,6 +324,10 @@ mod integration_tests {
             router: Arc::new(provider_router),
             ontology,
             store: store.clone(),
+            calendar_secret_store: Arc::new(voiceos_core::UnavailableCalendarSecretStore),
+            google_calendar_oauth_configuration_error: Some(
+                voiceos_core::GoogleCalendarOAuthConfigurationError::MissingClientId,
+            ),
             legacy_audit_path: legacy_audit_path.clone(),
             require_device_auth: true,
             primary_owner_id: OWNER.into(),
@@ -321,6 +344,57 @@ mod integration_tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    #[tokio::test]
+    async fn google_calendar_status_reports_a_machine_readable_missing_client_id() {
+        let (app, _store, path) = authenticated_router();
+        let request = Request::builder()
+            .uri("/v1/integrations/google-calendar/status")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, body) = response(app, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["connected"], false);
+        assert_eq!(body["authorization_ready"], false);
+        assert_eq!(body["secret_storage_available"], false);
+        assert_eq!(body["error"], "google_calendar_oauth_client_id_missing");
+        assert_eq!(body["next_step"], "configure_google_calendar_oauth");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn google_calendar_disconnect_fails_closed_when_secret_store_is_unavailable() {
+        let (app, store, path) = authenticated_router();
+        let references = voiceos_core::InMemoryCalendarSecretStore::new();
+        let reference = voiceos_core::CalendarSecretStore::put(&references, OWNER, &[]).unwrap();
+        store
+            .upsert_google_calendar_connection(OWNER, "google", "account@example.com", "acct-123")
+            .unwrap();
+        store
+            .set_google_calendar_secret_reference(OWNER, &reference)
+            .unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/integrations/google-calendar/disconnect")
+            .header("authorization", format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, body) = response(app, request).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "google_calendar_secret_store_unavailable");
+        assert!(
+            store
+                .google_calendar_connection_for_owner(OWNER)
+                .unwrap()
+                .is_some()
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -1095,6 +1169,69 @@ mod integration_tests {
         assert_eq!(finished["task"]["status"], "completed");
         assert_eq!(finished["detail"]["progress"]["completed_steps"], 3);
         assert_eq!(store.tasks(OWNER, true, 20).unwrap().len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fieldy_operator_can_list_inspect_and_discard_intake() {
+        let (app, store, path) = authenticated_router();
+        let capture = store
+            .capture_personal_input(
+                OWNER,
+                voiceos_core::CaptureSource::fieldy("fieldy-event-operator"),
+                "Review the screen mount measurements",
+                chrono::Utc::now(),
+                chrono::Duration::hours(24),
+            )
+            .unwrap();
+        let request = |method: &str, uri: String, body: Body| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(body)
+                .unwrap()
+        };
+        let (status, body) = response(
+            app.clone(),
+            request("GET", "/v1/fieldy/intake".into(), Body::empty()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["intake"][0]["id"], capture.id);
+        let (status, body) = response(
+            app.clone(),
+            request(
+                "GET",
+                format!("/v1/fieldy/intake/{}", capture.id),
+                Body::empty(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["intake"]["raw_content"],
+            "Review the screen mount measurements"
+        );
+        let (status, _) = response(
+            app,
+            request(
+                "DELETE",
+                format!("/v1/fieldy/intake/{}", capture.id),
+                Body::from(json!({"audit_id":"operator-discard"}).to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            store
+                .personal_capture(OWNER, &capture.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "discarded"
+        );
         std::fs::remove_file(path).unwrap();
     }
 }

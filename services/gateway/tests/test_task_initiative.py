@@ -31,6 +31,9 @@ class _Audit:
     def publish_client_event(self, kind: str, payload: dict[str, object]) -> None:
         self.events.append((kind, payload))
 
+    def enqueue_bridge_notification(self, **values: object) -> dict[str, object]:
+        return dict(values)
+
     def create_pending_approval(self, **values: object) -> dict[str, object]:
         return dict(values)
 

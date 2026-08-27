@@ -11,6 +11,8 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioManager
+import android.media.session.MediaSession
+import android.view.KeyEvent
 import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Bundle
@@ -36,6 +38,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     private var recognizer: SpeechRecognizer? = null
     private var textToSpeech: TextToSpeech? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var mediaSession: MediaSession? = null
     private val controller = ConversationController()
     private val active: Boolean get() = controller.active
     private val paused: Boolean get() = controller.paused
@@ -63,6 +66,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     private var recognitionResultAccepted = false
     private var recognitionSpeechDetected = false
     private var recognitionBackend = RecognitionBackend.ON_DEVICE
+    private val backgroundConversationUpdates = BackgroundConversationUpdateQueue()
     private var pendingApproval: ApprovalRequest? = null
     private var floorEvents: EventSubscription? = null
     private var floorCursor = 0L
@@ -316,6 +320,31 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 .getString(RECOGNITION_BACKEND, null),
         )
         createNotificationChannel()
+        mediaSession = MediaSession(this, "VICConversation").apply {
+            setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS)
+            setCallback(object : MediaSession.Callback() {
+                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                    val event = mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                    if (event?.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return true
+                    if (event.keyCode in setOf(
+                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                            KeyEvent.KEYCODE_HEADSETHOOK,
+                            KeyEvent.KEYCODE_MEDIA_PLAY,
+                            KeyEvent.KEYCODE_MEDIA_PAUSE,
+                        )
+                    ) {
+                        handler.post {
+                            if (active) {
+                                if (paused) resumeSession()
+                                else pauseSession("Conversation paused from headphone button")
+                            }
+                        }
+                        return true
+                    }
+                    return super.onMediaButtonEvent(mediaButtonIntent)
+                }
+            })
+        }
         textToSpeech = TextToSpeech(this, this)
         runCatching {
             getSystemService(ConnectivityManager::class.java)
@@ -414,6 +443,9 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         textToSpeech = null
+        mediaSession?.isActive = false
+        mediaSession?.release()
+        mediaSession = null
         releaseWakeLock()
         floorEvents?.close()
         floorEvents = null
@@ -472,6 +504,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             return
         }
         startMicrophoneForeground(notification("Starting conversation", paused = false))
+        mediaSession?.isActive = true
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             pauseForConfigurationError("Microphone permission is required for Conversation Mode.")
             return
@@ -587,6 +620,9 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         releaseRecognizer()
         textToSpeech?.stop()
         ttsTerminalCompletionGate.reset()
+        mediaSession?.isActive = false
+        mediaSession?.release()
+        mediaSession = null
         releaseWakeLock()
         pendingApproval = null
         clearPendingTurn()
@@ -709,6 +745,13 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             }
             null -> Unit
         }
+        if (ConversationCommands.normalize(text) in setOf("read worker results", "read background updates", "what did the workers find")) {
+            val reports = backgroundConversationUpdates.drain()
+            val response = reports.joinToString(" ").ifBlank { "There are no background worker updates yet." }
+            publish(STATE_SPEAKING, transcript = text, response = response, provider = "hermes-subagent", detail = "Reading worker updates")
+            speakResponse(response)
+            return
+        }
         PlaybackSpeed.resolveCommand(text, currentSpeechRate())?.let { rate ->
             val resolved = PlaybackSpeed.clamp(rate)
             getSharedPreferences(PLAYBACK_PREFERENCES, MODE_PRIVATE)
@@ -740,7 +783,27 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         submitPendingTurn()
     }
 
+    private var acknowledgmentScheduled = false
+
     private fun submitPendingTurn() {
+        val queued = pendingTurn ?: return
+        if (!active || paused || requestInFlight || acknowledgmentScheduled) return
+        val acknowledgment = ConversationAcknowledgment.forRequest(queued.text)
+        acknowledgmentScheduled = true
+        publish(
+            STATE_PROCESSING,
+            transcript = queued.text,
+            response = acknowledgment.text,
+            detail = "Request received — preparing work",
+        )
+        speakResponse(acknowledgment.text)
+        handler.postDelayed({
+            acknowledgmentScheduled = false
+            submitPendingTurnCore()
+        }, ACKNOWLEDGMENT_DISPLAY_MILLIS)
+    }
+
+    private fun submitPendingTurnCore() {
         val queued = pendingTurn ?: return
         if (!active || paused || requestInFlight) return
         val requestGeneration = ++generation
@@ -1168,7 +1231,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                         event.payload.optString("session_id") == sessionId
                     ) {
                         val report = event.payload.optString("response_text").trim()
-                        if (report.isNotEmpty()) handler.post { deliverBackgroundReport(report) }
+                        if (report.isNotEmpty()) backgroundConversationUpdates.enqueue(event.id.toString(), report)
                     }
                 }
             },
@@ -1183,21 +1246,6 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         )
     }
 
-    private fun deliverBackgroundReport(report: String) {
-        if (!active || paused) return
-        if (requestInFlight || speaking) {
-            handler.postDelayed({ deliverBackgroundReport(report) }, 1_000L)
-            return
-        }
-        silencePolicy.markActivity()
-        publish(
-            STATE_SPEAKING,
-            response = report,
-            provider = "hermes-subagent",
-            detail = "VIC's project worker finished",
-        )
-        speakResponse(report)
-    }
 
     private data class ConversationSnapshot(
         val state: String,
@@ -1434,6 +1482,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         private const val SESSION_MAX_MILLIS = 30 * 60 * 1_000L
         private const val CONVERSATION_IDLE_TIMEOUT_MILLIS = 20_000L
         private const val SILENCE_RETRY_DELAY_MILLIS = 450L
+        private const val ACKNOWLEDGMENT_DISPLAY_MILLIS = 1_800L
         private const val LISTEN_AFTER_TTS_DELAY_MILLIS = 250L
         private const val INTERRUPTION_RESUME_DELAY_MILLIS = 900L
         private const val PHONE_AUDIO_RECHECK_MILLIS = 1_000L

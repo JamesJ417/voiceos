@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+use crate::CalendarSecretReference;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoogleCalendarConnection {
+    pub owner_id: String,
+    pub provider: String,
+    pub account_email: String,
+    pub provider_account_id: String,
+    #[serde(skip)]
+    pub secret_reference: Option<CalendarSecretReference>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -322,6 +334,35 @@ pub struct TaskDetail {
     pub artifacts: Vec<TaskArtifactRecord>,
     pub approvals: Vec<serde_json::Value>,
     pub activity: Vec<ExecutionEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskReviewRun {
+    pub id: String,
+    pub task_id: String,
+    pub status: String,
+    pub lease_expires_at: String,
+    pub safe_actions: Vec<String>,
+    pub blockers: Vec<String>,
+    pub ideas: Vec<String>,
+    pub summary: Option<String>,
+    pub error_code: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskReviewClaim {
+    pub review: TaskReviewRun,
+    pub task: TaskDetail,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskReviewSnapshot {
+    pub active_review: Option<TaskReviewRun>,
+    pub last_completed_review: Option<TaskReviewRun>,
+    pub recent_reviews: Vec<TaskReviewRun>,
+    pub cursor_task_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

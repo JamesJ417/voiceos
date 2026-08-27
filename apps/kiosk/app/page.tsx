@@ -85,11 +85,13 @@ type SkillUsage = { id: string; skill_id: string; skill_name: string; skill_vers
 type VicProject = { id: string; goal_id: string | null; title: string; status: string; created_at: string; updated_at: string };
 type TaskStep = { id: string; title: string; owner: "user" | "vic" | "shared"; status: string };
 type WorkflowStage = { key: string; label: string; owner: "USER" | "VIC" | "AGENT"; detail: string };
+type TaskHandoff = { id: string; task_id: string; from_owner: string; to_owner: string; kind: string; summary: string; status: string; created_at: string; completed_at: string | null };
 type TaskDetail = {
   task: { id: string; project_id: string | null; title: string; observable_outcome: string; status: string; estimated_minutes: number; due_at: string | null; importance: "low" | "normal" | "high" | "critical" };
   progress: { completed_steps: number; total_steps: number; open_blockers: number; lane: "needs_me" | "vic_working" | "review" | "shared"; vic_status: string; next_user_action?: string | null; next_vic_action?: string | null };
   steps: TaskStep[];
   blockers: Array<{ id: string; description: string; owner: string; status: string }>;
+  handoffs: TaskHandoff[];
   artifacts: Array<{ id: string; kind: string; uri: string; description: string }>;
   activity: Array<{ id?: string; event_type: string; payload: Record<string, unknown>; occurred_at: string }>;
 };
@@ -171,6 +173,7 @@ export default function Home() {
   const [pendingApproval, setPendingApproval] = useState<Approval | null>(null);
   const [agentWorkers, setAgentWorkers] = useState<AgentWorker[]>([]);
   const [agentActivity, setAgentActivity] = useState<AgentActivity[]>([]);
+  const [queuedWorkerUpdates, setQueuedWorkerUpdates] = useState<string[]>([]);
   const [skillProposals, setSkillProposals] = useState<SkillProposal[]>([]);
   const [skills, setSkills] = useState<SkillProposal[]>([]);
   const [skillUsages, setSkillUsages] = useState<SkillUsage[]>([]);
@@ -313,7 +316,13 @@ export default function Home() {
 
   const loadTasks = useCallback(async () => {
     const payload = await request<{ details?: TaskDetail[] }>("/v1/tasks?limit=100");
-    setTasks(payload.details ?? []);
+    // The list is the index; detail is authoritative for handoffs and evidence.
+    const listed = payload.details ?? [];
+    const details = await Promise.all(listed.map(async (item) => {
+      const response = await request<{ detail: TaskDetail }>(`/v1/tasks/${encodeURIComponent(item.task.id)}`);
+      return response.detail;
+    }));
+    setTasks(details);
   }, [request]);
 
   const loadProjects = useCallback(async () => {
@@ -644,7 +653,8 @@ export default function Home() {
                 detail: typeof event.payload.detail === "string" ? event.payload.detail : undefined,
               };
               setAgentWorkers((current) => [worker, ...current.filter((item) => item.id !== worker.id)].slice(0, 8));
-              setStatusMessage(worker.status === "running" ? `VIC worker active · ${worker.label}` : `VIC worker ${worker.status} · ${worker.label}`);
+              setStatusMessage(worker.status === "running" ? `Background worker active · ${worker.label}` : `Background worker ${worker.status} · ${worker.label}`);
+              setQueuedWorkerUpdates((current) => [...current, `${worker.label}: ${worker.detail ?? worker.status}`].slice(-20));
             }
             if (event.type === "agent.activity.updated") {
               const activitySession = String(event.payload.session_id ?? "");
@@ -661,7 +671,8 @@ export default function Home() {
                   : current;
                 return [activity, ...prior].slice(0, 8);
               });
-              setStatusMessage(activity.detail ? `${activity.label} · ${activity.detail}` : activity.label);
+              setStatusMessage(activity.detail ? `Background activity · ${activity.detail}` : "Background activity updated.");
+              setQueuedWorkerUpdates((current) => [...current, `${activity.label}: ${activity.detail ?? activity.phase}`].slice(-20));
             }
             if (event.type === "approval.proposed") {
               setPendingApproval({
@@ -1054,6 +1065,13 @@ export default function Home() {
   const floorIsRemote = Boolean(floor?.active && floor.holder_device_id && floor.holder_device_id !== thisDeviceId);
   const vicOverlayExpanded = overlayExpanded;
 
+  const readWorkerUpdates = () => {
+    if (!queuedWorkerUpdates.length) return;
+    setMessages((current) => [...current, { id: `background-${Date.now()}`, role: "VIC", body: `Background updates:\n${queuedWorkerUpdates.map((item) => `• ${item}`).join("\n")}`, meta: "Background worker report" }]);
+    setQueuedWorkerUpdates([]);
+    setStatusMessage("Background worker updates added to the transcript.");
+  };
+
   return (
     <main
       className="shell"
@@ -1109,6 +1127,7 @@ export default function Home() {
             <section className="conversation-panel panel">
               <div className="panel-heading"><div><p className="kicker">Continuous conversation</p><h2>Current thread</h2></div><span className="memory-pill">Memory active</span></div>
               <div className="conversation-list">{recentMessages.length ? recentMessages.map((message) => <MessageCard key={message.id} message={message} latestVic={message.id === latestVicMessageId} />) : <EmptyState text="Your phone and web conversations will appear here." />}</div>
+              {queuedWorkerUpdates.length > 0 && <div className="background-updates" aria-live="polite"><span>{queuedWorkerUpdates.length} queued background update{queuedWorkerUpdates.length === 1 ? "" : "s"}</span><button className="secondary-button" onClick={readWorkerUpdates}>Read worker updates</button></div>}
               <div className={`agent-activity ${agentActivity.length ? "has-activity" : "activity-idle"}`} aria-label="VIC live activity"><div className="agent-activity-title"><span className="thinking-pulse" /><strong>VIC activity</strong><small>Live progress, not private chain-of-thought</small></div>{agentActivity.length ? agentActivity.slice(0, 6).map((activity) => { const isTool = activity.phase.startsWith("tool."); const completed = activity.phase.endsWith("completed"); return <div className={`agent-activity-row ${isTool ? "tool-execution" : ""} ${completed ? "activity-complete" : "activity-running"}`} key={activity.id}>{isTool && <span className="tool-scan" aria-hidden="true" />}<span className="activity-glyph">{isTool ? "⌘" : activity.phase.startsWith("subagent.") ? "◇" : "✦"}</span><p><strong>{activity.label}</strong>{activity.detail && <small>{activity.detail}</small>}</p>{isTool && <span className="execution-state">{completed ? "done" : "called"}</span>}</div>; }) : <div className="activity-empty"><span className="activity-glyph">⌘</span><p><strong>{voiceState === "processing" ? "Connecting to Hermes…" : "Execution rail ready"}</strong><small>Tool calls and worker progress will appear here.</small></p><span className="execution-state">{voiceState === "processing" ? "waiting" : "idle"}</span></div>}</div>
               {agentWorkers.length > 0 && <section className="agent-worker-panel" aria-label="VIC background workers"><div className="agent-worker-heading"><span>◇</span><strong>Hermes subagents</strong><small>{agentWorkers.filter((worker) => worker.status === "running" || worker.status === "queued").length} active</small></div><div className="agent-worker-list">{agentWorkers.map((worker) => <div className={`agent-worker worker-${worker.status}`} key={worker.id}><span className={`status-dot ${worker.status === "failed" ? "offline" : ""}`} /><div><strong>{worker.label}</strong><small>{worker.detail ?? "Dispatched by VIC"}</small></div><span className="worker-state">{worker.status}</span></div>)}</div></section>}
               {pendingApproval && <div className="approval-card"><div><p className="kicker">Approval required</p><strong>{pendingApproval.tool}</strong><small>{pendingApproval.tool === "rig.root_command" ? "Administrative approval is restricted to the enrolled Pixel." : "VIC will not run this tool without your decision."}</small></div><button className="deny" onClick={() => void decideApproval(false)}>Deny</button><button className="approve" disabled={pendingApproval.tool === "rig.root_command"} onClick={() => void decideApproval(true)}>{pendingApproval.tool === "rig.root_command" ? "Approve on Pixel" : "Approve"}</button></div>}
@@ -1147,7 +1166,11 @@ export default function Home() {
           setStatusMessage(project ? `Task moved into ${project.title}.` : "Task moved back to Loose work.");
         }} />}
 
-        {view === "tasks" && <TaskBoard projects={projects} tasks={tasks} activity={agentActivity} filter={taskFilter} voiceOnly={voiceTouchOnly} onFilter={setTaskFilter} onRefresh={() => void Promise.all([loadProjects(), loadTasks()])} onAttention={async (taskId, input) => {
+        {view === "tasks" && <TaskBoard projects={projects} tasks={tasks} activity={agentActivity} filter={taskFilter} voiceOnly={voiceTouchOnly} onFilter={setTaskFilter} onRefresh={() => void Promise.all([loadProjects(), loadTasks()])} onStatus={async (taskId, status) => {
+          await request(`/v1/tasks/${encodeURIComponent(taskId)}/status`, { method: "POST", body: JSON.stringify({ status }) });
+          await Promise.all([loadTasks(), loadFocus()]);
+          setStatusMessage(`Task status changed to ${status}.`);
+        }} onAttention={async (taskId, input) => {
           await request(`/v1/tasks/${encodeURIComponent(taskId)}/attention`, { method: "POST", body: JSON.stringify(input) });
           await Promise.all([loadTasks(), loadFocus()]);
           setStatusMessage("VIC updated when this work should rise to the top.");
@@ -1351,6 +1374,11 @@ const WORKFLOW_STAGES: WorkflowStage[] = [
   { key: "close", label: "Close", owner: "USER", detail: "Review and confirm completion" },
 ];
 
+function currentOwner(detail: TaskDetail) {
+  const pending = [...detail.handoffs].reverse().find((handoff) => handoff.status === "pending");
+  return pending?.to_owner || (detail.progress.lane === "vic_working" ? "vic" : detail.progress.lane === "review" ? "user" : detail.progress.lane === "needs_me" ? "user" : "shared");
+}
+
 function currentWorkflowStage(detail: TaskDetail) {
   if (detail.progress.lane === "needs_me") return 0;
   if (detail.progress.lane === "review") return 5;
@@ -1409,7 +1437,7 @@ function ProjectTaskRow({ detail, projects, busy, onAssign }: { detail: TaskDeta
   return <article className="project-task-row"><div><strong>{detail.task.title}</strong><small>{detail.progress.lane.replaceAll("_", " ")} · {detail.task.estimated_minutes} min</small></div><label><span className="visually-hidden">Project for {detail.task.title}</span><select aria-label={`Project for ${detail.task.title}`} disabled={busy} value={detail.task.project_id ?? ""} onChange={(event) => void onAssign(detail.task.id, event.target.value || null)}><option value="">Loose work</option>{projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}</select></label></article>;
 }
 
-function TaskBoard({ projects, tasks, activity, filter, voiceOnly, onFilter, onRefresh, onAttention, onStart }: { projects: VicProject[]; tasks: TaskDetail[]; activity: AgentActivity[]; filter: "all" | "needs_me" | "vic_working" | "review"; voiceOnly: boolean; onFilter: (value: "all" | "needs_me" | "vic_working" | "review") => void; onRefresh: () => void; onAttention: (taskId: string, input: { due_at: string | null; importance: TaskDetail["task"]["importance"] }) => Promise<void>; onStart: (input: { title: string; observable_outcome: string; estimated_minutes: number; project_id?: string }) => Promise<void> }) {
+function TaskBoard({ projects, tasks, activity, filter, voiceOnly, onFilter, onRefresh, onAttention, onStatus, onStart }: { projects: VicProject[]; tasks: TaskDetail[]; activity: AgentActivity[]; filter: "all" | "needs_me" | "vic_working" | "review"; voiceOnly: boolean; onFilter: (value: "all" | "needs_me" | "vic_working" | "review") => void; onRefresh: () => void; onAttention: (taskId: string, input: { due_at: string | null; importance: TaskDetail["task"]["importance"] }) => Promise<void>; onStatus: (taskId: string, status: string) => Promise<void>; onStart: (input: { title: string; observable_outcome: string; estimated_minutes: number; project_id?: string }) => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [outcome, setOutcome] = useState("");
   const [minutes, setMinutes] = useState(20);
@@ -1453,9 +1481,15 @@ function TaskBoard({ projects, tasks, activity, filter, voiceOnly, onFilter, onR
       return <article className={`task-card lane-${detail.progress.lane}`} key={detail.task.id}>
         <div className="task-card-head"><span>{detail.progress.lane.replaceAll("_", " ")}</span><strong>{detail.progress.total_steps ? `${detail.progress.completed_steps}/${detail.progress.total_steps} steps` : "No steps"}</strong></div>
         <h3>{detail.task.title}</h3><p>{detail.task.observable_outcome}</p>
+        {!voiceOnly && <label className="task-status-control"><span>Status</span><select value={detail.task.status} onChange={(event) => void onStatus(detail.task.id, event.target.value)}><option value="inbox">Inbox</option><option value="ready">Ready</option><option value="active">Active</option><option value="blocked">Blocked</option><option value="completed">Completed</option></select></label>}
         <div className="task-workflow-strip" aria-label="Workflow stages">{WORKFLOW_STAGES.map((stage, stageIndex) => <span key={stage.key} className={`${stageIndex === currentWorkflowStage(detail) ? "active" : ""} workflow-${stage.owner.toLowerCase()}`} title={`${stage.owner}: ${stage.detail}`}>{stageIndex + 1} {stage.label}<small>{stage.owner}</small></span>)}</div>
-        <p className="task-ownership">Current owner: <strong>{WORKFLOW_STAGES[currentWorkflowStage(detail)].owner}</strong> · {WORKFLOW_STAGES[currentWorkflowStage(detail)].detail}</p>
-        <div className="task-handoff"><small>{detail.progress.lane === "vic_working" ? "VIC NEXT ACTION" : detail.progress.lane === "review" ? "READY FOR REVIEW" : "YOUR NEXT ACTION"}</small><strong>{detail.progress.lane === "vic_working" ? detail.progress.next_vic_action || "Continue safe work" : detail.progress.next_user_action || "Review with VIC"}</strong></div>
+        <p className="task-ownership">Current owner: <strong>{currentOwner(detail)}</strong>{detail.handoffs.length > 0 && <> · {detail.handoffs.filter((handoff) => handoff.status === "pending").length} pending handoff{detail.handoffs.filter((handoff) => handoff.status === "pending").length === 1 ? "" : "s"}</>}</p>
+        <div className="task-handoff"><small>{detail.progress.lane === "vic_working" ? "VIC NEXT ACTION" : detail.progress.lane === "review" ? "READY FOR REVIEW" : "YOUR NEXT ACTION"}</small><strong>{detail.progress.lane === "vic_working" ? detail.progress.next_vic_action || "Unavailable" : detail.progress.next_user_action || "Unavailable"}</strong></div>
+        <div className="task-detail-facts">
+          <section><small>BLOCKERS / UNBLOCK</small>{detail.blockers.filter((blocker) => blocker.status !== "resolved").length ? detail.blockers.filter((blocker) => blocker.status !== "resolved").map((blocker) => <p key={blocker.id}><strong>{blocker.owner}</strong> · {blocker.description}</p>) : <p className="muted">No open blockers recorded.</p>}</section>
+          <section><small>REVIEW HANDOFF</small>{detail.handoffs.length ? detail.handoffs.slice(-2).reverse().map((handoff) => <p key={handoff.id}><strong>{handoff.from_owner} → {handoff.to_owner}</strong> · {handoff.summary} <em>({handoff.status})</em></p>) : <p className="muted">No handoff recorded.</p>}</section>
+          <section><small>EVIDENCE / ACCEPTANCE</small><p><strong>{detail.artifacts.length}</strong> artifact{detail.artifacts.length === 1 ? "" : "s"} attached</p><p>{detail.task.observable_outcome || "Acceptance outcome unavailable."}</p></section>
+        </div>
         {(live.length > 0 || recorded.length > 0) && <div className="task-updates"><small>PROGRESS UPDATES</small>{live.map((item) => <div className="task-update live" key={item.id}><span className="thinking-pulse" /><p><strong>{item.label}</strong>{item.detail && <small>{item.detail}</small>}</p></div>)}{live.length === 0 && recorded.map((item, index) => <div className="task-update" key={item.id ?? `${item.occurred_at}-${index}`}><span>✓</span><p>{String(item.payload.summary ?? "VIC recorded progress")}</p></div>)}</div>}
         <div className="task-steps">{detail.steps.slice(0, 5).map((step) => <div key={step.id}><span>{step.status === "completed" ? "✓" : "○"}</span><p>{step.title}</p><small>{step.owner}</small></div>)}</div>
         <TaskAttentionEditor detail={detail} onSave={onAttention} />

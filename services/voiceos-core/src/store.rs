@@ -8,8 +8,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    AttachmentRecord, ChatMessage, ConversationContext, ConversationMessage, DocumentRecord,
-    Memory, QuarantineRecord, QuarantinedClaim, Role,
+    AttachmentRecord, CalendarSecretReference, CalendarSecretStore, CalendarSecretStoreError,
+    ChatMessage, ConversationContext, ConversationMessage, DocumentRecord,
+    GoogleCalendarConnection, Memory, QuarantineRecord, QuarantinedClaim, Role,
 };
 
 #[derive(Debug, Error)]
@@ -22,6 +23,14 @@ pub enum StoreError {
     InvalidInput(String),
     #[error("invalid stored JSON: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum CalendarSecretIntegrationError {
+    #[error("calendar connection metadata error")]
+    Store(#[from] StoreError),
+    #[error("calendar secret storage error")]
+    SecretStore(#[from] CalendarSecretStoreError),
 }
 
 pub struct ConversationStore {
@@ -151,6 +160,84 @@ impl ConversationStore {
         drop(connection);
         self.backfill_task_progress()?;
         Ok(())
+    }
+
+    pub fn google_calendar_connection_for_owner(
+        &self,
+        owner_id: &str,
+    ) -> Result<Option<GoogleCalendarConnection>, StoreError> {
+        let connection = self.connection()?;
+        Ok(connection
+            .query_row(
+                "SELECT owner_id, provider, account_email, provider_account_id, secret_reference FROM google_calendar_connections WHERE owner_id=?1",
+                [owner_id],
+                |row| {
+                    let secret_reference = row
+                        .get::<_, Option<String>>(4)?
+                        .map(CalendarSecretReference::try_from)
+                        .transpose()
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    Ok(GoogleCalendarConnection {
+                        owner_id: row.get(0)?,
+                        provider: row.get(1)?,
+                        account_email: row.get(2)?,
+                        provider_account_id: row.get(3)?,
+                        secret_reference,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn upsert_google_calendar_connection(
+        &self,
+        owner_id: &str,
+        provider: &str,
+        account_email: &str,
+        provider_account_id: &str,
+    ) -> Result<(), StoreError> {
+        let connection = self.connection()?;
+        connection.execute("INSERT INTO owners(owner_id,created_at,updated_at) VALUES(?1,?2,?2) ON CONFLICT(owner_id) DO UPDATE SET updated_at=excluded.updated_at", params![owner_id, Utc::now().to_rfc3339()])?;
+        connection.execute("INSERT INTO google_calendar_connections(owner_id,provider,account_email,provider_account_id,connected_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(owner_id) DO UPDATE SET provider=excluded.provider,account_email=excluded.account_email,provider_account_id=excluded.provider_account_id,connected_at=excluded.connected_at", params![owner_id,provider,account_email,provider_account_id,Utc::now().to_rfc3339()])?;
+        Ok(())
+    }
+
+    pub fn disconnect_google_calendar(&self, owner_id: &str) -> Result<bool, StoreError> {
+        Ok(self.connection()?.execute(
+            "DELETE FROM google_calendar_connections WHERE owner_id=?1",
+            [owner_id],
+        )? > 0)
+    }
+
+    pub fn set_google_calendar_secret_reference(
+        &self,
+        owner_id: &str,
+        reference: &CalendarSecretReference,
+    ) -> Result<(), StoreError> {
+        if self.connection()?.execute(
+            "UPDATE google_calendar_connections SET secret_reference=?1 WHERE owner_id=?2",
+            params![reference.as_str(), owner_id],
+        )? == 0
+        {
+            return Err(StoreError::InvalidInput(
+                "calendar connection does not exist for owner".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn disconnect_google_calendar_with_secret_store(
+        &self,
+        owner_id: &str,
+        secret_store: &dyn CalendarSecretStore,
+    ) -> Result<bool, CalendarSecretIntegrationError> {
+        let reference = self
+            .google_calendar_connection_for_owner(owner_id)?
+            .and_then(|connection| connection.secret_reference);
+        if let Some(reference) = reference {
+            secret_store.delete(owner_id, &reference)?;
+        }
+        Ok(self.disconnect_google_calendar(owner_id)?)
     }
 
     pub fn resolve_conversation(

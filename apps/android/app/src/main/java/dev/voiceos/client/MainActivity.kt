@@ -2183,7 +2183,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val cached = TaskWidgetStore.load(this)
         latestAiUpdates = AiUpdateStore.load(this)
         renderMomentumFeed(cached)
-        feedStatusView.text = if (cached.isEmpty()) "Refreshing your private cards…" else "Refreshing • showing saved tasks"
+        feedStatusView.text = if (cached.isEmpty()) "Refreshing your private cards…" else "Refreshing • checking today’s updates"
         feedStatusView.setTextColor(CarbonPalette.muted)
         refreshAiUpdates()
         GatewayClient.getTasks(
@@ -2264,15 +2264,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     private fun refreshAiUpdates() {
         if (aiUpdatesRefreshing) return
-        if (latestAiUpdates.isNotEmpty() && AiUpdateStore.isFresh(this)) return
         aiUpdatesRefreshing = true
         AiUpdateRepository.refresh { result ->
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 aiUpdatesRefreshing = false
                 result.onSuccess { updates ->
-                    latestAiUpdates = updates
-                    AiUpdateStore.save(this, updates)
+                    latestAiUpdates = AiUpdateModel.publishedToday(updates)
+                    AiUpdateStore.save(this, latestAiUpdates)
                 }
                 renderMomentumFeed(latestTasks)
                 if (result.isFailure && latestAiUpdates.isEmpty()) {

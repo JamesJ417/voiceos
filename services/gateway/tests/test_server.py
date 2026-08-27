@@ -22,6 +22,7 @@ from services.gateway.server import (
     _normalize_fieldy_webhook,
     _personal_extraction_prompt,
     _publish_agent_activity,
+    _publish_outreach_created,
     _render_conversation_context,
     _single_json_object,
     create_server,
@@ -538,6 +539,55 @@ Second result.
             )
             self.assertEqual(200, status)
             self.assertIn("providers", payload)
+        finally:
+            self.server.require_device_auth = False
+
+    def test_outreach_creation_is_mirrored_to_the_durable_bridge_inbox(self) -> None:
+        _publish_outreach_created(
+            self.audit_store,
+            {"id": "outreach-bridge-test", "owner_id": "vic", "title": "Ready"},
+        )
+        notifications = self.audit_store.list_bridge_notifications("vic", "any-device")
+        self.assertIn(
+            "outreach-bridge-test",
+            [
+                item["payload"]["id"]
+                for item in notifications
+                if "id" in item["payload"]
+            ],
+        )
+
+    def test_bridge_inbox_returns_only_the_authenticated_device_notifications(self) -> None:
+        code, _ = self.audit_store.create_enrollment_code()
+        credential = self.audit_store.exchange_enrollment_code(code, "Bridge Pixel")
+        self.assertIsNotNone(credential)
+        assert credential is not None
+        device_id = str(credential["device_id"])
+        self.audit_store.enqueue_bridge_notification(
+            owner_id="vic", device_id=device_id, payload={"title": "Bridge update"}
+        )
+        self.audit_store.enqueue_bridge_notification(
+            owner_id="vic", device_id="another-device", payload={"title": "Not for this device"}
+        )
+        self.audit_store.enqueue_bridge_notification(
+            owner_id="vic", payload={"title": "For every enrolled device"}
+        )
+        self.server.require_device_auth = True
+        try:
+            rejected, rejected_payload = self.request("GET", "/v1/bridge/inbox")
+            self.assertEqual(401, rejected)
+            self.assertEqual("device_authentication_required", rejected_payload["error"])
+
+            status, payload = self.request(
+                "GET",
+                "/v1/bridge/inbox",
+                headers={"Authorization": f"Bearer {credential['device_token']}"},
+            )
+            self.assertEqual(200, status)
+            self.assertEqual(
+                ["Bridge update", "For every enrolled device"],
+                [item["payload"]["title"] for item in payload["notifications"]],
+            )
         finally:
             self.server.require_device_auth = False
 
@@ -1393,9 +1443,11 @@ Second result.
 
         class FieldyExtractionCoordinator:
             allowed_tools: set[str] | None = None
+            provider: str | None = None
 
             def respond(self, _prompt: str, **kwargs: object) -> CoordinatedResponse:
                 self.allowed_tools = kwargs.get("allowed_tools")  # type: ignore[assignment]
+                self.provider = kwargs.get("provider")  # type: ignore[assignment]
                 return CoordinatedResponse(
                     provider="hermes",
                     text=json.dumps(
@@ -1445,6 +1497,7 @@ Second result.
             self.assertTrue(core.completed.wait(2))  # type: ignore[attr-defined]
             self.assertEqual("owner-a", core.seen["output"]["owner_id"])  # type: ignore[index,attr-defined]
             self.assertEqual(set(), coordinator.allowed_tools)
+            self.assertEqual("hermes-sync", coordinator.provider)
         finally:
             self.server.fieldy_auto_extract = original_auto_extract
             self.server.memory_url = original_memory_url

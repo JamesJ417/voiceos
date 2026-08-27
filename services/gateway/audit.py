@@ -117,6 +117,16 @@ class AuditStore:
                 );
                 CREATE INDEX IF NOT EXISTS client_events_created_idx
                     ON client_events(event_id, created_at);
+                CREATE TABLE IF NOT EXISTS bridge_notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id TEXT NOT NULL,
+                    device_id TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    acknowledged_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS bridge_notifications_scope_idx
+                    ON bridge_notifications(owner_id, device_id, acknowledged_at, id);
                 CREATE TABLE IF NOT EXISTS hermes_completion_imports (
                     session_id TEXT NOT NULL,
                     message_id INTEGER NOT NULL,
@@ -500,6 +510,29 @@ class AuditStore:
             event_id = self._append_client_event_locked(event_type, payload)
             self._client_event_condition.notify_all()
             return event_id
+
+    def enqueue_bridge_notification(
+        self, *, owner_id: str, device_id: str | None = None, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        created_at = _now()
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "INSERT INTO bridge_notifications(owner_id, device_id, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (owner_id, device_id, _json(payload), created_at),
+            )
+        return {"id": int(cursor.lastrowid), "owner_id": owner_id, "device_id": device_id,
+                "payload": payload, "created_at": created_at, "acknowledged_at": None}
+
+    def list_bridge_notifications(self, owner_id: str, device_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        safe_limit = min(max(int(limit), 1), 200)
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM bridge_notifications WHERE owner_id=? AND acknowledged_at IS NULL AND (device_id=? OR device_id IS NULL) ORDER BY id LIMIT ?",
+                (owner_id, device_id, safe_limit),
+            ).fetchall()
+        return [{"id": int(row["id"]), "owner_id": str(row["owner_id"]), "device_id": row["device_id"],
+                 "payload": json.loads(str(row["payload_json"])), "created_at": str(row["created_at"]),
+                 "acknowledged_at": row["acknowledged_at"]} for row in rows]
 
     def list_client_events(self, after: int = 0, limit: int = 100) -> list[dict[str, Any]]:
         safe_after = max(0, int(after))

@@ -140,6 +140,20 @@ pub(crate) async fn task_detail(
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "task_not_found"))
 }
 
+pub(crate) async fn claim_task_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<Value>> {
+    let device_id = authenticate(&state, &headers)?;
+    let claim = state
+        .store
+        .claim_next_task_review(&state.primary_owner_id, 600)
+        .map_err(store_error)?;
+    Ok(Json(
+        json!({"claim": claim, "actor": format!("device:{device_id}")}),
+    ))
+}
+
 pub(crate) async fn create_task(
     State(state): State<AppState>,
     headers: HeaderMap,

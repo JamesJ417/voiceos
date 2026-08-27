@@ -45,6 +45,31 @@ class ClientEventWaitTest(unittest.TestCase):
         self.assertEqual([], events)
         self.assertGreaterEqual(time.monotonic() - started_at, 0.04)
 
+    def test_bridge_inbox_is_durable_and_scoped_to_device(self) -> None:
+        notification = self.store.enqueue_bridge_notification(
+            owner_id="owner-1",
+            device_id="device-a",
+            payload={"title": "Hello", "body": "From cron"},
+        )
+        self.assertEqual(notification["device_id"], "device-a")
+        self.assertEqual(
+            [item["id"] for item in self.store.list_bridge_notifications("owner-1", "device-a")],
+            [notification["id"]],
+        )
+        self.assertEqual([], self.store.list_bridge_notifications("owner-1", "device-b"))
+
+    def test_bridge_inbox_survives_store_reopen(self) -> None:
+        self.store.enqueue_bridge_notification(
+            owner_id="owner-1", device_id="device-a", payload={"body": "persist"}
+        )
+        path = self.store.path
+        self.store.close()
+        reopened = AuditStore(path)
+        try:
+            self.assertEqual("persist", reopened.list_bridge_notifications("owner-1", "device-a")[0]["payload"]["body"])
+        finally:
+            reopened.close()
+
 
 if __name__ == "__main__":
     unittest.main()

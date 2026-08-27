@@ -44,6 +44,20 @@ class AiUpdateModelTest {
         assertEquals("3 DAYS AGO", AiUpdateModel.ageLabel(now - (3 * 86_400), now))
     }
 
+    @Test
+    fun publishedTodayDropsYesterdayAndUndatedItems() {
+        val now = 1_000_000L
+        val zone = java.time.ZoneId.systemDefault()
+        val startOfDay = java.time.Instant.ofEpochSecond(now).atZone(zone).toLocalDate().atStartOfDay(zone).toEpochSecond()
+        val updates = listOf(
+            update("today", "OpenAI", startOfDay),
+            update("yesterday", "OpenAI", startOfDay - 1),
+            update("unknown", "OpenAI", 0),
+        )
+
+        assertEquals(listOf("today"), AiUpdateModel.publishedToday(updates, now).map { it.stableId })
+    }
+
     private fun update(id: String, source: String, published: Long) = AiUpdate(
         stableId = id,
         source = source,

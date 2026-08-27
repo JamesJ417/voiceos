@@ -18,9 +18,11 @@ import kotlin.math.sin
 object CarbonPalette {
     val black = Color.rgb(6, 8, 9)
     val carbon = Color.rgb(11, 14, 16)
-    val surface = Color.rgb(18, 23, 26)
-    val surfaceRaised = Color.rgb(24, 30, 34)
-    val line = Color.rgb(42, 52, 56)
+    // A slightly lifted neutral base keeps the dark theme feeling polished
+    // instead of flat, while preserving the existing carbon/teal identity.
+    val surface = Color.rgb(20, 26, 29)
+    val surfaceRaised = Color.rgb(29, 37, 41)
+    val line = Color.rgb(52, 64, 68)
     val teal = Color.rgb(53, 224, 193)
     val cyan = Color.rgb(69, 207, 228)
     val green = Color.rgb(74, 222, 128)
@@ -226,7 +228,7 @@ fun carbonPanel(context: Context, strokeColor: Int = CarbonPalette.line): Drawab
         GradientDrawable.Orientation.TL_BR,
         intArrayOf(CarbonPalette.surfaceRaised, CarbonPalette.surface),
     ).apply {
-        cornerRadius = context.resources.displayMetrics.density * 20f
+        cornerRadius = context.resources.displayMetrics.density * 24f
         setStroke((context.resources.displayMetrics.density).toInt().coerceAtLeast(1), strokeColor)
     }
 
@@ -235,7 +237,7 @@ fun carbonControl(context: Context, accent: Int, filled: Boolean = false): Drawa
         GradientDrawable.Orientation.TL_BR,
         if (filled) intArrayOf(accent, darken(accent)) else intArrayOf(CarbonPalette.surfaceRaised, CarbonPalette.surface),
     ).apply {
-        cornerRadius = context.resources.displayMetrics.density * 14f
+        cornerRadius = context.resources.displayMetrics.density * 16f
         setStroke((context.resources.displayMetrics.density).toInt().coerceAtLeast(1), if (filled) darken(accent) else CarbonPalette.line)
     }
 

@@ -3,8 +3,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use voiceos_core::{
-    CodexBridgeProvider, ConversationEngine, ConversationStore, MockProvider, OllamaProvider,
-    ProviderRouter, RoutingPolicy,
+    CodexBridgeProvider, ConversationEngine, ConversationStore, GoogleCalendarOAuthConfiguration,
+    MockProvider, OllamaProvider, ProviderRouter, RoutingPolicy, SecretToolCalendarSecretStore,
 };
 use voiceos_ontology::{Interpreter, OntologyStore};
 
@@ -59,8 +59,16 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
     } else {
         ontology
     };
+    let google_calendar_oauth_configuration_error = GoogleCalendarOAuthConfiguration::new(
+        env::var("VOICEOS_GOOGLE_CALENDAR_CLIENT_ID").ok(),
+        env::var("VOICEOS_GOOGLE_CALENDAR_REDIRECT_URI").ok(),
+    )
+    .validate()
+    .err();
     Ok(AppState {
         store,
+        calendar_secret_store: Arc::new(SecretToolCalendarSecretStore::new()),
+        google_calendar_oauth_configuration_error,
         engine,
         router,
         ontology: Arc::new(ontology),
