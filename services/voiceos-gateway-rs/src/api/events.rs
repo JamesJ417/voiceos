@@ -67,56 +67,6 @@ fn client_event(event: ExecutionEvent) -> Option<Value> {
     Some(result)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::client_event;
-    use serde_json::json;
-    use voiceos_core::ExecutionEvent;
-
-    fn event(event_type: &str, payload: serde_json::Value) -> ExecutionEvent {
-        ExecutionEvent {
-            id: 7,
-            owner_id: "owner".into(),
-            stream_id: "stream".into(),
-            event_type: event_type.into(),
-            actor: "vic".into(),
-            payload,
-            occurred_at: "now".into(),
-        }
-    }
-
-    #[test]
-    fn background_events_are_non_interrupting_and_preserve_origin_metadata() {
-        let value = client_event(event(
-            "agent.worker.updated",
-            json!({"session_id":"s-1", "turn_id":"t-2"}),
-        ))
-        .unwrap();
-        assert_eq!(
-            value["delivery"],
-            json!({"channel":"background", "attention":"none", "interrupt_audio":false})
-        );
-        assert_eq!(value["session_id"], "s-1");
-        assert_eq!(value["turn_id"], "t-2");
-    }
-
-    #[test]
-    fn conversation_and_approval_attention_remains_distinct() {
-        assert_eq!(
-            client_event(event("conversation.turn", json!({}))).unwrap()["delivery"]["channel"],
-            "conversation"
-        );
-        assert_eq!(
-            client_event(event("conversation.floor.changed", json!({}))).unwrap()["delivery"]["attention"],
-            "floor"
-        );
-        assert_eq!(
-            client_event(event("approval.proposed", json!({}))).unwrap()["delivery"]["attention"],
-            "approval"
-        );
-    }
-}
-
 pub(crate) async fn recovery(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -193,4 +143,54 @@ pub(crate) async fn stream(
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::client_event;
+    use serde_json::json;
+    use voiceos_core::ExecutionEvent;
+
+    fn event(event_type: &str, payload: serde_json::Value) -> ExecutionEvent {
+        ExecutionEvent {
+            id: 7,
+            owner_id: "owner".into(),
+            stream_id: "stream".into(),
+            event_type: event_type.into(),
+            actor: "vic".into(),
+            payload,
+            occurred_at: "now".into(),
+        }
+    }
+
+    #[test]
+    fn background_events_are_non_interrupting_and_preserve_origin_metadata() {
+        let value = client_event(event(
+            "agent.worker.updated",
+            json!({"session_id":"s-1", "turn_id":"t-2"}),
+        ))
+        .unwrap();
+        assert_eq!(
+            value["delivery"],
+            json!({"channel":"background", "attention":"none", "interrupt_audio":false})
+        );
+        assert_eq!(value["session_id"], "s-1");
+        assert_eq!(value["turn_id"], "t-2");
+    }
+
+    #[test]
+    fn conversation_and_approval_attention_remains_distinct() {
+        assert_eq!(
+            client_event(event("conversation.turn", json!({}))).unwrap()["delivery"]["channel"],
+            "conversation"
+        );
+        assert_eq!(
+            client_event(event("conversation.floor.changed", json!({}))).unwrap()["delivery"]["attention"],
+            "floor"
+        );
+        assert_eq!(
+            client_event(event("approval.proposed", json!({}))).unwrap()["delivery"]["attention"],
+            "approval"
+        );
+    }
 }
