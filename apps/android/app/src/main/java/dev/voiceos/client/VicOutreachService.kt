@@ -93,6 +93,7 @@ class VicOutreachService : Service() {
         val shownKey = "shown:${outreach.id}"
         if (preferences.getBoolean(shownKey, false)) return
         preferences.edit().putBoolean(shownKey, true).apply()
+        BackgroundMessageStore(this).add(outreach.id, outreach.body)
         VicOutreachNotifications.show(this, outreach)
         GatewayClient.actOnOutreach(
             GatewaySettings.baseUrl(this), DeviceCredentials.token(this),
@@ -173,10 +174,11 @@ object VicOutreachNotifications {
             "needs_you" -> CHANNEL_NEEDS_YOU
             else -> CHANNEL_CHECK_IN
         }
-        val talk = actionIntent(context, outreach, "talk_now", MainActivity.ACTION_VIC_TALK, 1)
-        val progress = actionIntent(context, outreach, "show_progress", MainActivity.ACTION_VIC_SHOW_PROGRESS, 2)
-        val later = actionIntent(context, outreach, "later", ACTION_LATER, 3)
-        val dismiss = actionIntent(context, outreach, "dismiss", ACTION_DISMISS, 4)
+        val messages = actionIntent(context, outreach, "open_messages", MainActivity.ACTION_VIC_MESSAGES, 1)
+        val talk = actionIntent(context, outreach, "talk_now", MainActivity.ACTION_VIC_TALK, 2)
+        val progress = actionIntent(context, outreach, "show_progress", MainActivity.ACTION_VIC_SHOW_PROGRESS, 3)
+        val later = actionIntent(context, outreach, "later", ACTION_LATER, 4)
+        val dismiss = actionIntent(context, outreach, "dismiss", ACTION_DISMISS, 5)
         val publicVersion = Notification.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_mic)
             .setContentTitle("VIC wants to talk")
@@ -187,12 +189,13 @@ object VicOutreachNotifications {
             .setContentTitle(outreach.title)
             .setContentText(outreach.body)
             .setStyle(Notification.BigTextStyle().bigText(outreach.body).setSummaryText(outreach.reason))
-            .setContentIntent(talk)
+            .setContentIntent(messages)
             .setDeleteIntent(dismiss)
             .setAutoCancel(true)
             .setCategory(Notification.CATEGORY_MESSAGE)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion)
+            .addAction(Notification.Action.Builder(null, "Messages", messages).build())
             .addAction(Notification.Action.Builder(null, "Talk now", talk).build())
             .addAction(Notification.Action.Builder(null, "Show progress", progress).build())
             .addAction(Notification.Action.Builder(null, "Later", later).build())
@@ -234,14 +237,21 @@ class VicOutreachActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val outreachId = intent.getStringExtra(VicOutreachNotifications.EXTRA_OUTREACH_ID) ?: return
         val serverAction = intent.getStringExtra(VicOutreachNotifications.EXTRA_SERVER_ACTION) ?: return
-        val pending = goAsync()
-        GatewayClient.actOnOutreach(
-            GatewaySettings.baseUrl(context), DeviceCredentials.token(context), outreachId,
-            serverAction, if (serverAction == "later") 30 else null,
-        ) { pending.finish() }
+        if (serverAction != "open_messages") {
+            val pending = goAsync()
+            GatewayClient.actOnOutreach(
+                GatewaySettings.baseUrl(context), DeviceCredentials.token(context), outreachId,
+                serverAction, if (serverAction == "later") 30 else null,
+            ) { pending.finish() }
+        }
         context.getSystemService(NotificationManager::class.java)
             .cancel(intent.getIntExtra(VicOutreachNotifications.EXTRA_NOTIFICATION_ID, outreachId.hashCode()))
-        if (intent.action == MainActivity.ACTION_VIC_TALK || intent.action == MainActivity.ACTION_VIC_SHOW_PROGRESS) {
+        if (intent.action in setOf(
+                MainActivity.ACTION_VIC_MESSAGES,
+                MainActivity.ACTION_VIC_TALK,
+                MainActivity.ACTION_VIC_SHOW_PROGRESS,
+            )
+        ) {
             context.startActivity(Intent(context, MainActivity::class.java).apply {
                 action = intent.action
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP

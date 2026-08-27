@@ -15,6 +15,10 @@ class GatewayTimeoutPolicyTest {
         assertEquals(90_000, GatewayTimeoutPolicy.DEFAULT_READ_MILLIS)
         assertEquals(420_000, GatewayTimeoutPolicy.LONG_TURN_READ_MILLIS)
         assertTrue(GatewayTimeoutPolicy.LONG_TURN_READ_MILLIS > 360_000)
+        assertEquals(
+            GatewayTimeoutPolicy.LONG_TURN_READ_MILLIS.toLong(),
+            GatewayTimeoutPolicy.CONVERSATION_TURN_WATCHDOG_MILLIS,
+        )
     }
 
     @Test

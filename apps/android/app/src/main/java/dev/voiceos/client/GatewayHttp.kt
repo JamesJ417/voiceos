@@ -11,6 +11,7 @@ import kotlin.math.min
 internal object GatewayTimeoutPolicy {
     const val DEFAULT_READ_MILLIS = 90_000
     const val LONG_TURN_READ_MILLIS = 420_000
+    const val CONVERSATION_TURN_WATCHDOG_MILLIS = LONG_TURN_READ_MILLIS.toLong()
 }
 
 internal object GatewayTransportPolicy {

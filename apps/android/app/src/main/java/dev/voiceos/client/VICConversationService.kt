@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.net.Uri
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
@@ -91,6 +92,12 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
 
     private val listenRunnable = Runnable { beginListening() }
     private val turnRetryRunnable = Runnable { submitPendingTurn() }
+    private val turnWatchdog = Runnable {
+        if (active && !paused && requestInFlight && pendingTurn != null) {
+            Log.e(TAG, "event=gateway_turn_watchdog_timeout")
+            handleTurnFailure(pendingTurn!!, java.io.IOException("Gateway turn timed out"))
+        }
+    }
     private val recognitionQuietTimeout = Runnable {
         requestRecognitionFinalization(RecognitionWatchdogPolicy.PARTIAL_QUIET_REASON)
     }
@@ -783,24 +790,15 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         submitPendingTurn()
     }
 
-    private var acknowledgmentScheduled = false
-
     private fun submitPendingTurn() {
         val queued = pendingTurn ?: return
-        if (!active || paused || requestInFlight || acknowledgmentScheduled) return
-        val acknowledgment = ConversationAcknowledgment.forRequest(queued.text)
-        acknowledgmentScheduled = true
+        if (!active || paused || requestInFlight) return
         publish(
             STATE_PROCESSING,
             transcript = queued.text,
-            response = acknowledgment.text,
-            detail = "Request received — preparing work",
+            detail = "VIC is thinking",
         )
-        speakResponse(acknowledgment.text)
-        handler.postDelayed({
-            acknowledgmentScheduled = false
-            submitPendingTurnCore()
-        }, ACKNOWLEDGMENT_DISPLAY_MILLIS)
+        submitPendingTurnCore()
     }
 
     private fun submitPendingTurnCore() {
@@ -822,6 +820,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             requestId = queued.requestId,
         ) { result ->
             handler.post {
+                handler.removeCallbacks(turnWatchdog)
                 if (!active || requestGeneration != generation) return@post
                 result.fold(
                     onSuccess = { turn ->
@@ -850,6 +849,8 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 )
             }
         }
+        handler.removeCallbacks(turnWatchdog)
+        handler.postDelayed(turnWatchdog, GatewayTimeoutPolicy.CONVERSATION_TURN_WATCHDOG_MILLIS)
     }
 
     private fun handlePendingApproval(text: String): Boolean {
@@ -1231,7 +1232,14 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                         event.payload.optString("session_id") == sessionId
                     ) {
                         val report = event.payload.optString("response_text").trim()
-                        if (report.isNotEmpty()) backgroundConversationUpdates.enqueue(event.id.toString(), report)
+                        if (report.isNotEmpty()) {
+                            val stableId = BackgroundMessagePipeline.stableId(event)
+                            backgroundConversationUpdates.enqueue(stableId, report)
+                            if (BackgroundMessageStore(this@VICConversationService).add(stableId, report) &&
+                                BackgroundMessagePipeline.shouldNotify(activeConversation = active, alreadyDelivered = false)) {
+                                postBackgroundNotification(report)
+                            }
+                        }
                     }
                 }
             },
@@ -1344,8 +1352,19 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
             }
         )
+        val sound = Uri.parse("android.resource://$packageName/${R.raw.vic_checkin}")
+        getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("vic_messages", "VIC Messages", NotificationManager.IMPORTANCE_DEFAULT).apply {
+            setSound(sound, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build())
+        })
     }
 
+    private fun postBackgroundNotification(text: String) {
+        val intent = PendingIntent.getActivity(this, 820, Intent(this, MainActivity::class.java).apply {
+            action = MainActivity.ACTION_VIC_MESSAGES
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        getSystemService(NotificationManager::class.java).notify(820, Notification.Builder(this, "vic_messages").setSmallIcon(R.mipmap.ic_launcher).setContentTitle("VIC check-in").setContentText(text).setContentIntent(intent).setAutoCancel(true).build())
+    }
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) return
         val manager = getSystemService(PowerManager::class.java)
@@ -1482,7 +1501,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         private const val SESSION_MAX_MILLIS = 30 * 60 * 1_000L
         private const val CONVERSATION_IDLE_TIMEOUT_MILLIS = 20_000L
         private const val SILENCE_RETRY_DELAY_MILLIS = 450L
-        private const val ACKNOWLEDGMENT_DISPLAY_MILLIS = 1_800L
+
         private const val LISTEN_AFTER_TTS_DELAY_MILLIS = 250L
         private const val INTERRUPTION_RESUME_DELAY_MILLIS = 900L
         private const val PHONE_AUDIO_RECHECK_MILLIS = 1_000L

@@ -48,7 +48,7 @@ import java.util.UUID
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private enum class VoiceState { READY, STARTING, LISTENING, PROCESSING, SPEAKING, ERROR }
-    private enum class AppPage { FEED, COMMAND, TASKS, HISTORY, SYSTEM }
+    private enum class AppPage { FEED, MESSAGES, COMMAND, TASKS, HISTORY, SYSTEM }
     private enum class TaskFilter { TODAY, NEEDS_YOU, PROJECTS, VIC_WORKING, WINS }
 
     private lateinit var statusView: TextView
@@ -75,6 +75,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var taskContainer: LinearLayout
     private lateinit var feedStatusView: TextView
     private lateinit var feedContainer: LinearLayout
+    private lateinit var messagesContainer: LinearLayout
     private lateinit var ttsStatusView: TextView
     private lateinit var voiceButton: Button
     private lateinit var rootScroll: ScrollView
@@ -124,6 +125,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var conversationPaused = false
     private var conversationReceiverRegistered = false
     private var currentTaskFilter = TaskFilter.TODAY
+    private var jobsBoardVisible = false
     private var selectedTaskId: String? = null
     private var latestTasks: List<VoiceTask> = emptyList()
     private var latestAiUpdates: List<AiUpdate> = emptyList()
@@ -548,22 +550,33 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             gravity = Gravity.CENTER
         }
         val feedNav = navChip("FEED", true)
+        val messagesNav = navChip("MESSAGES 0", false)
         val commandNav = navChip("TALK", false)
-        val tasksNav = navChip("TASKS", false)
+        val tasksNav = navChip("JOBS", false)
         val historyNav = navChip("HISTORY", false)
         val systemNav = navChip("SYSTEM", false)
         navViews.clear()
         navViews[AppPage.FEED] = feedNav
+        navViews[AppPage.MESSAGES] = messagesNav
         navViews[AppPage.COMMAND] = commandNav
         navViews[AppPage.TASKS] = tasksNav
         navViews[AppPage.HISTORY] = historyNav
         navViews[AppPage.SYSTEM] = systemNav
         navigation.addView(feedNav, weightedButton())
+        navigation.addView(messagesNav, weightedButton().apply { marginStart = dp(5) })
         navigation.addView(commandNav, weightedButton().apply { marginStart = dp(5) })
         navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(5) })
         navigation.addView(historyNav, weightedButton().apply { marginStart = dp(5) })
         navigation.addView(systemNav, weightedButton().apply { marginStart = dp(5) })
         content.addView(navigation, fullWidthWrap().apply { topMargin = dp(18) })
+
+        val messagesPage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(heading("Messages", 30f), fullWidthWrap().apply { topMargin = dp(24) })
+            addView(TextView(this@MainActivity).apply { text = "Background VIC check-ins stay here until you choose to read or listen."; setTextColor(CarbonPalette.muted); textSize = 13f }, fullWidthWrap().apply { topMargin = dp(6) })
+            messagesContainer = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+            addView(messagesContainer, fullWidthWrap().apply { topMargin = dp(14) })
+        }
 
         val feedPage = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -872,7 +885,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     orientation = LinearLayout.VERTICAL
                 }
                 addView(taskContainer, fullWidthWrap().apply { topMargin = dp(8) })
-                addView(secondaryButton("REFRESH TASKS") { loadTasks() }, fullWidthWrap().apply { topMargin = dp(14) })
+                    addView(LinearLayout(this@MainActivity).apply {
+                        orientation = LinearLayout.HORIZONTAL
+                        addView(secondaryButton("JOBS BOARD") {
+                            jobsBoardVisible = !jobsBoardVisible
+                            renderTasks(latestTasks)
+                        }, weightedButton())
+                        addView(secondaryButton("REFRESH TASKS") { loadTasks() }, weightedButton().apply { marginStart = dp(7) })
+                    }, fullWidthWrap().apply { topMargin = dp(14) })
             }, fullWidthWrap().apply { topMargin = dp(18) })
         }
 
@@ -972,21 +992,25 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         pageViews.clear()
         pageViews[AppPage.FEED] = feedPage
+        pageViews[AppPage.MESSAGES] = messagesPage
         pageViews[AppPage.COMMAND] = commandPage
         pageViews[AppPage.TASKS] = tasksPage
         pageViews[AppPage.HISTORY] = historyPage
         pageViews[AppPage.SYSTEM] = systemPage
         content.addView(feedPage, fullWidthWrap())
+        content.addView(messagesPage, fullWidthWrap())
         content.addView(commandPage, fullWidthWrap())
         content.addView(tasksPage, fullWidthWrap())
         content.addView(historyPage, fullWidthWrap())
         content.addView(systemPage, fullWidthWrap())
 
         feedNav.setOnClickListener { showPage(AppPage.FEED) }
+        messagesNav.setOnClickListener { showPage(AppPage.MESSAGES) }
         commandNav.setOnClickListener { showPage(AppPage.COMMAND) }
         tasksNav.setOnClickListener { showPage(AppPage.TASKS) }
         historyNav.setOnClickListener { showPage(AppPage.HISTORY) }
         systemNav.setOnClickListener { showPage(AppPage.SYSTEM) }
+        refreshMessages()
 
         rootScroll = ScrollView(this).apply {
             isFillViewport = true
@@ -1046,25 +1070,21 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun handlePrimaryAction() {
+        // The primary talk control always enters the continuous conversation flow.
+        // Once active, its label and action remain an explicit pause/resume control.
         if (conversationActive) {
             if (conversationPaused) resumeConversationMode() else pauseConversationMode()
             return
         }
-        when (voiceState) {
-            VoiceState.LISTENING, VoiceState.STARTING -> {
-                speechRecognizer?.stopListening()
-                renderState(VoiceState.PROCESSING, "Finishing transcript")
-            }
-            VoiceState.PROCESSING -> cancelCurrentAction()
-            VoiceState.SPEAKING -> {
-                textToSpeech?.stop()
-                ensurePermissionAndStart(correction = false)
-            }
-            VoiceState.READY, VoiceState.ERROR -> ensurePermissionAndStart(correction = false)
-        }
+        startConversationMode()
     }
 
     private fun startFromWidgetIfRequested(intent: Intent?) {
+        if (intent?.action == ACTION_VIC_MESSAGES) {
+            intent.action = null
+            showPage(AppPage.MESSAGES)
+            return
+        }
         if (intent?.action == ACTION_CONFIRM_END_CONVERSATION) {
             intent.action = null
             showPage(AppPage.COMMAND)
@@ -1358,6 +1378,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     eventReconnectAttempt = 0
                     renderAgentVisibility()
                     when (event.type) {
+                        "background.message.created" -> {
+                            val id = event.payload.optString("message_id", BackgroundMessagePipeline.stableId(event))
+                            val text = event.payload.optString("text", event.payload.optString("response_text")).trim()
+                            if (text.isNotBlank()) BackgroundMessageStore(this).add(id, text)
+                            refreshMessages()
+                        }
                         "conversation.turn" -> if (currentPage == AppPage.HISTORY) loadHistory()
                         "conversation.floor.changed" -> {
                             val floorValue = event.payload.optJSONObject("floor")
@@ -2169,12 +2195,30 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         rootScroll.post { rootScroll.smoothScrollTo(0, 0) }
         if (page == AppPage.FEED) loadMomentumFeed()
+        if (page == AppPage.MESSAGES) refreshMessages()
         if (page == AppPage.COMMAND) refreshAgentVisibility()
         if (page == AppPage.TASKS) loadTasks()
         if (page == AppPage.HISTORY) loadHistory()
         if (page == AppPage.SYSTEM) {
             checkGatewayHealth(justEnrolled = false)
             loadSkillProposals()
+        }
+    }
+
+    private fun refreshMessages() {
+        if (!::messagesContainer.isInitialized) return
+        val messages = BackgroundMessageStore(this).messages()
+        navViews[AppPage.MESSAGES]?.text = "MESSAGES ${messages.count { !it.read }}"
+        messagesContainer.removeAllViews()
+        if (messages.isEmpty()) { messagesContainer.addView(TextView(this).apply { text = "No background messages yet."; setTextColor(CarbonPalette.muted) }); return }
+        messages.forEach { message ->
+            val row = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), dp(14), dp(14), dp(14)); background = carbonPanel(this@MainActivity) }
+            row.addView(TextView(this).apply { text = message.text; setTextColor(CarbonPalette.white); textSize = 15f })
+            row.addView(LinearLayout(this).apply {
+                addView(secondaryButton(if (message.read) "READ" else "MARK READ") { BackgroundMessageStore(this@MainActivity).markRead(message.id); refreshMessages() }, weightedButton())
+                addView(secondaryButton("LISTEN") { BackgroundMessageStore(this@MainActivity).markRead(message.id); refreshMessages(); speak(message.text, "background-${message.id}") }, weightedButton().apply { marginStart = dp(8) })
+            }, fullWidthWrap().apply { topMargin = dp(10) })
+            messagesContainer.addView(row, fullWidthWrap().apply { topMargin = dp(8) })
         }
     }
 
@@ -2552,6 +2596,26 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun renderTasks(tasks: List<VoiceTask>, preserveStatus: Boolean = false) {
         latestTasks = tasks
         taskContainer.removeAllViews()
+        if (jobsBoardVisible) {
+            taskListControls.visibility = View.GONE
+            val grouped = JobBoardModel.cards(tasks).groupBy { it.lane }
+            JobBoardModel.cards(tasks).map { it.lane }.distinct().forEach { lane ->
+                taskContainer.addView(TextView(this).apply {
+                    text = "${JobBoardModel.laneLabel(lane)}  •  ${grouped[lane].orEmpty().size}"
+                    textSize = 18f
+                    setTextColor(CarbonPalette.white)
+                }, fullWidthWrap().apply { topMargin = dp(10) })
+                grouped[lane].orEmpty().forEach { card ->
+                    taskContainer.addView(taskPanel(12).apply {
+                        addView(TextView(this@MainActivity).apply { text = JobBoardModel.format(card); textSize = 14f; setTextColor(CarbonPalette.white) }, fullWidthWrap())
+                    }, fullWidthWrap().apply { topMargin = dp(7) })
+                }
+            }
+            if (tasks.isEmpty()) taskContainer.addView(TextView(this).apply { text = "No authoritative jobs returned."; setTextColor(CarbonPalette.muted) }, fullWidthWrap())
+            taskStatusView.text = "${tasks.size} authoritative jobs • read-only board"
+            taskStatusView.setTextColor(CarbonPalette.teal)
+            return
+        }
         val openTasks = tasks.filter { it.status !in setOf("completed", "cancelled") }
         val selectedTask = selectedTaskId?.let { selectedId -> tasks.firstOrNull { it.id == selectedId } }
         if (selectedTask != null) {
@@ -3951,6 +4015,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         const val ACTION_DAILY_CHECKIN = "dev.voiceos.client.action.DAILY_CHECKIN"
         const val ACTION_SCRIPTURE_REFLECTION = "dev.voiceos.client.action.SCRIPTURE_REFLECTION"
         const val ACTION_VIC_TALK = "dev.voiceos.client.action.VIC_TALK"
+        const val ACTION_VIC_MESSAGES = "dev.voiceos.client.action.VIC_MESSAGES"
         const val ACTION_VIC_SHOW_PROGRESS = "dev.voiceos.client.action.VIC_SHOW_PROGRESS"
         const val ACTION_VIC_TEST_CHECKIN = "dev.voiceos.client.action.VIC_TEST_CHECKIN"
         const val ACTION_CONFIRM_END_CONVERSATION =
