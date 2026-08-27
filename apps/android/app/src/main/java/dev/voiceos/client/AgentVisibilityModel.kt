@@ -25,9 +25,10 @@ data class AgentWorkerItem(
     val taskImportance: String? = null,
     val completedSteps: Int = 0,
     val totalSteps: Int = 0,
+    val updatedAt: String? = null,
 )
 
-class AgentVisibilityModel(private val limit: Int = 8) {
+class AgentVisibilityModel(private val limit: Int = 100) {
     private val recentActivity = mutableListOf<AgentActivityItem>()
     private val recentWorkers = mutableListOf<AgentWorkerItem>()
 

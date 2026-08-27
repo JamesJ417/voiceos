@@ -140,7 +140,7 @@ data class BridgeNotification(
     val createdAt: String,
 )
 
-data class ClientEvent(val id: Long, val type: String, val payload: JSONObject)
+data class ClientEvent(val id: Long, val type: String, val payload: JSONObject, val createdAt: String? = null)
 
 data class EventRecovery(
     val latestEventId: Long,
@@ -301,6 +301,7 @@ object GatewayClient {
                                         event.getLong("id"),
                                         event.getString("type"),
                                         event.optJSONObject("payload") ?: JSONObject(),
+                                        event.optString("created_at").takeIf { it.isNotBlank() },
                                     )
                                 )
                                 data = null
@@ -721,6 +722,7 @@ object GatewayClient {
                             id = event.optLong("id", 0L),
                             type = event.optString("type"),
                             payload = event.optJSONObject("payload") ?: JSONObject(),
+                            createdAt = event.optString("created_at").takeIf { it.isNotBlank() },
                         )
                     )
                 }

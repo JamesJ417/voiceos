@@ -48,7 +48,7 @@ import java.util.UUID
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private enum class VoiceState { READY, STARTING, LISTENING, PROCESSING, SPEAKING, ERROR }
-    private enum class AppPage { FEED, MESSAGES, COMMAND, TASKS, HISTORY, SYSTEM }
+    private enum class AppPage { FEED, MESSAGES, COMMAND, TASKS, WORKER_JOBS, HISTORY, SYSTEM }
     private enum class TaskFilter { TODAY, NEEDS_YOU, PROJECTS, VIC_WORKING, WINS }
 
     private lateinit var statusView: TextView
@@ -64,6 +64,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var agentActivityContainer: LinearLayout
     private lateinit var agentWorkerStatusView: TextView
     private lateinit var agentWorkerContainer: LinearLayout
+    private lateinit var workerJobsPage: LinearLayout
+    private lateinit var workerJobsContainer: LinearLayout
     private lateinit var skillProposalStatusView: TextView
     private lateinit var skillProposalContainer: LinearLayout
     private lateinit var skillCatalogStatusView: TextView
@@ -80,6 +82,10 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var voiceButton: Button
     private lateinit var rootScroll: ScrollView
     private lateinit var talkButton: HexTalkButton
+    private lateinit var rambleButton: Button
+    private val voiceOwnership = VoiceOwnership()
+    private var voiceMode = VoiceInteractionMode.NONE
+    private val rambleTranscript = StringBuilder()
     private lateinit var cancelButton: Button
     private lateinit var repeatButton: Button
     private lateinit var copyButton: Button
@@ -125,7 +131,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var conversationPaused = false
     private var conversationReceiverRegistered = false
     private var currentTaskFilter = TaskFilter.TODAY
-    private var jobsBoardVisible = false
     private var selectedTaskId: String? = null
     private var latestTasks: List<VoiceTask> = emptyList()
     private var latestAiUpdates: List<AiUpdate> = emptyList()
@@ -232,6 +237,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
 
         override fun onError(error: Int) {
+            if (voiceMode == VoiceInteractionMode.RAMBLE) {
+                if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                    runOnUiThread { if (voiceMode == VoiceInteractionMode.RAMBLE) startRecognition(correction = false, ramble = true) }
+                    return
+                }
+            }
             val message = recognitionErrorMessage(error)
             failedTranscript = null
             renderState(VoiceState.ERROR, message)
@@ -245,6 +256,15 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             latestPartialTranscript = null
             if (text.isNullOrBlank()) {
                 onError(SpeechRecognizer.ERROR_NO_MATCH)
+                return
+            }
+            if (voiceMode == VoiceInteractionMode.RAMBLE) {
+                if (text.isNotBlank()) {
+                    if (rambleTranscript.isNotEmpty()) rambleTranscript.append(' ')
+                    rambleTranscript.append(text)
+                    transcriptView.text = "You: ${rambleTranscript.toString()}"
+                }
+                startRecognition(correction = false, ramble = true)
                 return
             }
             correctionMode = false
@@ -552,7 +572,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val feedNav = navChip("FEED", true)
         val messagesNav = navChip("MESSAGES 0", false)
         val commandNav = navChip("TALK", false)
-        val tasksNav = navChip("JOBS", false)
+        val tasksNav = navChip("TASKS", false)
+        val workerJobsNav = navChip("JOBS", false)
         val historyNav = navChip("HISTORY", false)
         val systemNav = navChip("SYSTEM", false)
         navViews.clear()
@@ -560,12 +581,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         navViews[AppPage.MESSAGES] = messagesNav
         navViews[AppPage.COMMAND] = commandNav
         navViews[AppPage.TASKS] = tasksNav
+        navViews[AppPage.WORKER_JOBS] = workerJobsNav
         navViews[AppPage.HISTORY] = historyNav
         navViews[AppPage.SYSTEM] = systemNav
         navigation.addView(feedNav, weightedButton())
         navigation.addView(messagesNav, weightedButton().apply { marginStart = dp(5) })
         navigation.addView(commandNav, weightedButton().apply { marginStart = dp(5) })
         navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(5) })
+        navigation.addView(workerJobsNav, weightedButton().apply { marginStart = dp(5) })
         navigation.addView(historyNav, weightedButton().apply { marginStart = dp(5) })
         navigation.addView(systemNav, weightedButton().apply { marginStart = dp(5) })
         content.addView(navigation, fullWidthWrap().apply { topMargin = dp(18) })
@@ -647,6 +670,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 topMargin = dp(4)
             },
         )
+        rambleButton = secondaryButton("RAMBLE  •  MANUAL DICTATION") { handleRambleAction() }
+        voicePanel.addView(rambleButton, fullWidthWrap().apply { topMargin = dp(8) })
         val stateTrack = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -887,10 +912,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 addView(taskContainer, fullWidthWrap().apply { topMargin = dp(8) })
                     addView(LinearLayout(this@MainActivity).apply {
                         orientation = LinearLayout.HORIZONTAL
-                        addView(secondaryButton("JOBS BOARD") {
-                            jobsBoardVisible = !jobsBoardVisible
-                            renderTasks(latestTasks)
-                        }, weightedButton())
+
                         addView(secondaryButton("REFRESH TASKS") { loadTasks() }, weightedButton().apply { marginStart = dp(7) })
                     }, fullWidthWrap().apply { topMargin = dp(14) })
             }, fullWidthWrap().apply { topMargin = dp(18) })
@@ -995,12 +1017,24 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         pageViews[AppPage.MESSAGES] = messagesPage
         pageViews[AppPage.COMMAND] = commandPage
         pageViews[AppPage.TASKS] = tasksPage
+        workerJobsContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        workerJobsPage = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            addView(kicker("VIC-managed background work"), fullWidthWrap().apply { topMargin = dp(24) })
+            addView(heading("Worker jobs", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+            addView(TextView(this@MainActivity).apply { text = "Read-only live view of delegated workers across projects. Stale jobs are marked for recovery."; setTextColor(CarbonPalette.muted); textSize = 13f }, fullWidthWrap().apply { topMargin = dp(6) })
+            addView(workerJobsContainer, fullWidthWrap().apply { topMargin = dp(14) })
+            addView(secondaryButton("REFRESH WORKERS") { refreshAgentVisibility() }, fullWidthWrap().apply { topMargin = dp(14) })
+        }
+        pageViews[AppPage.WORKER_JOBS] = workerJobsPage
         pageViews[AppPage.HISTORY] = historyPage
         pageViews[AppPage.SYSTEM] = systemPage
         content.addView(feedPage, fullWidthWrap())
         content.addView(messagesPage, fullWidthWrap())
         content.addView(commandPage, fullWidthWrap())
         content.addView(tasksPage, fullWidthWrap())
+        content.addView(workerJobsPage, fullWidthWrap())
         content.addView(historyPage, fullWidthWrap())
         content.addView(systemPage, fullWidthWrap())
 
@@ -1008,6 +1042,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         messagesNav.setOnClickListener { showPage(AppPage.MESSAGES) }
         commandNav.setOnClickListener { showPage(AppPage.COMMAND) }
         tasksNav.setOnClickListener { showPage(AppPage.TASKS) }
+        workerJobsNav.setOnClickListener { showPage(AppPage.WORKER_JOBS) }
         historyNav.setOnClickListener { showPage(AppPage.HISTORY) }
         systemNav.setOnClickListener { showPage(AppPage.SYSTEM) }
         refreshMessages()
@@ -1070,13 +1105,31 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun handlePrimaryAction() {
-        // The primary talk control always enters the continuous conversation flow.
-        // Once active, its label and action remain an explicit pause/resume control.
         if (conversationActive) {
             if (conversationPaused) resumeConversationMode() else pauseConversationMode()
             return
         }
         startConversationMode()
+    }
+
+    private fun handleRambleAction() {
+        if (voiceMode == VoiceInteractionMode.RAMBLE) {
+            val text = rambleTranscript.toString().trim()
+            voiceMode = VoiceInteractionMode.NONE
+            voiceOwnership.release()
+            speechRecognizer?.stopListening()
+            if (text.isNotBlank()) {
+                lastTranscript = text
+                transcriptView.text = "You: $text\n\nVIC: Thinking…"
+                submitText(text)
+            } else renderState(VoiceState.READY, "Ramble ended")
+            return
+        }
+        if (conversationActive || !voiceOwnership.claim(VoiceInteractionMode.RAMBLE)) return
+        voiceMode = VoiceInteractionMode.RAMBLE
+        rambleTranscript.clear()
+        ensurePermissionAndStart(correction = false, ramble = true)
+        rambleButton.text = "DONE  •  SUBMIT RAMBLE"
     }
 
     private fun startFromWidgetIfRequested(intent: Intent?) {
@@ -1204,17 +1257,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         return true
     }
 
-    private fun ensurePermissionAndStart(correction: Boolean) {
+    private fun ensurePermissionAndStart(correction: Boolean, ramble: Boolean = false) {
         pendingPermissionCorrection = correction
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            if (correction) startRecognition(correction = true)
-            else startConversationMode()
+            if (correction) startRecognition(correction = true, ramble = false)
+            else if (ramble) startRecognition(correction = false, ramble = true) else startConversationMode()
         } else {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
         }
     }
 
-    private fun startRecognition(correction: Boolean) {
+    private fun startRecognition(correction: Boolean, ramble: Boolean = false) {
         textToSpeech?.stop()
         failedTranscript = null
         correctionMode = correction
@@ -1241,8 +1294,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1_200L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2_000L)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1_200L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, if (ramble) 60_000L else 2_000L)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, if (ramble) 60_000L else 1_200L)
         }
         renderState(VoiceState.STARTING, "Starting on-device recognition")
         speechRecognizer?.startListening(intent)
@@ -1581,6 +1634,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         taskImportance = event.payload.optionalText("task_importance"),
                         completedSteps = event.payload.optInt("completed_steps", 0),
                         totalSteps = event.payload.optInt("total_steps", 0),
+                        updatedAt = event.createdAt,
                     )
                 )
             }
@@ -1593,6 +1647,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (!::agentActivityContainer.isInitialized || !::agentWorkerContainer.isInitialized) return
         val activities = agentVisibility.activities
         val workers = agentVisibility.workers
+        if (::workerJobsContainer.isInitialized) {
+            workerJobsContainer.removeAllViews()
+            WorkerJobsModel.cards(workers).groupBy { it.lane }.forEach { (lane, cards) ->
+                workerJobsContainer.addView(TextView(this@MainActivity).apply { text = "${lane.uppercase(Locale.US)}  •  ${cards.size}"; setTextColor(CarbonPalette.teal); textSize = 11f; setPadding(0, dp(8), 0, dp(4)) })
+                cards.forEach { card -> workerJobsContainer.addView(TextView(this@MainActivity).apply { text = "${card.title}\n${card.association}\n${card.status}  •  ${card.timing}\n${card.progress}\n${card.blocker}\nNext: ${card.nextAction}"; setTextColor(CarbonPalette.white); textSize = 13f; setPadding(dp(12), dp(10), dp(12), dp(10)); setBackgroundColor(CarbonPalette.line) }, fullWidthWrap().apply { topMargin = dp(6) }) }
+            }
+        }
         val runningWorkers = agentVisibility.runningWorkerCount()
         val latest = activities.firstOrNull()
 
@@ -2039,6 +2100,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun startConversationMode() {
+        if (voiceMode == VoiceInteractionMode.RAMBLE) return
+        voiceOwnership.claim(VoiceInteractionMode.CONVERSATION)
+        voiceMode = VoiceInteractionMode.CONVERSATION
         conversationActive = true
         conversationPaused = false
         renderState(VoiceState.STARTING, "Starting Conversation Mode")
@@ -2067,6 +2131,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         )
         conversationActive = false
         conversationPaused = false
+        voiceMode = VoiceInteractionMode.NONE
+        voiceOwnership.release()
         renderState(VoiceState.READY, "Conversation ended")
     }
 
@@ -2596,26 +2662,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun renderTasks(tasks: List<VoiceTask>, preserveStatus: Boolean = false) {
         latestTasks = tasks
         taskContainer.removeAllViews()
-        if (jobsBoardVisible) {
-            taskListControls.visibility = View.GONE
-            val grouped = JobBoardModel.cards(tasks).groupBy { it.lane }
-            JobBoardModel.cards(tasks).map { it.lane }.distinct().forEach { lane ->
-                taskContainer.addView(TextView(this).apply {
-                    text = "${JobBoardModel.laneLabel(lane)}  •  ${grouped[lane].orEmpty().size}"
-                    textSize = 18f
-                    setTextColor(CarbonPalette.white)
-                }, fullWidthWrap().apply { topMargin = dp(10) })
-                grouped[lane].orEmpty().forEach { card ->
-                    taskContainer.addView(taskPanel(12).apply {
-                        addView(TextView(this@MainActivity).apply { text = JobBoardModel.format(card); textSize = 14f; setTextColor(CarbonPalette.white) }, fullWidthWrap())
-                    }, fullWidthWrap().apply { topMargin = dp(7) })
-                }
-            }
-            if (tasks.isEmpty()) taskContainer.addView(TextView(this).apply { text = "No authoritative jobs returned."; setTextColor(CarbonPalette.muted) }, fullWidthWrap())
-            taskStatusView.text = "${tasks.size} authoritative jobs • read-only board"
-            taskStatusView.setTextColor(CarbonPalette.teal)
-            return
-        }
         val openTasks = tasks.filter { it.status !in setOf("completed", "cancelled") }
         val selectedTask = selectedTaskId?.let { selectedId -> tasks.firstOrNull { it.id == selectedId } }
         if (selectedTask != null) {
