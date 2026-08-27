@@ -515,6 +515,14 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             suffix = f"?{parsed.query}" if parsed.query else ""
             self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
             return
+        if parsed.path == "/v1/fieldy/intake" or parsed.path.startswith(
+            "/v1/fieldy/intake/"
+        ):
+            if not self._require_device():
+                return
+            suffix = f"?{parsed.query}" if parsed.query else ""
+            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
+            return
         if parsed.path in {
             "/v1/personal/inbox",
             "/v1/personal/proposals",
@@ -848,6 +856,11 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlsplit(self.path).path
+        if path.startswith("/v1/fieldy/intake/"):
+            if not self._require_device():
+                return
+            self._proxy_memory_request("DELETE", path)
+            return
         if path.startswith("/v1/files/"):
             if not self._require_device():
                 return

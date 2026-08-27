@@ -37,6 +37,7 @@ import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ArrayAdapter
 import android.widget.LinearLayout
+import android.widget.HorizontalScrollView
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
@@ -505,14 +506,18 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             text = label
             textSize = 11f
             typeface = Typeface.DEFAULT_BOLD
+            letterSpacing = 0.08f
             gravity = Gravity.CENTER
-            setTextColor(if (active) CarbonPalette.teal else CarbonPalette.muted)
+            minWidth = dp(64)
+            minHeight = dp(44)
+            setTextColor(if (active) CarbonPalette.black else CarbonPalette.muted)
             background = carbonControl(
                 this@MainActivity,
                 if (active) CarbonPalette.teal else CarbonPalette.line,
+                filled = active,
             )
-            setPadding(dp(12), dp(11), dp(12), dp(11))
-            alpha = if (active) 1f else 0.72f
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            alpha = if (active) 1f else 0.9f
         }
 
         fun utilityRow(label: String, control: Button) = LinearLayout(this).apply {
@@ -567,7 +572,12 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         val navigation = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val navigationBar = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = true
+            addView(navigation, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
         val feedNav = navChip("FEED", true)
         val messagesNav = navChip("MESSAGES 0", false)
@@ -584,14 +594,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         navViews[AppPage.WORKER_JOBS] = workerJobsNav
         navViews[AppPage.HISTORY] = historyNav
         navViews[AppPage.SYSTEM] = systemNav
-        navigation.addView(feedNav, weightedButton())
-        navigation.addView(messagesNav, weightedButton().apply { marginStart = dp(5) })
-        navigation.addView(commandNav, weightedButton().apply { marginStart = dp(5) })
-        navigation.addView(tasksNav, weightedButton().apply { marginStart = dp(5) })
-        navigation.addView(workerJobsNav, weightedButton().apply { marginStart = dp(5) })
-        navigation.addView(historyNav, weightedButton().apply { marginStart = dp(5) })
-        navigation.addView(systemNav, weightedButton().apply { marginStart = dp(5) })
-        content.addView(navigation, fullWidthWrap().apply { topMargin = dp(18) })
+        navigation.addView(feedNav, wrapButton())
+        navigation.addView(messagesNav, wrapButton().apply { marginStart = dp(5) })
+        navigation.addView(commandNav, wrapButton().apply { marginStart = dp(5) })
+        navigation.addView(tasksNav, wrapButton().apply { marginStart = dp(5) })
+        navigation.addView(workerJobsNav, wrapButton().apply { marginStart = dp(5) })
+        navigation.addView(historyNav, wrapButton().apply { marginStart = dp(5) })
+        navigation.addView(systemNav, wrapButton().apply { marginStart = dp(5) })
+        content.addView(navigationBar, fullWidthWrap().apply { topMargin = dp(18) })
 
         val messagesPage = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1082,6 +1092,11 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     )
 
     private fun weightedButton() = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+
+    private fun wrapButton() = LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+    )
 
     private fun taskPanel(padding: Int = 20) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL

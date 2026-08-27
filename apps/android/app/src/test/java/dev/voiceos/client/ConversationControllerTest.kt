@@ -52,6 +52,22 @@ class ConversationControllerTest {
     }
 
     @Test
+    fun repeatedTurnHandoffsAlwaysReturnToListening() {
+        val controller = ConversationController()
+        controller.dispatch(ConversationEvent.Start)
+        repeat(10) {
+            controller.dispatch(ConversationEvent.ListenerReady)
+            controller.dispatch(ConversationEvent.SpeechDetected)
+            controller.dispatch(ConversationEvent.TurnSubmitted)
+            controller.dispatch(ConversationEvent.ResponseStarted)
+            controller.dispatch(ConversationEvent.ResponseFinished)
+            controller.dispatch(ConversationEvent.ListenerReady)
+            assertEquals(ConversationPhase.LISTENING, controller.phase)
+            assertTrue(controller.active)
+        }
+    }
+
+    @Test
     fun retryBackoffIsBounded() {
         assertEquals(1_000L, ConversationRetryPolicy.delayMillis(1))
         assertEquals(2_000L, ConversationRetryPolicy.delayMillis(2))

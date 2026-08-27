@@ -387,6 +387,14 @@ Second result.
         self.assertEqual(503, status)
         self.assertEqual("fieldy_webhook_not_configured", payload["error"])
 
+        # Fieldy operator routes must be present on the public compatibility gateway.
+        status, payload = self.request("GET", "/v1/fieldy/intake")
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+        status, payload = self.request("GET", "/v1/fieldy/intake/capture-1")
+        self.assertEqual(503, status)
+        self.assertEqual("file_memory_unavailable", payload["error"])
+
     def test_isolated_capability_routes_fail_closed_when_workers_are_absent(self) -> None:
         status, payload = self.request("GET", "/v1/capabilities/speech/health")
         self.assertEqual(503, status)

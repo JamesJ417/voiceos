@@ -13,6 +13,7 @@ import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.session.MediaSession
+import android.media.ToneGenerator
 import android.view.KeyEvent
 import android.net.ConnectivityManager
 import android.net.Network
@@ -51,6 +52,8 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
     private var ttsReady = false
     private var pendingSpeech: String? = null
     private var currentSpeech: String? = null
+    private var currentUtteranceId: String? = null
+    private var toneGenerator: ToneGenerator? = null
     private val resumableResponse = ResumableResponse()
     private var latestPartial: String? = null
     private val silencePolicy = ConversationSilencePolicy(
@@ -394,6 +397,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
 
             override fun onDone(utteranceId: String?) {
                 handler.post {
+                    if (utteranceId != currentUtteranceId) return@post
                     resumableResponse.markReplayComplete()
                     clearResumableResponse()
                     if (!ttsTerminalCompletionGate.tryComplete()) return@post
@@ -405,6 +409,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             @Deprecated("Deprecated in Java")
             override fun onError(utteranceId: String?) {
                 handler.post {
+                    if (utteranceId != currentUtteranceId) return@post
                     if (!ttsTerminalCompletionGate.tryComplete()) return@post
                     Log.w(TAG, "event=tts_error")
                     finishSpeech(350L)
@@ -413,6 +418,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
 
             override fun onStop(utteranceId: String?, interrupted: Boolean) {
                 handler.post {
+                    if (utteranceId != currentUtteranceId) return@post
                     if (
                         !interrupted || !active || paused ||
                         stopAfterSpeechReason != null || pauseAfterSpeechDetail != null
@@ -450,6 +456,8 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         textToSpeech = null
+        toneGenerator?.release()
+        toneGenerator = null
         mediaSession?.isActive = false
         mediaSession?.release()
         mediaSession = null
@@ -674,6 +682,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             )
         }
         Log.i(TAG, "event=recognizer_start idle_ms=${silencePolicy.idleDurationMillis()}")
+        playConversationTone(ToneGenerator.TONE_PROP_BEEP2)
         publish(STATE_STARTING, detail = "Opening microphone")
         updateNotification("Listening for you", paused = false)
         try {
@@ -910,6 +919,8 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         recognizer?.cancel()
         controller.dispatch(ConversationEvent.ResponseStarted)
         currentSpeech = text
+        currentUtteranceId = "vic-${UUID.randomUUID()}"
+        playConversationTone(ToneGenerator.TONE_PROP_BEEP)
         publish(STATE_SPEAKING, response = text, detail = "VIC is speaking")
         updateNotification("VIC is speaking", paused = false)
         if (!ttsReady) {
@@ -917,7 +928,7 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
             return
         }
         textToSpeech?.setSpeechRate(currentSpeechRate())
-        if (textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID) == TextToSpeech.ERROR) {
+        if (textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, currentUtteranceId) == TextToSpeech.ERROR) {
             currentSpeech = null
             val stopReason = stopAfterSpeechReason
             val pauseDetail = pauseAfterSpeechDetail
@@ -1365,6 +1376,13 @@ class VICConversationService : Service(), TextToSpeech.OnInitListener {
         }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         getSystemService(NotificationManager::class.java).notify(820, Notification.Builder(this, "vic_messages").setSmallIcon(R.mipmap.ic_launcher).setContentTitle("VIC check-in").setContentText(text).setContentIntent(intent).setAutoCancel(true).build())
     }
+    private fun playConversationTone(tone: Int) {
+        runCatching {
+            if (toneGenerator == null) toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 70)
+            toneGenerator?.startTone(tone, 120)
+        }.onFailure { Log.w(TAG, "event=conversation_tone_failure", it) }
+    }
+
     private fun acquireWakeLock() {
         if (wakeLock?.isHeld == true) return
         val manager = getSystemService(PowerManager::class.java)
