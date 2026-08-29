@@ -68,7 +68,7 @@ pub(crate) async fn start(
     let owner_id = state.primary_owner_id.clone();
     let store = state.store.clone();
     let cycle = tokio::task::spawn_blocking(move || {
-        store.create_dry_run_sleep_cycle(&owner_id, &request.idempotency_key)
+        store.create_commit_sleep_cycle(&owner_id, &request.idempotency_key)
     })
     .await
     .map_err(internal_join)?
