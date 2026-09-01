@@ -73,7 +73,11 @@ pub(crate) fn build_state() -> Result<AppState, Box<dyn std::error::Error>> {
         router,
         ontology: Arc::new(ontology),
         legacy_audit_path,
-        require_device_auth: env::var("VOICEOS_REQUIRE_DEVICE_AUTH").as_deref() == Ok("1"),
+        // Authentication is fail-closed unless local development explicitly opts out.
+        require_device_auth: env::var("VOICEOS_REQUIRE_DEVICE_AUTH").as_deref() != Ok("0"),
+        gateway_service_token: env::var("VOICEOS_RUST_SERVICE_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty()),
         primary_owner_id,
         pending_capture_devices: Arc::default(),
     })

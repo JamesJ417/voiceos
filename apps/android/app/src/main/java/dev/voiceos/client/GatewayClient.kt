@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 data class TurnResult(
     val sessionId: String,
+    val areaId: String,
     val transcript: String,
     val responseText: String,
     val provider: String,
@@ -43,6 +44,42 @@ data class AuditTurn(
     val provider: String,
     val processingMs: Long,
     val createdAt: String,
+)
+
+data class ConversationBootstrap(
+    val contractVersion: Int,
+    val areas: List<ConversationArea>,
+    val selectedAreaId: String,
+    val activeConversation: AreaConversation?,
+)
+
+data class AreaHistoryDay(
+    val date: String,
+    val conversations: List<AreaConversation>,
+)
+
+data class AreaConversationMessage(
+    val sequence: Long,
+    val conversationId: String,
+    val areaId: String,
+    val role: String,
+    val content: String,
+    val createdAt: String,
+)
+
+data class ConversationSync(
+    val cursor: Long,
+    val selectedAreaId: String,
+    val activeConversationId: String?,
+    val conversations: List<AreaSyncRecord>,
+    val messages: List<AreaConversationMessage>,
+)
+
+data class AreaSyncRecord(
+    val conversationId: String,
+    val areaId: String,
+    val areaUpdatedAt: String,
+    val areaUpdatedByDevice: String,
 )
 
 data class EnrollmentResult(val deviceId: String, val deviceToken: String)
@@ -191,6 +228,143 @@ class EventSubscription internal constructor(
 }
 
 object GatewayClient {
+    fun getConversationBootstrap(
+        baseUrl: String,
+        deviceToken: String?,
+        callback: (Result<ConversationBootstrap>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching { retryConnection { getConversationBootstrapBlocking(baseUrl, deviceToken) } })
+        }, "voiceos-conversation-bootstrap").start()
+    }
+
+    fun getAreaConversations(
+        baseUrl: String,
+        areaId: String,
+        deviceToken: String?,
+        callback: (Result<List<AreaConversation>>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching { retryConnection { getAreaConversationsBlocking(baseUrl, areaId, deviceToken) } })
+        }, "voiceos-area-conversations").start()
+    }
+
+    fun createAreaConversation(
+        baseUrl: String,
+        areaId: String,
+        title: String?,
+        deviceToken: String?,
+        callback: (Result<AreaConversation>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                conversationMutationBlocking(
+                    "$baseUrl/v1/conversations",
+                    JSONObject()
+                        .put("area_id", areaId)
+                        .put("title", title)
+                        .put("request_id", java.util.UUID.randomUUID().toString()),
+                    deviceToken,
+                ) ?: error("Gateway did not return the created conversation")
+            })
+        }, "voiceos-conversation-create").start()
+    }
+
+    fun selectConversationArea(
+        baseUrl: String,
+        areaId: String,
+        deviceToken: String?,
+        callback: (Result<AreaConversation?>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                conversationMutationBlocking(
+                    "$baseUrl/v1/conversation-areas/${encode(areaId)}/select",
+                    JSONObject().put("request_id", java.util.UUID.randomUUID().toString()),
+                    deviceToken,
+                )
+            })
+        }, "voiceos-area-select").start()
+    }
+
+    fun selectConversation(
+        baseUrl: String,
+        conversationId: String,
+        deviceToken: String?,
+        callback: (Result<AreaConversation>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                conversationMutationBlocking(
+                    "$baseUrl/v1/conversations/${encode(conversationId)}/select",
+                    JSONObject().put("request_id", java.util.UUID.randomUUID().toString()),
+                    deviceToken,
+                ) ?: error("Gateway did not return the selected conversation")
+            })
+        }, "voiceos-conversation-select").start()
+    }
+
+    fun moveConversation(
+        baseUrl: String,
+        conversation: AreaConversation,
+        destinationAreaId: String,
+        deviceToken: String?,
+        callback: (Result<AreaConversation>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                conversationMutationBlocking(
+                    "$baseUrl/v1/conversations/${encode(conversation.id)}/move",
+                    JSONObject()
+                        .put("source_area_id", conversation.areaId)
+                        .put("destination_area_id", destinationAreaId)
+                        .put("confirmed", true)
+                        .put("request_id", java.util.UUID.randomUUID().toString()),
+                    deviceToken,
+                ) ?: error("Gateway did not return the moved conversation")
+            })
+        }, "voiceos-conversation-move").start()
+    }
+
+    fun getAreaHistory(
+        baseUrl: String,
+        timezoneOffsetMinutes: Int,
+        areaId: String? = null,
+        deviceToken: String?,
+        callback: (Result<List<AreaHistoryDay>>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection {
+                    getAreaHistoryBlocking(baseUrl, timezoneOffsetMinutes, areaId, deviceToken)
+                }
+            })
+        }, "voiceos-area-history").start()
+    }
+
+    fun getConversationMessages(
+        baseUrl: String,
+        conversationId: String,
+        deviceToken: String?,
+        callback: (Result<List<AreaConversationMessage>>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching {
+                retryConnection { getConversationMessagesBlocking(baseUrl, conversationId, deviceToken) }
+            })
+        }, "voiceos-conversation-messages").start()
+    }
+
+    fun getConversationSync(
+        baseUrl: String,
+        after: Long,
+        deviceToken: String?,
+        callback: (Result<ConversationSync>) -> Unit,
+    ) {
+        Thread({
+            callback(runCatching { retryConnection { getConversationSyncBlocking(baseUrl, after, deviceToken) } })
+        }, "voiceos-conversation-sync").start()
+    }
     fun getRecentEvents(
         baseUrl: String,
         deviceToken: String?,
@@ -680,6 +854,192 @@ object GatewayClient {
         Thread({ callback(runCatching { retryConnection { reviewSkillUsageBlocking(baseUrl, usageId, correct, deviceToken) } }) }, "voiceos-skill-feedback").start()
     }
 
+    private fun getConversationBootstrapBlocking(
+        baseUrl: String,
+        deviceToken: String?,
+    ): ConversationBootstrap {
+        val connection = URL("$baseUrl/v1/client/bootstrap").openConnection() as HttpURLConnection
+        try {
+            GatewayHttp.configure(connection, deviceToken)
+            val payload = GatewayHttp.responseJson(connection)
+            val areas = payload.optJSONArray("conversation_areas")
+            return ConversationBootstrap(
+                contractVersion = payload.optInt("contract_version", 1),
+                areas = buildList {
+                    if (areas != null) for (index in 0 until areas.length()) {
+                        val area = areas.optJSONObject(index) ?: continue
+                        add(
+                            ConversationArea(
+                                area.optString("id"),
+                                area.optString("display_name"),
+                                area.optInt("position", index),
+                            ),
+                        )
+                    }
+                },
+                selectedAreaId = payload.optString("selected_area_id", "general-talk"),
+                activeConversation = payload.optJSONObject("active_conversation")
+                    ?.let(::parseAreaConversation),
+            )
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun getAreaConversationsBlocking(
+        baseUrl: String,
+        areaId: String,
+        deviceToken: String?,
+    ): List<AreaConversation> {
+        val connection = URL("$baseUrl/v1/conversations?area_id=${encode(areaId)}&limit=200")
+            .openConnection() as HttpURLConnection
+        try {
+            GatewayHttp.configure(connection, deviceToken)
+            val values = GatewayHttp.responseJson(connection).optJSONArray("conversations")
+            return buildList {
+                if (values != null) for (index in 0 until values.length()) {
+                    values.optJSONObject(index)?.let { add(parseAreaConversation(it)) }
+                }
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun conversationMutationBlocking(
+        url: String,
+        request: JSONObject,
+        deviceToken: String?,
+    ): AreaConversation? {
+        val bytes = request.toString().toByteArray(Charsets.UTF_8)
+        val connection = URL(url).openConnection() as HttpURLConnection
+        try {
+            GatewayHttp.configure(connection, deviceToken, bytes)
+            return GatewayHttp.responseJson(connection).optJSONObject("conversation")
+                ?.let(::parseAreaConversation)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun getAreaHistoryBlocking(
+        baseUrl: String,
+        timezoneOffsetMinutes: Int,
+        areaId: String?,
+        deviceToken: String?,
+    ): List<AreaHistoryDay> {
+        val areaQuery = areaId?.let { "&area_id=${encode(it)}" }.orEmpty()
+        val connection = URL(
+            "$baseUrl/v1/conversations/history?timezone_offset_minutes=${timezoneOffsetMinutes.coerceIn(-1080, 1080)}&limit_days=60$areaQuery",
+        ).openConnection() as HttpURLConnection
+        try {
+            GatewayHttp.configure(connection, deviceToken)
+            val days = GatewayHttp.responseJson(connection).optJSONArray("days")
+            return buildList {
+                if (days != null) for (index in 0 until days.length()) {
+                    val day = days.optJSONObject(index) ?: continue
+                    val conversations = day.optJSONArray("conversations")
+                    add(
+                        AreaHistoryDay(
+                            date = day.optString("date"),
+                            conversations = buildList {
+                                if (conversations != null) for (item in 0 until conversations.length()) {
+                                    conversations.optJSONObject(item)?.let {
+                                        add(parseAreaConversation(it))
+                                    }
+                                }
+                            },
+                        ),
+                    )
+                }
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun getConversationMessagesBlocking(
+        baseUrl: String,
+        conversationId: String,
+        deviceToken: String?,
+    ): List<AreaConversationMessage> {
+        val connection = URL(
+            "$baseUrl/v1/conversations/${encode(conversationId)}/messages?after=0&limit=500",
+        ).openConnection() as HttpURLConnection
+        try {
+            GatewayHttp.configure(connection, deviceToken)
+            return parseAreaMessages(GatewayHttp.responseJson(connection).optJSONArray("messages"))
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun getConversationSyncBlocking(
+        baseUrl: String,
+        after: Long,
+        deviceToken: String?,
+    ): ConversationSync {
+        val connection = URL("$baseUrl/v1/conversations/sync?after=${after.coerceAtLeast(0)}&limit=1000")
+            .openConnection() as HttpURLConnection
+        try {
+            GatewayHttp.configure(connection, deviceToken)
+            val payload = GatewayHttp.responseJson(connection)
+            val records = payload.optJSONArray("conversations")
+            return ConversationSync(
+                cursor = payload.optLong("cursor", after).coerceAtLeast(after),
+                selectedAreaId = payload.optString("selected_area_id", "general-talk"),
+                activeConversationId = payload.optString("active_conversation_id")
+                    .takeIf { it.isNotBlank() },
+                conversations = buildList {
+                    if (records != null) for (index in 0 until records.length()) {
+                        val record = records.optJSONObject(index) ?: continue
+                        add(
+                            AreaSyncRecord(
+                                conversationId = record.optString("conversation_id"),
+                                areaId = record.optString("area_id"),
+                                areaUpdatedAt = record.optString("area_updated_at"),
+                                areaUpdatedByDevice = record.optString("area_updated_by_device"),
+                            ),
+                        )
+                    }
+                },
+                messages = parseAreaMessages(payload.optJSONArray("messages")),
+            )
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun parseAreaConversation(value: JSONObject): AreaConversation = AreaConversation(
+        id = value.optString("id"),
+        areaId = value.optString("area_id", "general-talk"),
+        title = value.optString("title", "New conversation"),
+        status = value.optString("status", "archived"),
+        messageCount = value.optLong("message_count", 0),
+        lastMessagePreview = value.optString("last_message_preview").takeIf { it.isNotBlank() },
+        updatedAt = value.optString("updated_at"),
+    )
+
+    private fun parseAreaMessages(values: org.json.JSONArray?): List<AreaConversationMessage> =
+        buildList {
+            if (values != null) for (index in 0 until values.length()) {
+                val message = values.optJSONObject(index) ?: continue
+                add(
+                    AreaConversationMessage(
+                        sequence = message.optLong("sequence"),
+                        conversationId = message.optString("conversation_id"),
+                        areaId = message.optString("area_id", "general-talk"),
+                        role = message.optString("role"),
+                        content = message.optString("content"),
+                        createdAt = message.optString("created_at"),
+                    ),
+                )
+            }
+        }
+
+    private fun encode(value: String): String =
+        URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+
     private fun getHealthBlocking(baseUrl: String, deviceToken: String?): GatewayHealth {
         val connection = URL("$baseUrl/v1/health").openConnection() as HttpURLConnection
         try {
@@ -1068,6 +1428,7 @@ object GatewayClient {
             }
             return TurnResult(
                 sessionId = payload.getString("session_id"),
+                areaId = payload.optString("area_id", "general-talk"),
                 transcript = payload.getString("transcript"),
                 responseText = payload.getString("response_text"),
                 provider = payload.optString("provider", "unknown"),

@@ -70,6 +70,8 @@ class ComponentBootstrapIntegrationTest(unittest.TestCase):
             0,
             audit_store=cls.audit,
             memory_url=f"http://127.0.0.1:{cls.rust.server_port}",
+            # This fixture intentionally exercises the local loopback development path.
+            require_device_auth=False,
         )
         cls.gateway_thread = threading.Thread(
             target=cls.gateway.serve_forever, daemon=True

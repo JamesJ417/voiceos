@@ -57,6 +57,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var gatewayView: TextView
     private lateinit var transcriptView: TextView
     private lateinit var memoryStatusView: TextView
+    private lateinit var areaStatusView: TextView
     private lateinit var providerStatusView: TextView
     private lateinit var systemStatusView: TextView
     private lateinit var systemDetailView: TextView
@@ -120,7 +121,9 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var latestPartialTranscript: String? = null
     private var pendingAttachment: AttachmentUploadResult? = null
 
-    private val sessionId = UUID.randomUUID().toString()
+    private val fallbackSessionId = UUID.randomUUID().toString()
+    private val sessionId: String
+        get() = conversationAreaState.activeConversation?.id ?: fallbackSessionId
     private var lastTranscript: String? = null
     private var lastResponse: String? = null
     private var failedTranscript: String? = null
@@ -147,6 +150,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var uplinkRoundTripMs: Long? = null
     private var taskLoadGeneration = 0
     private var taskSurfaceRefreshGeneration = 0
+    private var conversationAreaState = ConversationAreaModel.fromBootstrap(emptyList(), null, null)
+    private var latestAreaHistory: List<AreaHistoryDay> = emptyList()
 
     private val conversationReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -275,6 +280,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             if (handleSpeechRateCommand(text)) return
             if (handlePendingApprovalSpeech(text)) return
             if (handleInterestCommand(text)) return
+            if (handleConversationAreaVoiceCommand(text)) return
             submitText(text)
         }
 
@@ -298,6 +304,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val enrollment = GatewaySettings.enrollFromIntent(this, intent)
         renderState(VoiceState.READY, "Ready")
         handleEnrollment(enrollment)
+        loadConversationAreas()
         startSharedEventStream()
         DailyCheckinScheduler.schedule(this)
         if (
@@ -656,8 +663,14 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
         }
-        commandPage.addView(kicker("Carbon Command"), fullWidthWrap().apply { topMargin = dp(24) })
-        commandPage.addView(heading("Command center", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+        commandPage.addView(kicker("Carbon Command  //  ACTIVE WORKSPACE"), fullWidthWrap().apply { topMargin = dp(24) })
+        commandPage.addView(heading("Talk with VIC", 30f), fullWidthWrap().apply { topMargin = dp(5) })
+        commandPage.addView(TextView(this).apply {
+            text = "Your live conversation, organized by area and thread."
+            textSize = 13f
+            setTextColor(CarbonPalette.muted)
+            setPadding(0, dp(5), 0, 0)
+        }, fullWidthWrap())
 
         val voicePanel = panel(20)
         statusView = kicker("Voice channel ready")
@@ -707,14 +720,16 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
         val conversationPanel = panel(18)
         val conversationHeader = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.TOP
-        }
-        conversationHeader.addView(LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(kicker("Continuous conversation"))
-            addView(heading("Current thread", 23f).apply { setPadding(0, dp(5), 0, 0) })
-        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        conversationHeader.addView(kicker("ACTIVE THREAD"))
+        conversationHeader.addView(heading("Current conversation", 23f).apply { setPadding(0, dp(5), 0, 0) })
+        conversationHeader.addView(TextView(this).apply {
+            text = "Area and thread identity"
+            textSize = 12f
+            setTextColor(CarbonPalette.muted)
+            setPadding(0, dp(5), 0, 0)
+        })
         memoryStatusView = TextView(this).apply {
             text = "MEMORY READY"
             textSize = 9f
@@ -724,19 +739,43 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             background = carbonControl(this@MainActivity, CarbonPalette.teal)
             setPadding(dp(10), dp(8), dp(10), dp(8))
         }
-        conversationHeader.addView(memoryStatusView)
+        conversationHeader.addView(memoryStatusView, fullWidthWrap().apply { topMargin = dp(10) })
         conversationPanel.addView(conversationHeader, fullWidthWrap())
+        val areaControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        areaStatusView = secondaryButton("AREA  •  GENERAL TALK") { showAreaPicker() }.apply {
+            contentDescription = "Current conversation area: General Talk. Tap to select an area."
+        }
+        areaControls.addView(areaStatusView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.6f))
+        areaControls.addView(
+            secondaryButton("BROWSE") { browseSelectedArea() },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(6) },
+        )
+        areaControls.addView(
+            secondaryButton("NEW") { showNewConversationAreaPicker() },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f).apply { marginStart = dp(6) },
+        )
+        areaControls.addView(
+            secondaryButton("MOVE") { showMoveConversationPicker() },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.9f).apply { marginStart = dp(6) },
+        )
+        conversationPanel.addView(areaControls, fullWidthWrap().apply { topMargin = dp(10) })
         transcriptView = TextView(this).apply {
-            text = "VIC\nTap Talk and speak. Your conversation will continue here."
+            text = "VIC\nReady when you are. Tap TALK to start speaking in this thread."
             textSize = 16f
             setTextColor(CarbonPalette.white)
-            setLineSpacing(dp(3).toFloat(), 1.18f)
-            setPadding(dp(16), dp(15), dp(16), dp(15))
+            setLineSpacing(dp(4).toFloat(), 1.18f)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
             background = carbonControl(this@MainActivity, CarbonPalette.teal)
             setTextIsSelectable(true)
         }
         conversationPanel.addView(transcriptView, fullWidthWrap().apply { topMargin = dp(18) })
         val conversationActions = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        val conversationActionRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
@@ -744,11 +783,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         copyButton = secondaryButton("⧉  COPY") { copyLastResponse() }
         correctButton = secondaryButton("✎  CORRECT") { beginCorrection() }
         retryButton = secondaryButton("RETRY") { retryLastRequest() }
-        conversationActions.addView(repeatButton, weightedButton())
-        conversationActions.addView(copyButton, weightedButton().apply { marginStart = dp(6) })
-        conversationActions.addView(correctButton, weightedButton().apply { marginStart = dp(6) })
-        conversationActions.addView(retryButton, weightedButton().apply { marginStart = dp(6) })
-        conversationPanel.addView(conversationActions, fullWidthWrap().apply { topMargin = dp(12) })
+        conversationActionRow.addView(repeatButton, weightedButton())
+        conversationActionRow.addView(copyButton, weightedButton().apply { marginStart = dp(8) })
+        conversationActions.addView(conversationActionRow, fullWidthWrap())
+        val conversationActionRow2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        conversationActionRow2.addView(correctButton, weightedButton())
+        conversationActionRow2.addView(retryButton, weightedButton().apply { marginStart = dp(8) })
+        conversationActions.addView(conversationActionRow2, fullWidthWrap().apply { topMargin = dp(8) })
+        conversationPanel.addView(conversationActions, fullWidthWrap().apply { topMargin = dp(14) })
         commandPage.addView(conversationPanel, fullWidthWrap().apply { topMargin = dp(14) })
 
         val approvals = LinearLayout(this).apply {
@@ -947,6 +992,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                     showSoftInputOnFocus = false
                     background = null
                     contentDescription = "Selectable conversation history. Long press text to copy."
+                    setOnClickListener { showHistoryDayPicker() }
                 }
                 addView(historyView, fullWidthWrap())
                 addView(secondaryButton("REFRESH HISTORY") { loadHistory() }, fullWidthWrap().apply { topMargin = dp(16) })
@@ -1453,6 +1499,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                             refreshMessages()
                         }
                         "conversation.turn" -> if (currentPage == AppPage.HISTORY) loadHistory()
+                        "conversation.catalog.changed" -> loadConversationAreas()
                         "conversation.floor.changed" -> {
                             val floorValue = event.payload.optJSONObject("floor")
                             if (floorValue != null) {
@@ -1911,6 +1958,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         refreshAgentVisibility()
                         startVicOutreachConnection()
                         checkGatewayHealth(justEnrolled = true)
+                        loadConversationAreas()
                     },
                     onFailure = { error ->
                         gatewayView.text = "● PAIRING FAILED"
@@ -2125,6 +2173,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             startForegroundService(
                 Intent(this, VICConversationService::class.java)
                     .setAction(VICConversationService.ACTION_START)
+                    .putExtra(VICConversationService.EXTRA_SESSION_ID, sessionId)
             )
         } catch (error: RuntimeException) {
             conversationActive = false
@@ -3820,25 +3869,320 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun loadHistory() {
-        historyView.text = "Loading conversation history…"
-        historyView.setTextColor(CarbonPalette.muted)
-        GatewayClient.getHistory(
+    private fun loadConversationAreas() {
+        GatewayClient.getConversationBootstrap(
             GatewaySettings.baseUrl(this),
             DeviceCredentials.token(this),
         ) { result ->
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess { bootstrap ->
+                    conversationAreaState = ConversationAreaModel.fromBootstrap(
+                        bootstrap.areas,
+                        bootstrap.selectedAreaId,
+                        bootstrap.activeConversation,
+                    )
+                    renderConversationArea()
+                    refreshSelectedAreaConversations()
+                    synchronizeConversationAreas()
+                }.onFailure {
+                    renderConversationArea(unavailable = true)
+                }
+            }
+        }
+    }
+
+    private fun renderConversationArea(unavailable: Boolean = false) {
+        if (!::areaStatusView.isInitialized) return
+        val area = conversationAreaState.selectedArea
+        areaStatusView.text = if (unavailable) "AREA  •  UNAVAILABLE" else "AREA  •  ${area.displayName.uppercase(Locale.US)}"
+        areaStatusView.contentDescription = if (unavailable) {
+            "Conversation areas are unavailable"
+        } else {
+            "Current conversation area: ${area.displayName}. Tap to select an area."
+        }
+        areaStatusView.setTextColor(if (unavailable) CarbonPalette.red else CarbonPalette.white)
+    }
+
+    private fun showAreaPicker() {
+        val areas = conversationAreaState.areas
+        AlertDialog.Builder(this)
+            .setTitle("Select conversation area")
+            .setSingleChoiceItems(
+                areas.map { it.displayName }.toTypedArray(),
+                areas.indexOfFirst { it.id == conversationAreaState.selectedAreaId },
+            ) { dialog, which ->
+                dialog.dismiss()
+                selectConversationArea(areas[which])
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun selectConversationArea(area: ConversationArea) {
+        if (!prepareAreaMutation { selectConversationArea(area) }) return
+        GatewayClient.selectConversationArea(
+            GatewaySettings.baseUrl(this),
+            area.id,
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
                 result.fold(
-                    onSuccess = { turns ->
+                    onSuccess = { conversation ->
+                        conversationAreaState = conversationAreaState.withServerSelection(area.id, conversation)
+                        renderConversationArea()
+                        refreshSelectedAreaConversations()
+                    },
+                    onFailure = { showAreaError(it) },
+                )
+            }
+        }
+    }
+
+    private fun showNewConversationAreaPicker() {
+        val areas = conversationAreaState.areas
+        AlertDialog.Builder(this)
+            .setTitle("New conversation in…")
+            .setItems(areas.map { it.displayName }.toTypedArray()) { _, which ->
+                createConversationInArea(areas[which])
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun createConversationInArea(area: ConversationArea) {
+        if (!prepareAreaMutation { createConversationInArea(area) }) return
+        GatewayClient.createAreaConversation(
+            GatewaySettings.baseUrl(this),
+            area.id,
+            null,
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { conversation ->
+                        conversationAreaState = conversationAreaState
+                            .withServerSelection(area.id, conversation)
+                            .withConversations(conversationAreaState.conversations + conversation)
+                        renderConversationArea()
+                        transcriptView.text = "VIC\nNew conversation started in ${area.displayName}."
+                    },
+                    onFailure = { showAreaError(it) },
+                )
+            }
+        }
+    }
+
+    private fun refreshSelectedAreaConversations(afterRefresh: (() -> Unit)? = null) {
+        GatewayClient.getAreaConversations(
+            GatewaySettings.baseUrl(this),
+            conversationAreaState.selectedAreaId,
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess {
+                    conversationAreaState = conversationAreaState.withConversations(it)
+                    afterRefresh?.invoke()
+                }.onFailure(::showAreaError)
+            }
+        }
+    }
+
+    private fun browseSelectedArea() {
+        refreshSelectedAreaConversations {
+            val conversations = conversationAreaState.conversationsInSelectedArea()
+            if (conversations.isEmpty()) {
+                AlertDialog.Builder(this)
+                    .setTitle(conversationAreaState.selectedArea.displayName)
+                    .setMessage("No conversations in this area yet.")
+                    .setPositiveButton("New conversation") { _, _ ->
+                        createConversationInArea(conversationAreaState.selectedArea)
+                    }
+                    .setNegativeButton("Close", null)
+                    .show()
+                return@refreshSelectedAreaConversations
+            }
+            AlertDialog.Builder(this)
+                .setTitle(conversationAreaState.selectedArea.displayName)
+                .setItems(
+                    conversations.map { "${it.title}  •  ${it.messageCount} messages" }.toTypedArray(),
+                ) { _, which -> selectAreaConversation(conversations[which]) }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+    }
+
+    private fun selectAreaConversation(conversation: AreaConversation) {
+        if (!prepareAreaMutation { selectAreaConversation(conversation) }) return
+        GatewayClient.selectConversation(
+            GatewaySettings.baseUrl(this),
+            conversation.id,
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = {
+                        conversationAreaState = conversationAreaState.withServerSelection(it.areaId, it)
+                        renderConversationArea()
+                        transcriptView.text = "VIC\nResumed “${it.title}” in ${conversationAreaState.selectedArea.displayName}."
+                    },
+                    onFailure = { showAreaError(it) },
+                )
+            }
+        }
+    }
+
+    private fun showMoveConversationPicker(destinationAreaId: String? = null) {
+        val conversation = conversationAreaState.activeConversation
+        if (conversation == null) {
+            Toast.makeText(this, "Start or select a conversation before moving it.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val destinations = conversationAreaState.areas.filter { it.id != conversation.areaId }
+        val requested = destinationAreaId?.let { id -> destinations.firstOrNull { it.id == id } }
+        if (requested != null) {
+            confirmConversationMove(conversation, requested)
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Move conversation to…")
+            .setItems(destinations.map { it.displayName }.toTypedArray()) { _, which ->
+                confirmConversationMove(conversation, destinations[which])
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun confirmConversationMove(
+        conversation: AreaConversation,
+        destination: ConversationArea,
+    ) {
+        if (!prepareAreaMutation { confirmConversationMove(conversation, destination) }) return
+        val confirmation = ConversationAreaModel.moveConfirmation(conversation, destination) ?: return
+        AlertDialog.Builder(this)
+            .setTitle("Confirm move")
+            .setMessage(confirmation)
+            .setPositiveButton("Move conversation") { _, _ ->
+                GatewayClient.moveConversation(
+                    GatewaySettings.baseUrl(this),
+                    conversation,
+                    destination.id,
+                    DeviceCredentials.token(this),
+                ) { result ->
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        result.fold(
+                            onSuccess = {
+                                conversationAreaState = conversationAreaState.withServerSelection(it.areaId, it)
+                                renderConversationArea()
+                                Toast.makeText(this, "Moved to ${destination.displayName}", Toast.LENGTH_SHORT).show()
+                            },
+                            onFailure = { showAreaError(it) },
+                        )
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun handleConversationAreaVoiceCommand(text: String): Boolean {
+        return when (val command = ConversationAreaModel.parseVoiceCommand(text)) {
+            is ConversationAreaVoiceCommand.Select -> {
+                conversationAreaState.areas.firstOrNull { it.id == command.areaId }
+                    ?.let(::selectConversationArea)
+                true
+            }
+            is ConversationAreaVoiceCommand.Create -> {
+                conversationAreaState.areas.firstOrNull { it.id == command.areaId }
+                    ?.let(::createConversationInArea)
+                true
+            }
+            is ConversationAreaVoiceCommand.RequestMove -> {
+                showMoveConversationPicker(command.areaId)
+                true
+            }
+            null -> false
+        }
+    }
+
+    private fun synchronizeConversationAreas() {
+        val preferences = getSharedPreferences(CONVERSATION_SYNC_PREFERENCES, MODE_PRIVATE)
+        GatewayClient.getConversationSync(
+            GatewaySettings.baseUrl(this),
+            preferences.getLong(CONVERSATION_SYNC_CURSOR, 0),
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.onSuccess { sync ->
+                    preferences.edit().putLong(CONVERSATION_SYNC_CURSOR, sync.cursor).apply()
+                    if (sync.selectedAreaId != conversationAreaState.selectedAreaId) {
+                        loadConversationAreas()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showAreaError(error: Throwable) {
+        Toast.makeText(
+            this,
+            "Conversation areas are unavailable: ${error.message.orEmpty()}",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+
+    private fun prepareAreaMutation(afterPause: () -> Unit): Boolean {
+        if (!conversationActive || conversationPaused) return true
+        if (voiceState == VoiceState.PROCESSING) {
+            Toast.makeText(this, "Wait for VIC's current response before changing conversations.", Toast.LENGTH_LONG).show()
+            return false
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Pause before changing conversations?")
+            .setMessage("VIC will preserve the unfinished reply, pause Conversation Mode, and then continue with your requested conversation change.")
+            .setPositiveButton("Pause and continue") { _, _ ->
+                pauseConversationMode()
+                afterPause()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+        return false
+    }
+
+    private fun loadHistory() {
+        historyView.text = "Loading conversation history…"
+        historyView.setTextColor(CarbonPalette.muted)
+        val offsetMinutes = java.time.ZoneId.systemDefault().rules
+            .getOffset(java.time.Instant.now()).totalSeconds / 60
+        GatewayClient.getAreaHistory(
+            GatewaySettings.baseUrl(this),
+            offsetMinutes,
+            areaId = null,
+            deviceToken = DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { days ->
+                        latestAreaHistory = days
                         historyView.setTextColor(CarbonPalette.white)
-                        historyView.text = if (turns.isEmpty()) {
+                        historyView.text = if (days.isEmpty()) {
                             "No recorded turns yet. Your next conversation will appear here."
                         } else {
-                            turns.joinToString("\n\n────────────\n\n") { turn ->
-                                val provider = turn.provider.uppercase(Locale.US)
-                                val timing = if (turn.processingMs > 0) " • ${turn.processingMs} ms" else ""
-                                "YOU\n${turn.transcript}\n\nVIC  •  $provider$timing\n${turn.responseText}"
+                            days.joinToString("\n\n────────────\n\n") { day ->
+                                val conversations = day.conversations.joinToString("\n") { conversation ->
+                                    val area = conversationAreaState.areas
+                                        .firstOrNull { it.id == conversation.areaId }
+                                        ?.displayName ?: conversation.areaId
+                                    "• ${conversation.title}  [$area]  ${conversation.messageCount} messages"
+                                }
+                                "${day.date}\n$conversations"
                             }
                         }
                     },
@@ -3846,6 +4190,58 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
                         historyView.setTextColor(CarbonPalette.red)
                         historyView.text = "History is unavailable right now.\n\n${error.message.orEmpty()}"
                     },
+                )
+            }
+        }
+    }
+
+    private fun showHistoryDayPicker() {
+        if (latestAreaHistory.isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle("Conversation history by day")
+            .setItems(
+                latestAreaHistory.map { "${it.date}  •  ${it.conversations.size} conversations" }
+                    .toTypedArray(),
+            ) { _, dayIndex ->
+                val day = latestAreaHistory[dayIndex]
+                AlertDialog.Builder(this)
+                    .setTitle(day.date)
+                    .setItems(day.conversations.map { conversation ->
+                        val area = conversationAreaState.areas
+                            .firstOrNull { it.id == conversation.areaId }
+                            ?.displayName ?: conversation.areaId
+                        "${conversation.title}  •  $area"
+                    }.toTypedArray()) { _, conversationIndex ->
+                        showConversationHistory(day.conversations[conversationIndex])
+                    }
+                    .setNegativeButton("Close", null)
+                    .show()
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    private fun showConversationHistory(conversation: AreaConversation) {
+        GatewayClient.getConversationMessages(
+            GatewaySettings.baseUrl(this),
+            conversation.id,
+            DeviceCredentials.token(this),
+        ) { result ->
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                result.fold(
+                    onSuccess = { messages ->
+                        val detail = messages.joinToString("\n\n") { message ->
+                            "${message.role.uppercase(Locale.US)}\n${message.content}"
+                        }.ifBlank { "No messages in this conversation." }
+                        AlertDialog.Builder(this)
+                            .setTitle(conversation.title)
+                            .setMessage(detail)
+                            .setPositiveButton("Select") { _, _ -> selectAreaConversation(conversation) }
+                            .setNegativeButton("Close", null)
+                            .show()
+                    },
+                    onFailure = { showAreaError(it) },
                 )
             }
         }
@@ -4098,5 +4494,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         private const val PLAYBACK_PREFERENCES = "voiceos_playback"
         private const val SPEECH_RATE_KEY = "speech_rate"
         private const val TTS_VOICE_KEY = "tts_voice_name"
+        private const val CONVERSATION_SYNC_PREFERENCES = "voiceos_conversation_sync"
+        private const val CONVERSATION_SYNC_CURSOR = "cursor"
     }
 }

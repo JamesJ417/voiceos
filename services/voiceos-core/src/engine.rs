@@ -431,7 +431,16 @@ impl ConversationEngine {
             });
         }
 
-        let mut messages = vec![ChatMessage::new(Role::System, &self.config.system_prompt)];
+        let mut messages = vec![
+            ChatMessage::new(Role::System, &self.config.system_prompt),
+            ChatMessage::new(
+                Role::System,
+                format!(
+                    "Current conversation area: {}. Keep area-derived context inside this area unless the user explicitly moves the conversation.",
+                    context.area_id
+                ),
+            ),
+        ];
         if !context.memories.is_empty() {
             messages.push(ChatMessage::new(
                 Role::System,

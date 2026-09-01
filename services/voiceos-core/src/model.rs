@@ -158,6 +158,7 @@ pub struct AttachmentRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConversationContext {
     pub conversation_id: String,
+    pub area_id: String,
     pub summary: Option<String>,
     pub memories: Vec<Memory>,
     pub document_context: Option<String>,
@@ -168,6 +169,7 @@ pub struct ConversationContext {
 pub struct ConversationMessage {
     pub sequence: i64,
     pub conversation_id: String,
+    pub area_id: String,
     pub role: Role,
     pub content: String,
     pub provider: Option<String>,
@@ -175,6 +177,75 @@ pub struct ConversationMessage {
     pub created_at: String,
     #[serde(default)]
     pub attachments: Vec<AttachmentRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationArea {
+    pub id: String,
+    pub display_name: String,
+    pub position: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationRecord {
+    pub id: String,
+    pub owner_id: String,
+    pub area_id: String,
+    pub title: String,
+    pub status: String,
+    pub message_count: u64,
+    pub last_message_preview: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub area_updated_at: String,
+    pub area_updated_by_device: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationDay {
+    pub date: String,
+    pub conversations: Vec<ConversationRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationExport {
+    pub version: u8,
+    pub export_id: String,
+    pub source_conversation_id: String,
+    pub area_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub messages: Vec<ConversationExportMessage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationExportMessage {
+    pub role: Role,
+    pub content: String,
+    pub provider: Option<String>,
+    pub origin_device_id: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConversationSyncRecord {
+    pub conversation_id: String,
+    pub area_id: String,
+    pub area_updated_at: String,
+    pub area_updated_by_device: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationSyncPayload {
+    pub cursor: i64,
+    pub selected_area_id: String,
+    pub active_conversation_id: Option<String>,
+    pub conversations: Vec<ConversationSyncRecord>,
+    pub messages: Vec<ConversationMessage>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -7,8 +7,8 @@ internal class ResumableResponse(initialResponse: String? = null) {
     val pending: String?
         get() = response
 
-    fun pause(currentSpeech: String?, isSpeaking: Boolean): Boolean {
-        if (!isSpeaking) return false
+    fun pause(currentSpeech: String?, isSpeaking: Boolean, isQueued: Boolean = false): Boolean {
+        if (!isSpeaking && !isQueued) return false
         response = currentSpeech?.takeIf(String::isNotBlank)
         return response != null
     }

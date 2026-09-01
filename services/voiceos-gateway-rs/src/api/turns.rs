@@ -25,6 +25,7 @@ pub(crate) struct TurnRequest {
 #[derive(Serialize)]
 pub(crate) struct TurnResponse {
     session_id: String,
+    area_id: String,
     transcript: String,
     response_text: String,
     processing_ms: u128,
@@ -115,8 +116,20 @@ pub(crate) async fn turn(
         .iter()
         .map(|call| json!({"name": call.name, "arguments": call.arguments}))
         .collect();
+    let area_id = state
+        .store
+        .conversation_for_owner(&state.primary_owner_id, &conversation_id)
+        .map_err(|error| api_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+        .map(|conversation| conversation.area_id)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "conversation_missing_after_turn",
+            )
+        })?;
     Ok(Json(TurnResponse {
         session_id: conversation_id,
+        area_id,
         transcript: text,
         response_text: completion.text,
         processing_ms: started.elapsed().as_millis().max(1),

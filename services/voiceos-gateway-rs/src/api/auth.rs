@@ -10,9 +10,9 @@ use super::error::{ApiResult, api_error};
 
 pub(crate) fn authenticate(state: &AppState, headers: &HeaderMap) -> ApiResult<String> {
     if !state.require_device_auth {
-        return Ok(header_text(headers, "x-voiceos-device-id")
-            .unwrap_or("development-device")
-            .to_owned());
+        // Explicit local-development mode has one fixed identity. Never trust a
+        // caller-controlled device header as an authorization identity.
+        return Ok("development-device".to_owned());
     }
 
     let token = header_text(headers, "authorization")

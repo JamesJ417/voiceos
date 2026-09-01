@@ -361,10 +361,28 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             capability_scope_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            lease_id TEXT,
+            lease_capabilities_json TEXT,
+            lease_expires_at TEXT,
+            checkpoint_sequence INTEGER NOT NULL DEFAULT 0,
+            cancellation_reason TEXT,
             FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
             FOREIGN KEY(task_id) REFERENCES tasks(task_id),
             UNIQUE(owner_id, idempotency_key)
         );
+        CREATE TABLE IF NOT EXISTS execution_checkpoints (
+            checkpoint_id TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            sequence INTEGER NOT NULL,
+            state_json TEXT NOT NULL,
+            rollback_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(job_id) REFERENCES jobs(job_id),
+            UNIQUE(owner_id, job_id, sequence)
+        );
+        CREATE INDEX IF NOT EXISTS execution_checkpoints_job_idx ON execution_checkpoints(owner_id, job_id, sequence DESC);
         CREATE TABLE IF NOT EXISTS skills (
             skill_id TEXT PRIMARY KEY,
             owner_id TEXT NOT NULL,
@@ -524,6 +542,30 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
     add_column(connection, "conversations", "owner_id", "TEXT")?;
+    add_column(
+        connection,
+        "conversations",
+        "area_id",
+        "TEXT NOT NULL DEFAULT 'general-talk'",
+    )?;
+    add_column(
+        connection,
+        "conversations",
+        "title",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(
+        connection,
+        "conversations",
+        "area_updated_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    add_column(
+        connection,
+        "conversations",
+        "area_updated_by_device",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     add_column(connection, "messages", "origin_device_id", "TEXT")?;
     add_column(connection, "messages", "request_id", "TEXT")?;
     add_column(connection, "conversation_summaries", "owner_id", "TEXT")?;
@@ -537,6 +579,7 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     )?;
     add_column(connection, "memories", "owner_id", "TEXT")?;
     add_column(connection, "memories", "conversation_id", "TEXT")?;
+    add_column(connection, "memories", "area_id", "TEXT")?;
     add_column(
         connection,
         "memories",
@@ -758,6 +801,70 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     )?;
     connection.execute_batch(
         r#"
+        CREATE TABLE IF NOT EXISTS conversation_areas (
+            area_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            position INTEGER NOT NULL UNIQUE,
+            built_in INTEGER NOT NULL DEFAULT 1 CHECK(built_in IN (0,1))
+        );
+        INSERT INTO conversation_areas(area_id,display_name,position,built_in) VALUES
+            ('general-talk','General Talk',0,1),
+            ('brick-copper','Brick & Copper',1,1),
+            ('vine-branch-deli','Vine and Branch Deli',2,1),
+            ('sb-dom-online-ai','S&B / Dom / Online AI',3,1),
+            ('personal','Personal',4,1),
+            ('religious-biblical','Religious / Biblical',5,1)
+        ON CONFLICT(area_id) DO UPDATE SET
+            display_name=excluded.display_name,
+            position=excluded.position,
+            built_in=excluded.built_in;
+        CREATE TABLE IF NOT EXISTS conversation_area_migrations (
+            migration_id TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        );
+        UPDATE conversations SET area_id='general-talk'
+            WHERE NOT EXISTS(
+                SELECT 1 FROM conversation_area_migrations
+                WHERE migration_id='legacy-to-general-talk-v1'
+            ) AND (area_id IS NULL OR area_id='' OR area_id NOT IN (SELECT area_id FROM conversation_areas));
+        INSERT OR IGNORE INTO conversation_area_migrations(migration_id,applied_at)
+            VALUES('legacy-to-general-talk-v1',datetime('now'));
+        UPDATE conversations SET area_updated_at=updated_at WHERE area_updated_at='';
+        UPDATE conversations SET area_updated_by_device=device_id WHERE area_updated_by_device='';
+        UPDATE memories SET area_id=(
+            SELECT c.area_id FROM conversations c WHERE c.conversation_id=memories.conversation_id
+        ) WHERE conversation_id IS NOT NULL AND (area_id IS NULL OR area_id='');
+        CREATE INDEX IF NOT EXISTS conversations_owner_area_updated_idx
+            ON conversations(owner_id,area_id,updated_at DESC);
+        CREATE INDEX IF NOT EXISTS messages_created_idx ON messages(created_at,message_id);
+        CREATE INDEX IF NOT EXISTS memories_owner_area_idx ON memories(owner_id,area_id,updated_at DESC);
+        CREATE TABLE IF NOT EXISTS owner_area_selections (
+            owner_id TEXT PRIMARY KEY,
+            area_id TEXT NOT NULL,
+            conversation_id TEXT,
+            updated_at TEXT NOT NULL,
+            updated_by_device TEXT NOT NULL,
+            FOREIGN KEY(owner_id) REFERENCES owners(owner_id),
+            FOREIGN KEY(area_id) REFERENCES conversation_areas(area_id),
+            FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
+        );
+        CREATE TABLE IF NOT EXISTS conversation_mutations (
+            owner_id TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(owner_id,request_id)
+        );
+        CREATE TABLE IF NOT EXISTS conversation_imports (
+            owner_id TEXT NOT NULL,
+            import_id TEXT NOT NULL,
+            source_conversation_id TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            imported_at TEXT NOT NULL,
+            PRIMARY KEY(owner_id,import_id),
+            FOREIGN KEY(conversation_id) REFERENCES conversations(conversation_id)
+        );
         CREATE TABLE IF NOT EXISTS owner_devices (
             owner_id TEXT NOT NULL,
             device_id TEXT NOT NULL UNIQUE,
@@ -779,6 +886,13 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS active_memory_device_content_idx ON memories(device_id, normalized_content) WHERE owner_id IS NULL AND status='active';
         CREATE INDEX IF NOT EXISTS documents_owner_idx ON documents(owner_id, created_at);
         "#,
+    )?;
+    connection.execute(
+        "INSERT INTO owner_area_selections(owner_id,area_id,conversation_id,updated_at,updated_by_device) \
+         SELECT o.owner_id,COALESCE(c.area_id,'general-talk'),c.conversation_id,COALESCE(c.updated_at,o.updated_at),COALESCE(c.device_id,'migration') \
+         FROM owners o LEFT JOIN conversations c ON c.owner_id=o.owner_id AND c.status='active' \
+         WHERE true ON CONFLICT(owner_id) DO NOTHING",
+        [],
     )?;
     migrate_sleep_cycle_mode_constraint(connection)?;
     add_column(
@@ -814,6 +928,18 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "secret_reference",
         "TEXT",
     )?;
+    // Existing databases may predate the execution columns added to the
+    // CREATE TABLE definition above. Keep the migration additive and safe.
+    add_column(connection, "jobs", "lease_id", "TEXT")?;
+    add_column(connection, "jobs", "lease_capabilities_json", "TEXT")?;
+    add_column(connection, "jobs", "lease_expires_at", "TEXT")?;
+    add_column(
+        connection,
+        "jobs",
+        "checkpoint_sequence",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    add_column(connection, "jobs", "cancellation_reason", "TEXT")?;
     Ok(())
 }
 
@@ -876,12 +1002,13 @@ fn migrate_memory_lifecycle_constraint(connection: &Connection) -> rusqlite::Res
          CREATE TABLE memories_rebuilt (
            memory_id TEXT PRIMARY KEY, device_id TEXT NOT NULL, normalized_content TEXT NOT NULL,
            content TEXT NOT NULL, source TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-           owner_id TEXT, conversation_id TEXT, category TEXT NOT NULL DEFAULT 'general',
+           owner_id TEXT, conversation_id TEXT, area_id TEXT, category TEXT NOT NULL DEFAULT 'general',
            status TEXT NOT NULL DEFAULT 'active', confidence REAL NOT NULL DEFAULT 1.0,
            provenance TEXT NOT NULL DEFAULT '', supersedes_memory_id TEXT,
-           FOREIGN KEY(device_id) REFERENCES devices(device_id));
-         INSERT INTO memories_rebuilt(memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,conversation_id,category,status,confidence,provenance,supersedes_memory_id)
-           SELECT memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,conversation_id,category,status,confidence,provenance,supersedes_memory_id FROM memories;
+           FOREIGN KEY(device_id) REFERENCES devices(device_id),
+           UNIQUE(device_id, normalized_content));
+         INSERT INTO memories_rebuilt(memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,conversation_id,area_id,category,status,confidence,provenance,supersedes_memory_id)
+           SELECT memory_id,device_id,normalized_content,content,source,created_at,updated_at,owner_id,conversation_id,area_id,category,status,confidence,provenance,supersedes_memory_id FROM memories;
          DROP TABLE memories;
          ALTER TABLE memories_rebuilt RENAME TO memories;
          COMMIT;",

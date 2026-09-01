@@ -24,6 +24,20 @@ fn public_event_type(event_type: &str) -> Option<&str> {
     match event_type {
         "conversation.floor.changed" => Some("conversation.floor.changed"),
         "conversation.turn" => Some("conversation.turn"),
+        value
+            if value.starts_with("conversation.")
+                && matches!(
+                    value,
+                    "conversation.created"
+                        | "conversation.selected"
+                        | "conversation.area_selected"
+                        | "conversation.moved"
+                        | "conversation.imported"
+                        | "conversation.area_synced"
+                ) =>
+        {
+            Some("conversation.catalog.changed")
+        }
         "approval.proposed" => Some("approval.proposed"),
         "approval.decided" => Some("approval.decided"),
         "daily_plan.proposed" => Some("daily_plan.proposed"),
@@ -47,6 +61,7 @@ fn client_event(event: ExecutionEvent) -> Option<Value> {
     let (channel, attention, interrupt_audio) = match event_type {
         "conversation.turn" => ("conversation", "conversation", true),
         "conversation.floor.changed" => ("conversation", "floor", true),
+        "conversation.catalog.changed" => ("background", "catalog", false),
         "approval.proposed" | "approval.decided" => ("conversation", "approval", false),
         _ => ("background", "none", false),
     };

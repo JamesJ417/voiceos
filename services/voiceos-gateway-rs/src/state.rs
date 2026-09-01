@@ -20,6 +20,7 @@ pub(crate) struct AppState {
     pub(crate) ontology: Arc<Interpreter>,
     pub(crate) legacy_audit_path: PathBuf,
     pub(crate) require_device_auth: bool,
+    pub(crate) gateway_service_token: Option<String>,
     pub(crate) primary_owner_id: String,
     pub(crate) pending_capture_devices: Arc<Mutex<HashMap<String, Instant>>>,
 }

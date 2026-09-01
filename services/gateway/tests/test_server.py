@@ -7,7 +7,7 @@ import os
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,6 +19,8 @@ from services.gateway.tools import ToolBroker
 from services.gateway.server import (
     _bounded_fieldy_context,
     _clean_hermes_completion_report,
+    _get_json,
+    _post_json,
     _normalize_fieldy_webhook,
     _personal_extraction_prompt,
     _publish_agent_activity,
@@ -73,6 +75,29 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(3, worker["total_steps"])
         self.assertIn("task.changed", [kind for kind, _ in event_store.events])
 
+    def test_internal_json_helpers_attach_configured_service_token(self) -> None:
+        response = MagicMock()
+        response.read.return_value = b'{"ok":true}'
+        response.__enter__.return_value = response
+        with patch("services.gateway.server.urlopen", return_value=response) as opened:
+            _get_json(
+                "http://rust-core/internal/v1/personal/fieldy/pending",
+                service_token="configured-gateway-token",
+            )
+            _post_json(
+                "http://rust-core/internal/v1/tasks/actions",
+                {"action": "progress.record"},
+                service_token="configured-gateway-token",
+            )
+
+        self.assertEqual(2, opened.call_count)
+        for call in opened.call_args_list:
+            request = call.args[0]
+            self.assertEqual(
+                "configured-gateway-token",
+                request.get_header("X-voiceos-gateway-service-token"),
+            )
+
     def test_personal_extraction_accepts_only_one_json_object(self) -> None:
         self.assertEqual(
             {"candidates": []},
@@ -119,7 +144,13 @@ Second result.
         cls.temporary_directory = tempfile.TemporaryDirectory()
         cls.audit_store = AuditStore(Path(cls.temporary_directory.name) / "audit.sqlite3")
         cls.server = create_server(
-            "127.0.0.1", 0, audit_store=cls.audit_store, admin_token="test-admin"
+            "127.0.0.1",
+            0,
+            audit_store=cls.audit_store,
+            admin_token="test-admin",
+            # Tests exercise the explicit loopback-only local-development path.
+            require_device_auth=False,
+            memory_service_token="test-gateway-service-token",
         )
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -550,6 +581,128 @@ Second result.
         finally:
             self.server.require_device_auth = False
 
+    def test_device_authentication_is_required_by_default(self) -> None:
+        audit = AuditStore(Path(self.temporary_directory.name) / "default-auth.sqlite3")
+        server = create_server("127.0.0.1", 0, audit_store=audit)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = HTTPConnection("127.0.0.1", server.server_port, timeout=2)
+            connection.request("GET", "/v1/providers")
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            connection.close()
+            self.assertEqual(401, response.status)
+            self.assertEqual("device_authentication_required", payload["error"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            audit.close()
+
+    def test_explicit_local_development_mode_ignores_caller_supplied_device_identity(self) -> None:
+        class BootstrapStub(BaseHTTPRequestHandler):
+            forwarded_device_id: str | None = None
+
+            def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+                type(self).forwarded_device_id = self.headers.get("X-VoiceOS-Device-ID")
+                body = json.dumps({"device_id": type(self).forwarded_device_id}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), BootstrapStub)
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        try:
+            status, payload = self.request(
+                "GET",
+                "/v1/client/bootstrap",
+                headers={"X-VoiceOS-Device-ID": "another-device"},
+            )
+            self.assertEqual(200, status)
+            self.assertEqual("development-device", payload["device_id"])
+            self.assertEqual("development-device", BootstrapStub.forwarded_device_id)
+        finally:
+            self.server.memory_url = original_memory_url
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
+    def test_capability_proxies_do_not_receive_the_rust_service_credential(self) -> None:
+        class CapabilityStub(BaseHTTPRequestHandler):
+            service_token: str | None = None
+
+            def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+                type(self).service_token = self.headers.get("X-VoiceOS-Gateway-Service-Token")
+                body = b'{"worker":"ok"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        worker = ThreadingHTTPServer(("127.0.0.1", 0), CapabilityStub)
+        thread = threading.Thread(target=worker.serve_forever, daemon=True)
+        thread.start()
+        original_speech_worker_url = self.server.speech_worker_url
+        original_memory_service_token = self.server.memory_service_token
+        self.server.speech_worker_url = f"http://127.0.0.1:{worker.server_port}"
+        self.server.memory_service_token = "rust-only-service-token"
+        try:
+            status, _payload = self.request("GET", "/v1/capabilities/speech/health")
+            self.assertEqual(200, status)
+            self.assertIsNone(CapabilityStub.service_token)
+        finally:
+            self.server.speech_worker_url = original_speech_worker_url
+            self.server.memory_service_token = original_memory_service_token
+            worker.shutdown()
+            worker.server_close()
+            thread.join(timeout=2)
+
+    def test_gateway_proxies_memory_requests_with_service_authentication(self) -> None:
+        class BootstrapStub(BaseHTTPRequestHandler):
+            service_token: str | None = None
+
+            def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+                type(self).service_token = self.headers.get("X-VoiceOS-Gateway-Service-Token")
+                status = 200 if type(self).service_token == "test-service-token" else 401
+                body = json.dumps({"device_id": "development-device"}).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        core = ThreadingHTTPServer(("127.0.0.1", 0), BootstrapStub)
+        thread = threading.Thread(target=core.serve_forever, daemon=True)
+        thread.start()
+        original_memory_url = self.server.memory_url
+        self.server.memory_url = f"http://127.0.0.1:{core.server_port}"
+        try:
+            self.server.memory_service_token = "test-service-token"
+            status, _payload = self.request("GET", "/v1/client/bootstrap")
+            self.assertEqual(200, status)
+            self.assertEqual("test-service-token", BootstrapStub.service_token)
+        finally:
+            self.server.memory_url = original_memory_url
+            core.shutdown()
+            core.server_close()
+            thread.join(timeout=2)
+
     def test_outreach_creation_is_mirrored_to_the_durable_bridge_inbox(self) -> None:
         _publish_outreach_created(
             self.audit_store,
@@ -906,7 +1059,7 @@ Second result.
             self.assertEqual("shared-owner-conversation", router.conversation_id)
             self.assertEqual("ollama", router.provider_hint)
             self.assertTrue((router.image_data_urls or [""])[0].startswith("data:image/png;base64,"))
-            self.assertEqual("pixel-owner", MemoryCoreStub.prepare["device_id"])  # type: ignore[index]
+            self.assertEqual("development-device", MemoryCoreStub.prepare["device_id"])  # type: ignore[index]
             self.assertEqual(["attachment-1"], MemoryCoreStub.prepare["attachment_ids"])  # type: ignore[index]
             self.assertEqual("I remember the GPU rig.", MemoryCoreStub.commit["response_text"])  # type: ignore[index]
             self.assertEqual("ollama", MemoryCoreStub.commit["provider"])  # type: ignore[index]

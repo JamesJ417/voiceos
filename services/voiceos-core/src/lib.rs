@@ -1,10 +1,14 @@
 mod agent_store;
 mod calendar_secret_store;
-mod engine;
+mod conversation_area;
+mod conversation_store;
+pub mod engine;
+pub mod execution;
 mod fieldy;
 mod floor;
 mod focus;
 mod google_calendar_oauth;
+mod governance;
 mod integrity;
 mod model;
 mod outreach;
@@ -24,6 +28,9 @@ pub use calendar_secret_store::{
     InMemoryCalendarSecretStore, SecretServiceBackend, SecretServiceBackendError,
     SecretToolCalendarSecretStore, UnavailableCalendarSecretStore,
 };
+pub use conversation_area::{
+    GENERAL_TALK_AREA_ID, built_in_conversation_areas, is_valid_conversation_area,
+};
 pub use engine::{
     ConversationEngine, EngineConfig, EngineError, ExplicitMemoryExtractor, HeuristicSummarizer,
     MemoryExtractor, OwnerTurnInput, Summarizer,
@@ -39,13 +46,19 @@ pub use google_calendar_oauth::{
     GoogleCalendarOAuthConfiguration, GoogleCalendarOAuthConfigurationError,
     ValidatedGoogleCalendarOAuthConfiguration,
 };
+pub use governance::{
+    AuditEvent, AuthorizationContext, CapabilityGrant, Identity, IdentityError, PublicAuditEvent,
+    ReleaseManifest,
+};
 pub use integrity::{
     ContextClaim, ContextSource, IntegrityReport, QuarantinedClaim, validate_context,
 };
 pub use model::{
     ArtifactRecord, AttachmentRecord, AutomationProposal, CaptureProposal, CaptureSource,
-    ChatMessage, ConversationContext, ConversationFloor, ConversationMessage, DailyFocusReset,
-    DocumentRecord, ExecutionEvent, FocusPriority, FocusSessionRecord, FocusSnapshot, GoalRecord,
+    ChatMessage, ConversationArea, ConversationContext, ConversationDay, ConversationExport,
+    ConversationExportMessage, ConversationFloor, ConversationMessage, ConversationRecord,
+    ConversationSyncPayload, ConversationSyncRecord, DailyFocusReset, DocumentRecord,
+    ExecutionEvent, FocusPriority, FocusSessionRecord, FocusSnapshot, GoalRecord,
     GoogleCalendarConnection, JobRecord, LiveMemoryChange, Memory, NewCaptureProposal,
     NewOutreachDelivery, NewOutreachProposal, NewPersonalCapture, NewProactiveCandidate,
     NewProactiveFeedback, NewProactiveSubscription, OutreachDelivery, OutreachPolicy,

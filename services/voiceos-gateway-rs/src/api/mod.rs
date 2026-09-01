@@ -6,6 +6,7 @@ mod conversations;
 mod documents;
 mod error;
 mod events;
+mod executions;
 mod floor;
 mod focus;
 mod google_calendar;
@@ -22,8 +23,15 @@ mod tasks;
 mod turns;
 mod uploads;
 
-use axum::Router;
 use axum::routing::{delete, get, post, put};
+use axum::{
+    Json, Router,
+    extract::{Request, State},
+    http::{StatusCode, header::HeaderName},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+};
+use serde_json::json;
 
 use crate::state::AppState;
 
@@ -78,6 +86,37 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/v1/focus/sessions", post(focus::start))
         .route("/v1/focus/sessions/{session_id}/actions", post(focus::act))
         .route("/v1/turns/text", post(turns::turn))
+        .route("/v1/conversation-areas", get(conversations::areas))
+        .route(
+            "/v1/conversation-areas/{area_id}/select",
+            post(conversations::select_area),
+        )
+        .route(
+            "/v1/conversations",
+            get(conversations::list).post(conversations::create),
+        )
+        .route("/v1/conversations/history", get(conversations::history))
+        .route("/v1/conversations/import", post(conversations::import))
+        .route(
+            "/v1/conversations/sync",
+            get(conversations::sync_get).post(conversations::sync_apply),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/select",
+            post(conversations::select),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/move",
+            post(conversations::move_conversation),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/export",
+            get(conversations::export),
+        )
+        .route(
+            "/v1/conversations/{conversation_id}/messages",
+            get(conversations::conversation_messages),
+        )
         .route("/v1/conversations/active", get(conversations::active))
         .route("/v1/memories", get(memories::list).post(memories::create))
         .route("/v1/memories/{memory_id}", delete(memories::forget))
@@ -121,6 +160,17 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/v1/skills/{skill_id}/status", post(skills::set_status))
         .route("/v1/tasks", get(tasks::list_tasks).post(tasks::create_task))
+        .route("/v1/executions/{job_id}", get(executions::live))
+        .route(
+            "/v1/executions/{job_id}/lease",
+            post(executions::acquire_lease),
+        )
+        .route(
+            "/v1/executions/{job_id}/checkpoints",
+            post(executions::checkpoint),
+        )
+        .route("/v1/executions/{job_id}/cancel", post(executions::cancel))
+        .route("/v1/executions/{job_id}/resume", post(executions::resume))
         .route("/v1/tasks/review/claim", post(tasks::claim_task_review))
         .route("/v1/projects", get(projects::list).post(projects::create))
         .route("/v1/tasks/{task_id}", get(tasks::task_detail))
@@ -229,7 +279,50 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/internal/v1/skills/import", post(skills::import_proposal))
         .route("/internal/v1/skills/usages", post(skills::record_usage))
-        .with_state(state)
+        .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(
+            state,
+            require_gateway_service,
+        ))
+}
+
+async fn require_gateway_service(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !request.uri().path().starts_with("/internal/") {
+        return next.run(request).await;
+    }
+    let Some(expected) = state.gateway_service_token.as_deref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"gateway_service_authentication_unconfigured"})),
+        )
+            .into_response();
+    };
+    let supplied = request
+        .headers()
+        .get(HeaderName::from_static("x-voiceos-gateway-service-token"))
+        .and_then(|value| value.to_str().ok());
+    if supplied.is_none_or(|value| !constant_time_eq(value, expected)) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"gateway_service_authentication_required"})),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.bytes()
+        .zip(right.bytes())
+        .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+        == 0
 }
 
 #[cfg(test)]
@@ -330,6 +423,7 @@ mod integration_tests {
             ),
             legacy_audit_path: legacy_audit_path.clone(),
             require_device_auth: true,
+            gateway_service_token: Some("test-gateway-service-token".to_owned()),
             primary_owner_id: OWNER.into(),
             pending_capture_devices: Arc::default(),
         };
@@ -344,6 +438,60 @@ mod integration_tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    #[tokio::test]
+    async fn internal_routes_reject_missing_and_invalid_service_credentials_but_accept_valid_credentials()
+     {
+        let (app, _store, path) = authenticated_router();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/v1/personal/command")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"device_id":"spoofed-device","text":"capture this private note"})
+                    .to_string(),
+            ))
+            .unwrap();
+
+        let (status, body) = response(app.clone(), request).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "gateway_service_authentication_required");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/v1/personal/command")
+            .header("content-type", "application/json")
+            .header(
+                "x-voiceos-gateway-service-token",
+                "wrong-gateway-service-token",
+            )
+            .body(Body::from(
+                json!({"device_id":"spoofed-device","text":"capture this private note"})
+                    .to_string(),
+            ))
+            .unwrap();
+        let (status, body) = response(app.clone(), request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "gateway_service_authentication_required");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/internal/v1/personal/command")
+            .header("content-type", "application/json")
+            .header(
+                "x-voiceos-gateway-service-token",
+                "test-gateway-service-token",
+            )
+            .body(Body::from(
+                json!({"device_id":"gateway-device","text":"capture this private note"})
+                    .to_string(),
+            ))
+            .unwrap();
+        let (status, _body) = response(app, request).await;
+        assert_ne!(status, StatusCode::UNAUTHORIZED);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -762,6 +910,10 @@ mod integration_tests {
             Request::builder()
                 .method("POST")
                 .uri("/internal/v1/personal/fieldy")
+                .header(
+                    "x-voiceos-gateway-service-token",
+                    "test-gateway-service-token",
+                )
                 .header("content-type", "application/json")
                 .body(Body::from(event.to_string()))
                 .unwrap()
@@ -780,6 +932,10 @@ mod integration_tests {
             Request::builder()
                 .method("GET")
                 .uri("/internal/v1/personal/fieldy/pending?quiet_seconds=0")
+                .header(
+                    "x-voiceos-gateway-service-token",
+                    "test-gateway-service-token",
+                )
                 .body(Body::empty())
                 .unwrap()
         };
@@ -794,6 +950,10 @@ mod integration_tests {
                 "/internal/v1/personal/fieldy/context/{}",
                 capture["id"].as_str().unwrap()
             ))
+            .header(
+                "x-voiceos-gateway-service-token",
+                "test-gateway-service-token",
+            )
             .body(Body::empty())
             .unwrap();
         let (context_status, context) = response(app.clone(), context_request).await;
@@ -810,6 +970,10 @@ mod integration_tests {
                 "/internal/v1/personal/captures/{}/extract",
                 capture["id"].as_str().unwrap()
             ))
+            .header(
+                "x-voiceos-gateway-service-token",
+                "test-gateway-service-token",
+            )
             .header("content-type", "application/json")
             .body(Body::from(
                 json!({"output": {
@@ -986,6 +1150,10 @@ mod integration_tests {
             Request::builder()
                 .method("POST")
                 .uri("/internal/v1/personal/command")
+                .header(
+                    "x-voiceos-gateway-service-token",
+                    "test-gateway-service-token",
+                )
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({"device_id":"voice-device","text":text}).to_string(),
@@ -1041,6 +1209,10 @@ mod integration_tests {
         let request = Request::builder()
             .method("POST")
             .uri("/internal/v1/personal/command")
+            .header(
+                "x-voiceos-gateway-service-token",
+                "test-gateway-service-token",
+            )
             .header("content-type", "application/json")
             .body(Body::from(
                 json!({"device_id":"voice-device","text":"discard that"}).to_string(),
@@ -1117,6 +1289,10 @@ mod integration_tests {
         let start = Request::builder()
             .method("POST")
             .uri("/internal/v1/tasks/subagents")
+            .header(
+                "x-voiceos-gateway-service-token",
+                "test-gateway-service-token",
+            )
             .header("content-type", "application/json")
             .body(Body::from(
                 json!({
@@ -1141,6 +1317,10 @@ mod integration_tests {
         let duplicate = Request::builder()
             .method("POST")
             .uri("/internal/v1/tasks/subagents")
+            .header(
+                "x-voiceos-gateway-service-token",
+                "test-gateway-service-token",
+            )
             .header("content-type", "application/json")
             .body(Body::from(
                 json!({"worker_id": "run_test_1", "status": "running"}).to_string(),
@@ -1154,6 +1334,10 @@ mod integration_tests {
         let finish = Request::builder()
             .method("POST")
             .uri("/internal/v1/tasks/subagents")
+            .header(
+                "x-voiceos-gateway-service-token",
+                "test-gateway-service-token",
+            )
             .header("content-type", "application/json")
             .body(Body::from(
                 json!({
@@ -1231,6 +1415,474 @@ mod integration_tests {
                 .unwrap()
                 .status,
             "discarded"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn conversation_http_routes_preserve_area_isolation_and_selection() {
+        let (app, store, path) = authenticated_router();
+        let authenticated = |method: &str, uri: &str, body: Value| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(if body.is_null() {
+                    Body::empty()
+                } else {
+                    Body::from(body.to_string())
+                })
+                .unwrap()
+        };
+
+        let (status, first) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                "/v1/conversations",
+                json!({"area_id":"brick-copper","title":"First","request_id":"http-isolation-1"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let first_id = first["conversation"]["id"].as_str().unwrap().to_owned();
+
+        let (status, second) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                "/v1/conversations",
+                json!({"area_id":"personal","title":"Second","request_id":"http-isolation-2"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let second_id = second["conversation"]["id"].as_str().unwrap().to_owned();
+        store
+            .append_message(&first_id, voiceos_core::Role::User, "first message", None)
+            .unwrap();
+        store
+            .append_message(&second_id, voiceos_core::Role::User, "second message", None)
+            .unwrap();
+
+        let (status, brick) = response(
+            app.clone(),
+            authenticated("GET", "/v1/conversations?area_id=brick-copper", Value::Null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(brick["conversations"].as_array().unwrap().len(), 1);
+        assert_eq!(brick["conversations"][0]["id"], first_id);
+
+        let (status, selected) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                "/v1/conversation-areas/personal/select",
+                json!({"request_id":"http-isolation-select"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(selected["selected_area_id"], "personal");
+        assert_eq!(selected["conversation"]["id"], second_id);
+
+        let (status, personal_history) = response(
+            app,
+            authenticated(
+                "GET",
+                "/v1/conversations/history?area_id=personal",
+                Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            personal_history["days"][0]["conversations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            personal_history["days"][0]["conversations"][0]["id"],
+            second_id
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn conversation_http_export_import_round_trip_preserves_metadata_and_messages() {
+        let (app, store, path) = authenticated_router();
+        let authenticated = |method: &str, uri: &str, body: Value| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(if body.is_null() {
+                    Body::empty()
+                } else {
+                    Body::from(body.to_string())
+                })
+                .unwrap()
+        };
+
+        let (status, created) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                "/v1/conversations",
+                json!({"area_id":"brick-copper","title":"Export me","request_id":"http-export-create"}),
+            ),
+        ).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let source_id = created["conversation"]["id"].as_str().unwrap().to_owned();
+        store
+            .append_message(&source_id, voiceos_core::Role::User, "keep this", None)
+            .unwrap();
+        store
+            .append_message(
+                &source_id,
+                voiceos_core::Role::Assistant,
+                "and this",
+                Some("test-provider"),
+            )
+            .unwrap();
+
+        let (status, exported) = response(
+            app.clone(),
+            authenticated(
+                "GET",
+                &format!("/v1/conversations/{source_id}/export"),
+                Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            exported["conversation"]["source_conversation_id"],
+            source_id
+        );
+        assert_eq!(
+            exported["conversation"]["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let (status, imported) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                "/v1/conversations/import",
+                json!({"import_id":"http-export-import-1","conversation":exported["conversation"]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let imported_id = imported["conversation"]["id"].as_str().unwrap().to_owned();
+        assert_ne!(imported_id, source_id);
+        assert_eq!(imported["conversation"]["area_id"], "brick-copper");
+        assert_eq!(imported["conversation"]["title"], "Export me");
+
+        let (status, messages) = response(
+            app.clone(),
+            authenticated(
+                "GET",
+                &format!("/v1/conversations/{imported_id}/messages"),
+                Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(messages["messages"][0]["content"], "keep this");
+        assert_eq!(messages["messages"][1]["content"], "and this");
+
+        let (_, duplicate) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                "/v1/conversations/import",
+                json!({"import_id":"http-export-import-1","conversation":exported["conversation"]}),
+            ),
+        )
+        .await;
+        assert_eq!(duplicate["conversation"]["id"], imported_id);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn conversation_http_sync_applies_newer_area_and_rejects_invalid_records() {
+        let (app, _store, path) = authenticated_router();
+        let authenticated = |method: &str, uri: &str, body: Value| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(if body.is_null() {
+                    Body::empty()
+                } else {
+                    Body::from(body.to_string())
+                })
+                .unwrap()
+        };
+        let (_, created) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                "/v1/conversations",
+                json!({"area_id":"brick-copper","title":"Sync me","request_id":"http-sync-create"}),
+            ),
+        )
+        .await;
+        let conversation_id = created["conversation"]["id"].as_str().unwrap().to_owned();
+        let newer = json!({"conversation_id":conversation_id,"area_id":"personal","area_updated_at":"2099-01-01T00:00:00Z","area_updated_by_device":"phone"});
+        let (status, applied) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                "/v1/conversations/sync",
+                json!({"conversations":[newer]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(applied["applied"], 1);
+        let (status, listed) = response(
+            app.clone(),
+            authenticated("GET", "/v1/conversations?area_id=personal", Value::Null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(listed["conversations"][0]["id"], conversation_id);
+
+        let (status, stale) = response(app.clone(), authenticated("POST", "/v1/conversations/sync", json!({"conversations":[{"conversation_id":conversation_id,"area_id":"general-talk","area_updated_at":"2020-01-01T00:00:00Z","area_updated_by_device":"old-device"}]}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(stale["applied"], 0);
+        let (status, invalid) = response(app.clone(), authenticated("POST", "/v1/conversations/sync", json!({"conversations":[{"conversation_id":conversation_id,"area_id":"not-an-area","area_updated_at":"2099-01-01T00:00:00Z","area_updated_by_device":"phone"}]}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["error"], "invalid_conversation_request");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn conversation_area_flow_is_authenticated_idempotent_and_visible_in_bootstrap() {
+        let (app, store, path) = authenticated_router();
+        let unauthorized = Request::builder()
+            .uri("/v1/conversation-areas")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            response(app.clone(), unauthorized).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let authenticated = |method: &str, uri: &str, body: Value| {
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(if body.is_null() {
+                    Body::empty()
+                } else {
+                    Body::from(body.to_string())
+                })
+                .unwrap()
+        };
+        let (status, bootstrap) = response(
+            app.clone(),
+            authenticated("GET", "/v1/client/bootstrap", Value::Null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bootstrap["contract_version"], 2);
+        assert_eq!(bootstrap["conversation_areas"].as_array().unwrap().len(), 6);
+
+        let create_body = json!({
+            "area_id":"brick-copper",
+            "title":"Opening plan",
+            "request_id":"gateway-create-1"
+        });
+        let (status, created) = response(
+            app.clone(),
+            authenticated("POST", "/v1/conversations", create_body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let conversation_id = created["conversation"]["id"].as_str().unwrap().to_owned();
+        let (_, duplicate) = response(
+            app.clone(),
+            authenticated("POST", "/v1/conversations", create_body),
+        )
+        .await;
+        assert_eq!(duplicate["conversation"]["id"], conversation_id);
+
+        let (status, rejected) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                &format!("/v1/conversations/{conversation_id}/move"),
+                json!({
+                    "source_area_id":"brick-copper",
+                    "destination_area_id":"personal",
+                    "confirmed":false,
+                    "request_id":"gateway-move-1"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(rejected["error"], "invalid_conversation_request");
+
+        let (status, moved) = response(
+            app.clone(),
+            authenticated(
+                "POST",
+                &format!("/v1/conversations/{conversation_id}/move"),
+                json!({
+                    "source_area_id":"brick-copper",
+                    "destination_area_id":"personal",
+                    "confirmed":true,
+                    "request_id":"gateway-move-1"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(moved["conversation"]["area_id"], "personal");
+
+        store
+            .append_message(&conversation_id, voiceos_core::Role::User, "hello", None)
+            .unwrap();
+        let (status, history) = response(
+            app.clone(),
+            authenticated(
+                "GET",
+                "/v1/conversations/history?timezone_offset_minutes=0",
+                Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            history["days"][0]["conversations"][0]["area_id"],
+            "personal"
+        );
+
+        let (status, sync) = response(
+            app,
+            authenticated("GET", "/v1/conversations/sync?after=0", Value::Null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(sync["selected_area_id"], "personal");
+        assert_eq!(sync["messages"][0]["area_id"], "personal");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn execution_routes_require_auth_and_expose_only_owned_persisted_state() {
+        let (app, store, path) = authenticated_router();
+        let job = store
+            .create_job(OWNER, None, "gateway-execution", json!(["filesystem.read"]))
+            .unwrap();
+        store
+            .transition_job_status(OWNER, &job.id, "proposed", "approved")
+            .unwrap()
+            .unwrap();
+
+        let unauthorized = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/executions/{}", job.id))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            response(app.clone(), unauthorized).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let request = |method: &str, suffix: &str, body: Value| {
+            Request::builder()
+                .method(method)
+                .uri(format!("/v1/executions/{}{suffix}", job.id))
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .header("content-type", "application/json")
+                .body(if body.is_null() {
+                    Body::empty()
+                } else {
+                    Body::from(body.to_string())
+                })
+                .unwrap()
+        };
+        let (status, lease) = response(
+            app.clone(),
+            request(
+                "POST",
+                "/lease",
+                json!({"capabilities":["filesystem.read"],"ttl_seconds":60}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(lease["lease_id"].as_str().is_some());
+
+        let (status, checkpoint) = response(
+            app.clone(),
+            request(
+                "POST",
+                "/checkpoints",
+                json!({"state":{"cursor":1},"rollback":{"undo":"step"}}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(checkpoint["checkpoint"]["sequence"], 1);
+
+        let (status, live) = response(app.clone(), request("GET", "", Value::Null)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(live["job"]["id"], job.id);
+        assert_eq!(
+            live["latest_checkpoint"]["rollback"],
+            json!({"undo":"step"})
+        );
+        assert!(live.get("provider_telemetry").is_none());
+        let other_owner_job = store
+            .create_job("owner-b", None, "other-owner-execution", json!([]))
+            .unwrap();
+        let (status, missing) = response(
+            app.clone(),
+            Request::builder()
+                .uri(format!("/v1/executions/{}", other_owner_job.id))
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(missing["error"], "execution_not_found");
+
+        let (status, cancelled) = response(
+            app.clone(),
+            request("POST", "/cancel", json!({"reason":"user_requested"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cancelled["cancelled"], true);
+        let (status, retry) = response(
+            app.clone(),
+            request("POST", "/cancel", json!({"reason":"retry"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retry["cancelled"], true);
+        assert_eq!(
+            response(app, request("POST", "/resume", json!({}))).await.0,
+            StatusCode::BAD_REQUEST
         );
         std::fs::remove_file(path).unwrap();
     }

@@ -74,6 +74,7 @@ class VoiceOSServer(ThreadingHTTPServer):
         admin_token: str | None,
         require_device_auth: bool,
         memory_url: str | None,
+        memory_service_token: str | None,
         speech_worker_url: str | None,
         crawl4ai_url: str | None,
         skill_worker_url: str | None,
@@ -87,6 +88,7 @@ class VoiceOSServer(ThreadingHTTPServer):
         self.admin_token = admin_token
         self.require_device_auth = require_device_auth
         self.memory_url = memory_url.rstrip("/") if memory_url else None
+        self.memory_service_token = memory_service_token.strip() if memory_service_token else None
         self.speech_worker_url = speech_worker_url.rstrip("/") if speech_worker_url else None
         self.crawl4ai_url = crawl4ai_url.rstrip("/") if crawl4ai_url else None
         self.skill_worker_url = skill_worker_url.rstrip("/") if skill_worker_url else None
@@ -158,7 +160,8 @@ class VoiceOSServer(ThreadingHTTPServer):
                     return
                 try:
                     context = _get_json(
-                        f"{self.memory_url}/internal/v1/personal/fieldy/context/{capture_id}"
+                        f"{self.memory_url}/internal/v1/personal/fieldy/context/{capture_id}",
+                        service_token=self.memory_service_token,
                     )
                     if context is None:
                         raise RuntimeError("fieldy_context_unavailable")
@@ -175,6 +178,7 @@ class VoiceOSServer(ThreadingHTTPServer):
                     result = _post_json(
                         f"{self.memory_url}/internal/v1/personal/captures/{capture_id}/extract",
                         {"output": output},
+                        service_token=self.memory_service_token,
                     )
                     if result is None or not isinstance(result.get("proposals"), list):
                         raise RuntimeError("rust_extraction_rejected")
@@ -223,7 +227,8 @@ class VoiceOSServer(ThreadingHTTPServer):
         while not self._fieldy_extraction_stop.is_set():
             pending = _get_json(
                 f"{self.memory_url}/internal/v1/personal/fieldy/pending"
-                f"?limit=50&quiet_seconds={FIELDY_ASSEMBLY_QUIET_SECONDS}"
+                f"?limit=50&quiet_seconds={FIELDY_ASSEMBLY_QUIET_SECONDS}",
+                service_token=self.memory_service_token,
             )
             captures = pending.get("captures") if pending else None
             if isinstance(captures, list):
@@ -270,8 +275,12 @@ class VoiceOSServer(ThreadingHTTPServer):
             return
         task_id = str(task["id"])
         job_id = str(initiative["job_id"])
+        service_token = getattr(self, "memory_service_token", None)
+        service_auth = {"service_token": service_token} if service_token else {}
         claim = _post_json(
-            f"{self.memory_url}/internal/v1/tasks/{task_id}/initiative/claim", {}
+            f"{self.memory_url}/internal/v1/tasks/{task_id}/initiative/claim",
+            {},
+            **service_auth,
         )
         if not claim or claim.get("claimed") is not True:
             return
@@ -316,7 +325,7 @@ class VoiceOSServer(ThreadingHTTPServer):
             )
         session_id = f"task:{task_id}"
         response_text = _apply_structured_task_updates(
-            self.memory_url, task_id, coordinated.text
+            self.memory_url, task_id, coordinated.text, service_token
         )
         approvals = [
             self.audit_store.create_pending_approval(
@@ -352,6 +361,7 @@ class VoiceOSServer(ThreadingHTTPServer):
         _post_json(
             f"{self.memory_url}/internal/v1/tasks/{task_id}/initiative/result",
             result_payload,
+            **service_auth,
         )
         self.audit_store.record_turn(
             session_id=session_id,
@@ -590,10 +600,22 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
             return
         if parsed.path in {
+            "/v1/conversation-areas",
+            "/v1/conversations",
+            "/v1/conversations/history",
+            "/v1/conversations/sync",
             "/v1/conversations/active",
             "/v1/conversations/active/messages",
             "/v1/conversations/active/floor",
         }:
+            if not self._require_device():
+                return
+            suffix = f"?{parsed.query}" if parsed.query else ""
+            self._proxy_memory_request("GET", f"{parsed.path}{suffix}")
+            return
+        if parsed.path.startswith("/v1/conversations/") and (
+            parsed.path.endswith("/messages") or parsed.path.endswith("/export")
+        ):
             if not self._require_device():
                 return
             suffix = f"?{parsed.query}" if parsed.query else ""
@@ -754,6 +776,18 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             self._proxy_json_memory_request(path)
             return
         if path == "/v1/conversations/active/floor":
+            if not self._require_device():
+                return
+            self._proxy_json_memory_request(path)
+            return
+        if (
+            path in {"/v1/conversations", "/v1/conversations/import", "/v1/conversations/sync"}
+            or (path.startswith("/v1/conversation-areas/") and path.endswith("/select"))
+            or (
+                path.startswith("/v1/conversations/")
+                and (path.endswith("/select") or path.endswith("/move"))
+            )
+        ):
             if not self._require_device():
                 return
             self._proxy_json_memory_request(path)
@@ -1493,6 +1527,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         authorization = self.headers.get("Authorization")
         if authorization:
             headers["Authorization"] = authorization
+        headers = self._memory_service_headers(headers)
         request = Request(
             f"{self.gateway.memory_url}{path}",
             data=body,
@@ -1523,7 +1558,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.memory_url}/internal/v1/documents/context",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._memory_service_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1557,7 +1592,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.memory_url}/internal/v1/skills/usages",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._memory_service_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1585,7 +1620,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.memory_url}/internal/v1/ontology/interpret",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._memory_service_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1605,7 +1640,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.memory_url}/internal/v1/tasks/command",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._memory_service_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1626,7 +1661,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.memory_url}/internal/v1/personal/command",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._memory_service_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1676,7 +1711,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.memory_url}/internal/v1/focus/command",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._memory_service_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1697,7 +1732,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.memory_url}/internal/v1/console/command",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._memory_service_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1828,7 +1863,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.memory_url}/internal/v1/conversations/prepare",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._memory_service_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1960,7 +1995,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         request = Request(
             f"{self.gateway.memory_url}/internal/v1/conversations/commit",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=self._memory_service_headers({"Content-Type": "application/json"}),
             method="POST",
         )
         try:
@@ -1980,7 +2015,7 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         if not self.gateway.memory_url:
             self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "file_memory_unavailable"})
             return
-        forwarded_headers = dict(headers or {})
+        forwarded_headers = self._memory_service_headers(headers)
         authorization = self.headers.get("Authorization")
         if authorization:
             forwarded_headers["Authorization"] = authorization
@@ -1995,7 +2030,12 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
             body=body,
             headers=forwarded_headers,
             timeout=30,
+            include_memory_service_token=True,
         )
+
+    def _memory_service_headers(self, headers: dict[str, str] | None = None) -> dict[str, str]:
+        """Attach the gateway-to-Rust credential to memory-service requests."""
+        return _with_service_token(headers, self.gateway.memory_service_token)
 
     def _proxy_memory_sse(self, path: str) -> None:
         if not self.gateway.memory_url:
@@ -2173,8 +2213,13 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
         body: bytes | None,
         headers: dict[str, str],
         timeout: float,
+        include_memory_service_token: bool = False,
     ) -> None:
         forwarded_headers = dict(headers)
+        if include_memory_service_token and self.gateway.memory_service_token:
+            forwarded_headers["X-VoiceOS-Gateway-Service-Token"] = (
+                self.gateway.memory_service_token
+            )
         forwarded_headers["X-VoiceOS-Device-ID"] = (
             self.authenticated_device_id or "development-device"
         )
@@ -2241,6 +2286,14 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 self.gateway.audit_store.publish_client_event(
                     "conversation.floor.changed", {"floor": floor}
                 )
+        if (
+            (path.startswith("/v1/conversations") or path.startswith("/v1/conversation-areas"))
+            and method == "POST"
+            and status < HTTPStatus.BAD_REQUEST
+        ):
+            self.gateway.audit_store.publish_client_event(
+                "conversation.catalog.changed", {"path": path, "response": payload}
+            )
         if path == "/v1/tasks" and method == "POST" and status < HTTPStatus.BAD_REQUEST:
             self.gateway.start_task_initiative(payload, self.authenticated_device_id)
         if path == "/v1/outreach" and method == "POST" and status < HTTPStatus.BAD_REQUEST:
@@ -2566,10 +2619,9 @@ class VoiceOSHandler(BaseHTTPRequestHandler):
                 if device_id is not None:
                     self.authenticated_device_id = device_id
                     return True
-            self.authenticated_device_id = (
-                self.headers.get("X-VoiceOS-Device-ID", "").strip()
-                or "development-device"
-            )
+            # An explicit local-development configuration is intentionally a
+            # single shared identity, not an unauthenticated identity oracle.
+            self.authenticated_device_id = "development-device"
             return True
         if scheme.casefold() != "bearer" or not token.strip():
             self._json(HTTPStatus.UNAUTHORIZED, {"error": "device_authentication_required"})
@@ -2633,6 +2685,7 @@ def create_server(
     admin_token: str | None = None,
     require_device_auth: bool | None = None,
     memory_url: str | None = None,
+    memory_service_token: str | None = None,
     speech_worker_url: str | None = None,
     crawl4ai_url: str | None = None,
     skill_worker_url: str | None = None,
@@ -2648,16 +2701,25 @@ def create_server(
     selected_require_auth = (
         require_device_auth
         if require_device_auth is not None
-        else os.environ.get("VOICEOS_REQUIRE_DEVICE_AUTH", "0").strip() == "1"
+        else os.environ.get("VOICEOS_REQUIRE_DEVICE_AUTH", "1").strip() == "1"
     )
     selected_memory_url = (
         memory_url
         if memory_url is not None
         else os.environ.get("VOICEOS_MEMORY_URL", "").strip() or None
     )
+    selected_memory_service_token = (
+        memory_service_token
+        if memory_service_token is not None
+        else os.environ.get("VOICEOS_RUST_SERVICE_TOKEN", "").strip() or None
+    )
     selected_coordinator.router.set_activity_sink(
         lambda session_id, event: _publish_agent_activity(
-            selected_audit, selected_memory_url, session_id, event
+            selected_audit,
+            selected_memory_url,
+            session_id,
+            event,
+            selected_memory_service_token,
         )
     )
     selected_coordinator.router.set_completion_sink(
@@ -2668,17 +2730,18 @@ def create_server(
             worker_id,
             message_id,
             report,
+            selected_memory_service_token,
         )
     )
     if selected_memory_url:
         selected_coordinator.tools.register_task_tools(
-            _rust_task_tool_executor(selected_memory_url)
+            _rust_task_tool_executor(selected_memory_url, selected_memory_service_token)
         )
         selected_coordinator.tools.register_outreach_tools(
             _rust_outreach_tool_executor(selected_memory_url, selected_audit)
         )
         selected_coordinator.tools.register_console_tools(
-            _rust_console_tool_executor(selected_memory_url)
+            _rust_console_tool_executor(selected_memory_url, selected_memory_service_token)
         )
     selected_speech_worker_url = (
         speech_worker_url
@@ -2727,6 +2790,7 @@ def create_server(
         admin_token=selected_admin_token,
         require_device_auth=selected_require_auth,
         memory_url=selected_memory_url,
+        memory_service_token=selected_memory_service_token,
         speech_worker_url=selected_speech_worker_url,
         crawl4ai_url=selected_crawl4ai_url,
         skill_worker_url=selected_skill_worker_url,
@@ -2781,6 +2845,7 @@ def _publish_agent_activity(
     memory_url: str | None,
     session_id: str | None,
     event: dict[str, object],
+    memory_service_token: str | None = None,
 ) -> None:
     """Publish safe activity and mirror every Hermes fork into a durable Rust task."""
     safe = _safe_agent_activity(session_id, event)
@@ -2822,6 +2887,7 @@ def _publish_agent_activity(
                 "summary": detail,
             },
             timeout_seconds=3,
+            service_token=memory_service_token,
         )
     task = task_sync.get("task") if isinstance(task_sync, dict) else None
     task_detail = task_sync.get("detail") if isinstance(task_sync, dict) else None
@@ -2871,6 +2937,7 @@ def _import_hermes_completion(
     worker_id: str,
     message_id: int,
     report: str,
+    memory_service_token: str | None = None,
 ) -> None:
     report = _clean_hermes_completion_report(report)
     if not audit_store.import_hermes_completion(
@@ -2893,7 +2960,9 @@ def _import_hermes_completion(
                 Request(
                     f"{memory_url}/internal/v1/conversations/commit",
                     data=body,
-                    headers={"Content-Type": "application/json"},
+                    headers=_with_service_token(
+                        {"Content-Type": "application/json"}, memory_service_token
+                    ),
                     method="POST",
                 ),
                 timeout=2.0,
@@ -2910,6 +2979,7 @@ def _import_hermes_completion(
             "run_id": worker_id,
             "summary": report[:500],
         },
+        memory_service_token,
     )
 
 
@@ -3021,7 +3091,9 @@ _TASK_UPDATE_ACTIONS = {
 }
 
 
-def _apply_structured_task_updates(memory_url: str, task_id: str, response_text: str) -> str:
+def _apply_structured_task_updates(
+    memory_url: str, task_id: str, response_text: str, service_token: str | None = None
+) -> str:
     """Apply bounded, task-scoped updates emitted by a Hermes initiative response."""
     match = _TASK_UPDATE_PATTERN.search(response_text)
     if match is None:
@@ -3044,20 +3116,37 @@ def _apply_structured_task_updates(memory_url: str, task_id: str, response_text:
             key: value for key, value in item.items() if key not in {"task_id", "action"}
         } | {"action": action, "task_id": task_id})
     for action in valid_actions:
-        _post_json(f"{memory_url}/internal/v1/tasks/actions", action)
+        if service_token:
+            _post_json(
+                f"{memory_url}/internal/v1/tasks/actions", action, service_token=service_token
+            )
+        else:
+            _post_json(f"{memory_url}/internal/v1/tasks/actions", action)
     return (response_text[:match.start()] + response_text[match.end():]).strip()
+
+
+def _with_service_token(
+    headers: dict[str, str] | None, service_token: str | None
+) -> dict[str, str]:
+    """Copy request headers and attach service auth when Rust requires it."""
+    authenticated = dict(headers or {})
+    if service_token:
+        authenticated["X-VoiceOS-Gateway-Service-Token"] = service_token
+    return authenticated
 
 
 def _post_json(
     url: str,
     payload: dict[str, object],
     timeout_seconds: float = 30,
+    *,
+    service_token: str | None = None,
 ) -> dict[str, object] | None:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     request = Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=_with_service_token({"Content-Type": "application/json"}, service_token),
         method="POST",
     )
     try:
@@ -3068,8 +3157,14 @@ def _post_json(
     return cast(dict[str, object], result) if isinstance(result, dict) else None
 
 
-def _get_json(url: str, timeout_seconds: float = 10) -> dict[str, object] | None:
-    request = Request(url, headers={"Accept": "application/json"}, method="GET")
+def _get_json(
+    url: str, timeout_seconds: float = 10, *, service_token: str | None = None
+) -> dict[str, object] | None:
+    request = Request(
+        url,
+        headers=_with_service_token({"Accept": "application/json"}, service_token),
+        method="GET",
+    )
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
             result = json.loads(response.read(MAX_TEXT_BYTES))
@@ -3078,7 +3173,7 @@ def _get_json(url: str, timeout_seconds: float = 10) -> dict[str, object] | None
     return cast(dict[str, object], result) if isinstance(result, dict) else None
 
 
-def _rust_task_tool_executor(memory_url: str):
+def _rust_task_tool_executor(memory_url: str, service_token: str | None):
     actions = {
         "task.step.create": "step.create",
         "task.step.update": "step.update",
@@ -3100,6 +3195,7 @@ def _rust_task_tool_executor(memory_url: str):
         result = _post_json(
             f"{memory_url}/internal/v1/tasks/actions",
             {"action": action, **arguments},
+            service_token=service_token,
         )
         if result is None:
             raise RuntimeError("rust_task_authority_unavailable")
@@ -3136,7 +3232,7 @@ def _rust_outreach_tool_executor(memory_url: str, audit_store: AuditStore):
     return execute
 
 
-def _rust_console_tool_executor(memory_url: str):
+def _rust_console_tool_executor(memory_url: str, service_token: str | None):
     commands = {
         "console.show_weather": "show_weather",
         "console.refresh_dashboard": "refresh_dashboard",
@@ -3150,6 +3246,7 @@ def _rust_console_tool_executor(memory_url: str):
         result = _post_json(
             f"{memory_url}/internal/v1/console/commands",
             {"command": command},
+            service_token=service_token,
         )
         if result is None:
             raise RuntimeError("vic_console_unavailable")

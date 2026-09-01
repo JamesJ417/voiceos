@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: VoiceOS Gateway
-  version: 0.8.0
+  version: 0.9.0
 servers:
   - url: http://127.0.0.1:8787
 security:
@@ -107,6 +107,278 @@ paths:
       responses:
         "201": { description: Device ID and bearer credential }
         "401": { description: "Enrollment is invalid, expired, or already used" }
+  /v1/conversation-areas:
+    get:
+      operationId: listConversationAreas
+      summary: List the six canonical areas and the authenticated owner's selection
+      responses:
+        "200":
+          description: Stable ordered area catalog and current selection
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [areas, selected_area_id, active_conversation]
+                properties:
+                  areas: { type: array, minItems: 6, maxItems: 6, items: { $ref: "#/components/schemas/ConversationArea" } }
+                  selected_area_id: { $ref: "#/components/schemas/ConversationAreaId" }
+                  active_conversation: { oneOf: [{ $ref: "#/components/schemas/ConversationRecord" }, { type: "null" }] }
+        "401": { description: Device authentication required }
+  /v1/fieldy/intake:
+    get:
+      operationId: listFieldyIntake
+      summary: List authenticated owner Fieldy intake records
+      responses:
+        "200": { description: Owner-scoped intake records }
+        "401": { description: Device authentication required }
+  /v1/fieldy/intake/{capture_id}:
+    get:
+      operationId: getFieldyIntake
+      summary: Inspect one authenticated owner Fieldy intake record
+      parameters:
+        - in: path
+          name: capture_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Owner-scoped intake detail }
+        "404": { description: Intake is missing or foreign }
+    delete:
+      operationId: discardFieldyIntake
+      summary: Discard one authenticated owner Fieldy intake record
+      parameters:
+        - in: path
+          name: capture_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Intake discarded with audit evidence }
+        "404": { description: Intake is missing or foreign }
+  /v1/conversation-areas/{area_id}/select:
+    post:
+      operationId: selectConversationArea
+      summary: Select an area without moving any conversation
+      parameters:
+        - in: path
+          name: area_id
+          required: true
+          schema: { $ref: "#/components/schemas/ConversationAreaId" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConversationMutationRequest" }
+      responses:
+        "200": { description: Area selected; its latest conversation is active when present }
+        "400": { description: Invalid area or reused request ID }
+        "401": { description: Device authentication required }
+  /v1/conversations:
+    get:
+      operationId: listConversations
+      summary: List owner conversations, optionally scoped to one area
+      parameters:
+        - in: query
+          name: area_id
+          schema: { $ref: "#/components/schemas/ConversationAreaId" }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200": { description: Conversations ordered by latest activity }
+        "401": { description: Device authentication required }
+    post:
+      operationId: createConversation
+      summary: Create and select a conversation in an explicit area
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ConversationMutationRequest"
+                - type: object
+                  required: [area_id]
+                  properties:
+                    area_id: { $ref: "#/components/schemas/ConversationAreaId" }
+                    title: { type: string, maxLength: 120 }
+      responses:
+        "201": { description: Idempotently created and selected conversation }
+        "400": { description: Invalid area or mutation request }
+        "401": { description: Device authentication required }
+  /v1/conversations/history:
+    get:
+      operationId: listConversationHistoryByDay
+      summary: Browse cross-area calendar history with an optional area filter
+      parameters:
+        - in: query
+          name: area_id
+          schema: { $ref: "#/components/schemas/ConversationAreaId" }
+        - in: query
+          name: timezone_offset_minutes
+          schema: { type: integer, minimum: -1080, maximum: 1080, default: 0 }
+        - in: query
+          name: limit_days
+          schema: { type: integer, minimum: 1, maximum: 366, default: 30 }
+      responses:
+        "200":
+          description: Newest-first day groups; conversations within a day are chronological
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [days]
+                properties:
+                  days: { type: array, items: { $ref: "#/components/schemas/ConversationDay" } }
+        "401": { description: Device authentication required }
+  /v1/conversations/{conversation_id}/select:
+    post:
+      operationId: selectConversation
+      summary: Select an existing owner conversation without changing its area
+      parameters:
+        - in: path
+          name: conversation_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConversationMutationRequest" }
+      responses:
+        "200": { description: Idempotently selected conversation }
+        "400": { description: "Missing, foreign, or invalid conversation mutation" }
+  /v1/conversations/{conversation_id}/move:
+    post:
+      operationId: moveConversation
+      summary: Move a whole conversation after explicit source/destination confirmation
+      parameters:
+        - in: path
+          name: conversation_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ConversationMutationRequest"
+                - type: object
+                  required: [source_area_id, destination_area_id, confirmed]
+                  properties:
+                    source_area_id: { $ref: "#/components/schemas/ConversationAreaId" }
+                    destination_area_id: { $ref: "#/components/schemas/ConversationAreaId" }
+                    confirmed: { type: boolean, const: true }
+      responses:
+        "200": { description: Idempotently moved conversation with audit evidence }
+        "400": { description: "Confirmation, ownership, source, or destination validation failed" }
+  /v1/conversations/{conversation_id}/export:
+    get:
+      operationId: exportConversation
+      summary: Export a validated portable conversation document
+      parameters:
+        - in: path
+          name: conversation_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Versioned conversation export
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversation]
+                properties:
+                  conversation: { $ref: "#/components/schemas/ConversationExport" }
+        "400": { description: Missing or foreign conversation }
+        "401": { description: Device authentication required }
+  /v1/conversations/{conversation_id}/messages:
+    get:
+      operationId: listConversationMessages
+      summary: Browse one owner conversation regardless of whether it is active
+      parameters:
+        - in: path
+          name: conversation_id
+          required: true
+          schema: { type: string, format: uuid }
+        - in: query
+          name: after
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+      responses:
+        "200":
+          description: Chronological area-tagged messages
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConversationMessagePage" }
+        "400": { description: Missing or foreign conversation }
+        "401": { description: Device authentication required }
+  /v1/conversations/import:
+    post:
+      operationId: importConversation
+      summary: Validate and idempotently import a portable conversation document
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [import_id, conversation]
+              properties:
+                import_id: { type: string, minLength: 1, maxLength: 200 }
+                conversation: { $ref: "#/components/schemas/ConversationExport" }
+      responses:
+        "201":
+          description: Imported archived conversation
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversation]
+                properties:
+                  conversation: { $ref: "#/components/schemas/ConversationRecord" }
+        "400": { description: Invalid document or import identifier }
+        "401": { description: Device authentication required }
+  /v1/conversations/sync:
+    get:
+      operationId: getConversationSync
+      summary: Fetch area assignments and owner messages after a durable cursor
+      parameters:
+        - in: query
+          name: after
+          schema: { type: integer, minimum: 0, default: 0 }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 500 }
+      responses:
+        "200":
+          description: Deterministic conversation synchronization payload
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConversationSyncPayload" }
+        "401": { description: Device authentication required }
+    post:
+      operationId: applyConversationSync
+      summary: Apply area moves using timestamp then device ID conflict ordering
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [conversations]
+              properties:
+                conversations:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/ConversationSyncRecord" }
+      responses:
+        "200": { description: Number of winning area assignments applied }
+        "400": { description: Invalid synchronization record }
+        "401": { description: Device authentication required }
   /v1/conversations/active:
     get:
       operationId: getActiveConversation
@@ -1668,10 +1940,13 @@ components:
   schemas:
     ClientBootstrap:
       type: object
-      required: [contract_version, device_id, authentication, component_registry, endpoints, transport]
+      required: [contract_version, device_id, conversation_areas, selected_area_id, active_conversation, authentication, component_registry, endpoints, transport]
       properties:
-        contract_version: { type: integer, const: 1 }
+        contract_version: { type: integer, const: 2 }
         device_id: { type: string }
+        conversation_areas: { type: array, minItems: 6, maxItems: 6, items: { $ref: "#/components/schemas/ConversationArea" } }
+        selected_area_id: { $ref: "#/components/schemas/ConversationAreaId" }
+        active_conversation: { oneOf: [{ $ref: "#/components/schemas/ConversationRecord" }, { type: "null" }] }
         authentication:
           type: object
           required: [scheme]
@@ -1681,11 +1956,15 @@ components:
           $ref: "#/components/schemas/ComponentRegistry"
         endpoints:
           type: object
-          required: [bootstrap, conversation, conversation_events, turn]
+          required: [bootstrap, conversation, conversation_events, conversation_areas, conversations, conversation_history, conversation_sync, turn]
           properties:
             bootstrap: { type: string, const: /v1/client/bootstrap }
             conversation: { type: string, const: /v1/conversations/active }
             conversation_events: { type: string, const: /v1/conversations/active/events }
+            conversation_areas: { type: string, const: /v1/conversation-areas }
+            conversations: { type: string, const: /v1/conversations }
+            conversation_history: { type: string, const: /v1/conversations/history }
+            conversation_sync: { type: string, const: /v1/conversations/sync }
             turn: { type: string, const: /v1/turns/text }
         transport:
           type: object
@@ -1843,12 +2122,99 @@ components:
           format: uuid
           description: Server-owned persistent conversation identifier.
         created_at: { type: string, format: date-time }
+    ConversationAreaId:
+      type: string
+      enum: [general-talk, brick-copper, vine-branch-deli, sb-dom-online-ai, personal, religious-biblical]
+    ConversationArea:
+      type: object
+      required: [id, display_name, position]
+      properties:
+        id: { $ref: "#/components/schemas/ConversationAreaId" }
+        display_name: { type: string }
+        position: { type: integer, minimum: 0, maximum: 5 }
+    ConversationRecord:
+      type: object
+      required: [id, owner_id, area_id, title, status, message_count, created_at, updated_at, area_updated_at, area_updated_by_device]
+      properties:
+        id: { type: string, format: uuid }
+        owner_id: { type: string }
+        area_id: { $ref: "#/components/schemas/ConversationAreaId" }
+        title: { type: string, maxLength: 120 }
+        status: { type: string, enum: [active, archived] }
+        message_count: { type: integer, minimum: 0 }
+        last_message_preview: { type: [string, "null"], maxLength: 160 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        area_updated_at: { type: string, format: date-time }
+        area_updated_by_device: { type: string }
+    ConversationMutationRequest:
+      type: object
+      required: [request_id]
+      properties:
+        request_id: { type: string, minLength: 1, maxLength: 200 }
+    ConversationDay:
+      type: object
+      required: [date, conversations]
+      properties:
+        date: { type: string, format: date }
+        conversations:
+          type: array
+          items: { $ref: "#/components/schemas/ConversationRecord" }
+    ConversationExportMessage:
+      type: object
+      additionalProperties: false
+      required: [role, content, created_at]
+      properties:
+        role: { type: string, enum: [user, assistant, system, tool] }
+        content: { type: string, maxLength: 100000 }
+        provider: { type: [string, "null"] }
+        origin_device_id: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+    ConversationExport:
+      type: object
+      additionalProperties: false
+      required: [version, export_id, source_conversation_id, area_id, title, created_at, updated_at, messages]
+      properties:
+        version: { type: integer, const: 1 }
+        export_id: { type: string, format: uuid }
+        source_conversation_id: { type: string, format: uuid }
+        area_id: { $ref: "#/components/schemas/ConversationAreaId" }
+        title: { type: string, maxLength: 120 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        messages:
+          type: array
+          maxItems: 10000
+          items: { $ref: "#/components/schemas/ConversationExportMessage" }
+    ConversationSyncRecord:
+      type: object
+      additionalProperties: false
+      required: [conversation_id, area_id, area_updated_at, area_updated_by_device]
+      properties:
+        conversation_id: { type: string, format: uuid }
+        area_id: { $ref: "#/components/schemas/ConversationAreaId" }
+        area_updated_at: { type: string, format: date-time }
+        area_updated_by_device: { type: string, minLength: 1 }
+    ConversationSyncPayload:
+      type: object
+      required: [cursor, selected_area_id, active_conversation_id, conversations, messages]
+      properties:
+        cursor: { type: integer, minimum: 0 }
+        selected_area_id: { $ref: "#/components/schemas/ConversationAreaId" }
+        active_conversation_id: { type: [string, "null"], format: uuid }
+        conversations:
+          type: array
+          items: { $ref: "#/components/schemas/ConversationSyncRecord" }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/ConversationMessage" }
     ConversationMessage:
       type: object
-      required: [sequence, conversation_id, role, content, created_at, attachments]
+      required: [sequence, conversation_id, area_id, role, content, created_at, attachments]
       properties:
         sequence: { type: integer, minimum: 1 }
         conversation_id: { type: string, format: uuid }
+        area_id: { $ref: "#/components/schemas/ConversationAreaId" }
         role: { type: string, enum: [user, assistant, system, tool] }
         content: { type: string }
         provider: { type: [string, "null"] }
@@ -1870,9 +2236,11 @@ components:
         created_at: { type: string, format: date-time }
     ConversationSnapshot:
       type: object
-      required: [conversation_id, messages, latest_sequence]
+      required: [conversation_id, area_id, conversation, messages, latest_sequence]
       properties:
-        conversation_id: { type: string, format: uuid }
+        conversation_id: { type: [string, "null"], format: uuid }
+        area_id: { oneOf: [{ $ref: "#/components/schemas/ConversationAreaId" }, { type: "null" }] }
+        conversation: { oneOf: [{ $ref: "#/components/schemas/ConversationRecord" }, { type: "null" }] }
         messages:
           type: array
           maxItems: 200
@@ -1936,7 +2304,7 @@ components:
         id: { type: integer, minimum: 1 }
         type:
           type: string
-          enum: [conversation.turn, conversation.floor.changed, project.changed, task.changed, task.initiative.updated, task.progress.updated, focus.updated, personal.updated, agent.activity.updated, agent.worker.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
+          enum: [conversation.turn, conversation.floor.changed, conversation.catalog.changed, project.changed, task.changed, task.initiative.updated, task.progress.updated, focus.updated, personal.updated, agent.activity.updated, agent.worker.updated, approval.proposed, approval.decided, daily_plan.proposed, status.changed, vic.outreach.created, vic.outreach.updated]
         payload: { type: object }
         created_at: { type: string, format: date-time }
     BridgeNotification:
@@ -2294,12 +2662,13 @@ components:
         updated_at: { type: string, format: date-time }
     Turn:
       type: object
-      required: [session_id, transcript, response_text, processing_ms]
+      required: [session_id, area_id, transcript, response_text, processing_ms]
       properties:
         session_id:
           type: string
           format: uuid
           description: Server-owned persistent conversation identifier.
+        area_id: { $ref: "#/components/schemas/ConversationAreaId" }
         transcript: { type: string }
         response_text: { type: string }
         processing_ms: { type: integer }

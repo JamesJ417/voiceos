@@ -49,4 +49,32 @@ class ResumableResponseTest {
 
         assertNull(response.pending)
     }
+
+    @Test
+    fun queuedSpeechBeforeTtsInitializationIsAlsoDurable() {
+        val response = ResumableResponse()
+
+        assertTrue(
+            response.pause(
+                currentSpeech = "Queued until the speech engine is ready.",
+                isSpeaking = false,
+                isQueued = true,
+            ),
+        )
+        assertEquals("Queued until the speech engine is ready.", response.peekForResume())
+    }
+
+    @Test
+    fun restoreDoesNotOverwriteAnewerInMemoryReplay() {
+        val response = ResumableResponse("newer response")
+        response.restore("older persisted response")
+        assertEquals("newer response", response.pending)
+    }
+
+    @Test
+    fun explicitConversationEndClearsReplay() {
+        val response = ResumableResponse("unfinished response")
+        response.clear()
+        assertNull(response.peekForResume())
+    }
 }

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     AttachmentRecord, CalendarSecretReference, CalendarSecretStore, CalendarSecretStoreError,
-    ChatMessage, ConversationContext, ConversationMessage, DocumentRecord,
+    ChatMessage, ConversationContext, ConversationMessage, DocumentRecord, GENERAL_TALK_AREA_ID,
     GoogleCalendarConnection, Memory, QuarantineRecord, QuarantinedClaim, Role,
 };
 
@@ -307,6 +307,13 @@ impl ConversationStore {
         transaction.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS one_active_conversation_per_owner ON conversations(owner_id) WHERE status='active' AND owner_id IS NOT NULL;",
         )?;
+        transaction.execute(
+            "INSERT INTO owner_area_selections(owner_id,area_id,conversation_id,updated_at,updated_by_device) \
+             SELECT ?1,COALESCE(c.area_id,'general-talk'),c.conversation_id,?2,COALESCE(c.device_id,'migration') \
+             FROM (SELECT 1) seed LEFT JOIN conversations c ON c.owner_id=?1 AND c.status='active' \
+             ON CONFLICT(owner_id) DO NOTHING",
+            params![owner_id.trim(), now],
+        )?;
         transaction.commit()?;
         Ok(())
     }
@@ -370,9 +377,21 @@ impl ConversationStore {
             )
             .optional()?;
         let conversation_id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
+        let area_id: String = transaction
+            .query_row(
+                "SELECT area_id FROM owner_area_selections WHERE owner_id=?1",
+                [owner_id.trim()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| GENERAL_TALK_AREA_ID.to_owned());
         transaction.execute(
-            "INSERT OR IGNORE INTO conversations(conversation_id, device_id, status, created_at, updated_at, owner_id) VALUES(?1, ?2, 'active', ?3, ?3, ?4)",
-            params![conversation_id, device_id, now, owner_id.trim()],
+            "INSERT OR IGNORE INTO conversations(conversation_id, device_id, status, created_at, updated_at, owner_id, area_id, title, area_updated_at, area_updated_by_device) VALUES(?1, ?2, 'active', ?3, ?3, ?4, ?5, 'New conversation', ?3, ?2)",
+            params![conversation_id, device_id, now, owner_id.trim(), area_id],
+        )?;
+        transaction.execute(
+            "INSERT INTO owner_area_selections(owner_id,area_id,conversation_id,updated_at,updated_by_device) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(owner_id) DO UPDATE SET area_id=excluded.area_id,conversation_id=excluded.conversation_id,updated_at=excluded.updated_at,updated_by_device=excluded.updated_by_device",
+            params![owner_id.trim(), area_id, conversation_id, now, device_id],
         )?;
         if let Some(alias) = client_session_id.filter(|alias| !alias.trim().is_empty()) {
             transaction.execute(
@@ -414,6 +433,19 @@ impl ConversationStore {
             "UPDATE conversations SET updated_at=?2 WHERE conversation_id=?1",
             params![conversation_id, now],
         )?;
+        if role == "user" {
+            let title = content
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(120)
+                .collect::<String>();
+            connection.execute(
+                "UPDATE conversations SET title=?2 WHERE conversation_id=?1 AND (title='' OR title='New conversation')",
+                params![conversation_id, title],
+            )?;
+        }
         if let Some(request_id) = request_id {
             return connection
                 .query_row(
@@ -445,7 +477,7 @@ impl ConversationStore {
     ) -> Result<Vec<ConversationMessage>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT m.message_id, m.conversation_id, m.role, m.content, m.provider, m.origin_device_id, m.created_at
+            "SELECT m.message_id, m.conversation_id, c.area_id, m.role, m.content, m.provider, m.origin_device_id, m.created_at
              FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id
              WHERE c.owner_id=?1 AND c.status='active' AND m.message_id>?2
              ORDER BY m.message_id LIMIT ?3",
@@ -456,11 +488,12 @@ impl ConversationStore {
                 Ok(ConversationMessage {
                     sequence: row.get(0)?,
                     conversation_id: row.get(1)?,
-                    role: parse_role(row.get::<_, String>(2)?),
-                    content: row.get(3)?,
-                    provider: row.get(4)?,
-                    origin_device_id: row.get(5)?,
-                    created_at: row.get(6)?,
+                    area_id: row.get(2)?,
+                    role: parse_role(row.get::<_, String>(3)?),
+                    content: row.get(4)?,
+                    provider: row.get(5)?,
+                    origin_device_id: row.get(6)?,
+                    created_at: row.get(7)?,
                     attachments: Vec::new(),
                 })
             },
@@ -480,9 +513,9 @@ impl ConversationStore {
     ) -> Result<Vec<ConversationMessage>, StoreError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT message_id, conversation_id, role, content, provider, origin_device_id, created_at
+            "SELECT message_id, conversation_id, area_id, role, content, provider, origin_device_id, created_at
              FROM (
-                SELECT m.message_id, m.conversation_id, m.role, m.content, m.provider, m.origin_device_id, m.created_at
+                SELECT m.message_id, m.conversation_id, c.area_id, m.role, m.content, m.provider, m.origin_device_id, m.created_at
                 FROM messages m JOIN conversations c ON c.conversation_id=m.conversation_id
                 WHERE c.owner_id=?1 AND c.status='active'
                 ORDER BY m.message_id DESC LIMIT ?2
@@ -492,11 +525,12 @@ impl ConversationStore {
             Ok(ConversationMessage {
                 sequence: row.get(0)?,
                 conversation_id: row.get(1)?,
-                role: parse_role(row.get::<_, String>(2)?),
-                content: row.get(3)?,
-                provider: row.get(4)?,
-                origin_device_id: row.get(5)?,
-                created_at: row.get(6)?,
+                area_id: row.get(2)?,
+                role: parse_role(row.get::<_, String>(3)?),
+                content: row.get(4)?,
+                provider: row.get(5)?,
+                origin_device_id: row.get(6)?,
+                created_at: row.get(7)?,
                 attachments: Vec::new(),
             })
         })?;
@@ -715,7 +749,7 @@ impl ConversationStore {
         source: &str,
     ) -> Result<(), StoreError> {
         self.remember_for_owner(owner_id, device_id, content, source)?;
-        self.connection()?.execute("UPDATE memories SET conversation_id=?1 WHERE owner_id=?2 AND device_id=?3 AND normalized_content=?4", params![conversation_id, owner_id, device_id, normalize(content)])?;
+        self.connection()?.execute("UPDATE memories SET conversation_id=?1,area_id=(SELECT area_id FROM conversations WHERE conversation_id=?1 AND owner_id=?2) WHERE owner_id=?2 AND device_id=?3 AND normalized_content=?4", params![conversation_id, owner_id, device_id, normalize(content)])?;
         Ok(())
     }
 
@@ -841,22 +875,31 @@ impl ConversationStore {
         limit: usize,
     ) -> Result<Vec<Memory>, StoreError> {
         let connection = self.connection()?;
-        let mut statement = connection.prepare("SELECT memory_id, content, source, created_at, updated_at, category, status, confidence, provenance, supersedes_memory_id FROM memories WHERE owner_id=?1 AND conversation_id=?2 AND status='active' ORDER BY updated_at DESC LIMIT ?3")?;
-        let rows =
-            statement.query_map(params![owner_id, conversation_id, limit as i64], |row| {
-                Ok(Memory {
-                    id: row.get(0)?,
-                    content: row.get(1)?,
-                    source: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    category: row.get(5)?,
-                    status: row.get(6)?,
-                    confidence: row.get(7)?,
-                    provenance: row.get(8)?,
-                    supersedes_memory_id: row.get(9)?,
-                })
-            })?;
+        let area_id: Option<String> = connection
+            .query_row(
+                "SELECT area_id FROM conversations WHERE owner_id=?1 AND conversation_id=?2",
+                params![owner_id, conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(area_id) = area_id else {
+            return Ok(Vec::new());
+        };
+        let mut statement = connection.prepare("SELECT memory_id, content, source, created_at, updated_at, category, status, confidence, provenance, supersedes_memory_id FROM memories WHERE owner_id=?1 AND area_id=?2 AND status='active' ORDER BY updated_at DESC LIMIT ?3")?;
+        let rows = statement.query_map(params![owner_id, area_id, limit as i64], |row| {
+            Ok(Memory {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                source: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                category: row.get(5)?,
+                status: row.get(6)?,
+                confidence: row.get(7)?,
+                provenance: row.get(8)?,
+                supersedes_memory_id: row.get(9)?,
+            })
+        })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
@@ -868,8 +911,18 @@ impl ConversationStore {
         recent_limit: usize,
         memory_limit: usize,
     ) -> Result<ConversationContext, StoreError> {
+        let area_id = self
+            .connection()?
+            .query_row(
+                "SELECT area_id FROM conversations WHERE conversation_id=?1 AND device_id=?2",
+                params![conversation_id, device_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| GENERAL_TALK_AREA_ID.to_owned());
         Ok(ConversationContext {
             conversation_id: conversation_id.to_owned(),
+            area_id,
             summary: self.summary(conversation_id)?.map(|value| value.0),
             memories: self.memories(device_id, memory_limit)?,
             document_context: self.relevant_document_context(device_id, query, 6, 8_000)?,
@@ -896,8 +949,14 @@ impl ConversationStore {
                     .to_owned(),
             ));
         }
+        let area_id: String = self.connection()?.query_row(
+            "SELECT area_id FROM conversations WHERE owner_id=?1 AND conversation_id=?2",
+            params![owner_id, conversation_id],
+            |row| row.get(0),
+        )?;
         Ok(ConversationContext {
             conversation_id: conversation_id.to_owned(),
+            area_id,
             summary: self
                 .summary_for_owner(owner_id, conversation_id)?
                 .map(|value| value.0),
